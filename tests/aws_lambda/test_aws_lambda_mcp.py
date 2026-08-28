@@ -96,6 +96,7 @@ class FakeMCPToolset(MCPToolset[object]):
         return {self._tool_name: self.tool_for_tool_def(tool_def, ctx=ctx)}
 
     async def get_instructions(self, ctx: RunContext[object]) -> InstructionPart | None:
+        await self._require_session()
         if not self.include_instructions or self._instructions_text is None:
             return None
         return InstructionPart(content=self._instructions_text)
@@ -113,6 +114,18 @@ def add_then_done() -> FunctionModel:
         answered = any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts)
         if not answered:
             return ModelResponse(parts=[ToolCallPart(tool_name='add', args={'a': 2, 'b': 3})])
+        return ModelResponse(parts=[TextPart(content='summed')])
+
+    return FunctionModel(fn, model_name='fn')
+
+
+def add_then_add2_then_done() -> FunctionModel:
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        answers = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
+        if not answers:
+            return ModelResponse(parts=[ToolCallPart(tool_name='add', args={'a': 2, 'b': 3})])
+        if len(answers) == 1:
+            return ModelResponse(parts=[ToolCallPart(tool_name='add2', args={'a': 5, 'b': 8})])
         return ModelResponse(parts=[TextPart(content='summed')])
 
     return FunctionModel(fn, model_name='fn')
@@ -199,7 +212,9 @@ class TestMultipleServers:
     def test_two_mcp_servers_are_listed_and_called(self) -> None:
         first = FakeMCPToolset(id='s1', instructions='One.')
         second = FakeMCPToolset(id='s2', instructions='Two.', tool_name='add2')
-        agent = Agent(add_then_done(), name='calc', toolsets=[first, second], capabilities=[AWSLambdaDurability()])
+        agent = Agent(
+            add_then_add2_then_done(), name='calc', toolsets=[first, second], capabilities=[AWSLambdaDurability()]
+        )
         ctx = FakeDurableContext()
 
         result = run_durable(lambda: agent.run('add 2 and 3'), context=ctx)
@@ -207,6 +222,8 @@ class TestMultipleServers:
         assert result.output == 'summed'
         assert 'calc__mcp_server__s1.get_tools' in ctx.step_names
         assert 'calc__mcp_server__s2.get_tools' in ctx.step_names
+        assert first.tool_calls == [('add', {'a': 2, 'b': 3})]
+        assert second.tool_calls == [('add2', {'a': 5, 'b': 8})]
 
     def test_two_servers_replay_from_checkpoints(self) -> None:
         def build_two() -> tuple[FakeMCPToolset, FakeMCPToolset, Agent[Any, Any]]:

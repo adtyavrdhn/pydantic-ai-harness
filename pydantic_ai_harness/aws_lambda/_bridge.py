@@ -52,6 +52,12 @@ leave the handler room to return. Raise it for a workload with genuinely slow cl
 timing out is handled rather than ignored, so the ceiling is a latency knob, not a correctness one.
 """
 
+_LOOP_START_TIMEOUT_SECONDS = 5.0
+"""How long to wait for a scheduled agent run to start before failing the invocation."""
+
+_RETIRED_LOOP_GRACE_SECONDS = 5.0
+"""Maximum extra time a retired loop gets to finish cancellation cleanup before it is stopped."""
+
 _LOOP_LIVENESS_POLL_SECONDS = 5.0
 """How often the handler thread re-checks that the agent loop is still alive while blocked.
 
@@ -99,6 +105,8 @@ class _AgentLoop:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._close_when_stopped: threading.Event | None = None
 
     def get(self) -> asyncio.AbstractEventLoop:
         """A loop that is confirmed to be running.
@@ -116,29 +124,63 @@ class _AgentLoop:
                 return loop
             loop = asyncio.new_event_loop()
             running = threading.Event()
+            close_when_stopped = threading.Event()
 
             def run(loop: asyncio.AbstractEventLoop = loop) -> None:
                 asyncio.set_event_loop(loop)
                 loop.call_soon(running.set)
-                loop.run_forever()
+                try:
+                    loop.run_forever()
+                finally:
+                    if close_when_stopped.is_set():
+                        loop.close()
 
-            threading.Thread(target=run, daemon=True, name='pydantic-ai-lambda-agent').start()
+            thread = threading.Thread(target=run, daemon=True, name='pydantic-ai-lambda-agent')
+            thread.start()
             running.wait()
             self._loop = loop
+            self._thread = thread
+            self._close_when_stopped = close_when_stopped
             return loop
 
-    def retire(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Stop handing `loop` to later invocations.
+    def retire(self, loop: asyncio.AbstractEventLoop, task: asyncio.Task[Any] | None) -> None:
+        """Stop handing `loop` to later invocations, then stop and close it.
 
-        Called when an abandoned run outlives the cancellation wait. The loop is deliberately left
-        running: the run is still unwinding on it, and stopping it out from under a `finally` or
-        `__aexit__` would strand whatever that cleanup holds. Dropping the reference means the next
-        invocation builds a fresh loop with its own loop-bound resources, so the leftover cleanup
-        cannot reach into the execution that follows it -- which is the whole reason for the wait.
+        The retired loop gets a bounded grace period for the abandoned task's cleanup. It stops as
+        soon as cleanup finishes, or at the grace deadline if cleanup refuses to finish. The loop's
+        own thread closes it after `run_forever()` exits.
         """
         with self._lock:
-            if self._loop is loop:
-                self._loop = None
+            if self._loop is not loop:
+                return
+            thread = self._thread
+            close_when_stopped = self._close_when_stopped
+            self._loop = None
+            self._thread = None
+            self._close_when_stopped = None
+
+        assert close_when_stopped is not None  # pragma: no cover - set alongside every published loop
+        close_when_stopped.set()
+
+        def stop_after_cleanup(finished: asyncio.Task[object]) -> None:
+            del finished
+            loop.stop()
+
+        def arrange_shutdown() -> None:
+            if task is None:
+                for pending in asyncio.all_tasks(loop):
+                    pending.cancel()
+                loop.call_soon(loop.stop)
+            else:
+                task.add_done_callback(stop_after_cleanup)
+                loop.call_later(_RETIRED_LOOP_GRACE_SECONDS, loop.stop)
+
+        try:
+            loop.call_soon_threadsafe(arrange_shutdown)
+        except RuntimeError:
+            pass
+        if thread is not None:
+            thread.join(timeout=0.1)
 
 
 _agent_loop = _AgentLoop()
@@ -396,6 +438,12 @@ def run_durable(
 
     try:
         loop.call_soon_threadsafe(schedule_run)
+        if not started.wait(timeout=_LOOP_START_TIMEOUT_SECONDS):
+            _agent_loop.retire(loop, None)
+            raise AgentLoopGone(
+                f'The {ENGINE_NAME} agent event loop did not start the scheduled run within '
+                f'{_LOOP_START_TIMEOUT_SECONDS:g} seconds.'
+            )
         return bridge.consume()
     finally:
         # The loop outlives the invocation, so a run abandoned by a suspension or an error escaping
@@ -403,7 +451,6 @@ def run_durable(
         # finish unwinding: an agent coroutine's `finally`/`__aexit__` cleanup runs during
         # cancellation, and letting that overlap the next invocation would touch shared provider
         # resources after the execution it belonged to was abandoned.
-        started.wait()
         _active_bridge.reset(token)
         if tasks:  # pragma: no branch - only empty when scheduling itself failed
             task = tasks[0]
@@ -422,4 +469,4 @@ def run_durable(
                 # it holds the shared loop is the leak this wait exists to prevent, so give the loop
                 # up: the next invocation gets a fresh one instead of inheriting this one's
                 # half-torn-down state.
-                _agent_loop.retire(loop)
+                _agent_loop.retire(loop, task)

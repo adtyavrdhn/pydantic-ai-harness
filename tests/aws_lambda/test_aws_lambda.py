@@ -504,9 +504,11 @@ class TestCoverageOfRemainingPaths:
 def shutdown(loop: asyncio.AbstractEventLoop) -> None:
     """Stop and close a loop a test built, so it does not outlive the test as a leak.
 
-    The bridge deliberately never closes a loop itself -- a retired one may still be unwinding an
-    abandoned run -- so tests that make their own `_AgentLoop` clean up after it here.
+    Retired and stopped bridge loops close themselves on their owning thread. Tests also pass
+    foreign loops that have no owning thread, so this helper closes those directly.
     """
+    if loop.is_closed():
+        return
     if loop.is_running():
         loop.call_soon_threadsafe(loop.stop)
         deadline = time.monotonic() + 5
@@ -518,7 +520,8 @@ def shutdown(loop: asyncio.AbstractEventLoop) -> None:
         for task in outstanding:
             task.cancel()
         loop.run_until_complete(asyncio.gather(*outstanding, return_exceptions=True))
-    loop.close()
+    if not loop.is_closed():
+        loop.close()
 
 
 class TestBridgeFailureModes:
@@ -599,12 +602,40 @@ class TestBridgeFailureModes:
 
         assert result.output == 'done'
 
-    def test_an_unwind_that_outlives_the_cancel_timeout_retires_the_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_a_scheduled_run_that_never_starts_fails_and_closes_its_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setattr(_bridge, '_agent_loop', loops)
+        monkeypatch.setattr(_bridge, '_LOOP_START_TIMEOUT_SECONDS', 0.05)
+        loop = loops.get()
+        loop_thread = loops._thread  # pyright: ignore[reportPrivateUsage]
+        assert loop_thread is not None
+        blocking = threading.Event()
+        blocker_started = threading.Event()
+
+        def block_loop() -> None:
+            blocker_started.set()
+            blocking.wait(timeout=5)
+
+        loop.call_soon_threadsafe(block_loop)
+        assert blocker_started.wait(timeout=5)
+
+        with pytest.raises(_bridge.AgentLoopGone, match='did not start the scheduled run'):
+            run_durable(lambda: build_agent(act).run('go'), context=FakeDurableContext())
+
+        blocking.set()
+        loop_thread.join(timeout=5)
+        assert loop.is_closed()
+        assert not loop_thread.is_alive()
+
+    def test_an_unwind_that_outlives_the_cancel_timeout_closes_the_retired_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The loop is shared across warm invocations, so a run abandoned by a suspension is
         cancelled before the handler returns. When that unwind does not finish in time, the loop is
         given up rather than reused, so the leftover cleanup cannot overlap the next invocation."""
         loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
         monkeypatch.setattr(_bridge, '_agent_loop', loops)
+        monkeypatch.setattr(_bridge, '_RETIRED_LOOP_GRACE_SECONDS', 0.05)
 
         class Suspend(BaseException):
             pass
@@ -627,6 +658,8 @@ class TestBridgeFailureModes:
 
         agent = build_agent(act)
         abandoned = loops.get()
+        abandoned_thread = loops._thread  # pyright: ignore[reportPrivateUsage]
+        assert abandoned_thread is not None
 
         try:
             with pytest.raises(Suspend):
@@ -640,8 +673,13 @@ class TestBridgeFailureModes:
         finally:
             holding_cleanup.set()
 
+        deadline = time.monotonic() + 5
+        while not abandoned.is_closed() and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert abandoned.is_closed()
+        assert not abandoned_thread.is_alive()
         shutdown(replacement)
-        shutdown(abandoned)
 
     def test_a_stopped_loop_is_not_handed_to_the_next_invocation(self) -> None:
         """`is_closed()` answers `False` for a stopped-but-open loop, so deciding reuse on that
@@ -667,7 +705,7 @@ class TestBridgeFailureModes:
         live = loops.get()
         foreign = asyncio.new_event_loop()
 
-        loops.retire(foreign)
+        loops.retire(foreign, None)
 
         assert loops.get() is live
         shutdown(foreign)
