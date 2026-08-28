@@ -102,9 +102,9 @@ checkpoint and lines up on replay.
 - The agent's `name` and a toolset's `id` are part of every step name, so they should not be
   changed once the durable agent has been deployed to production: a rename orphans the checkpoints
   of in-flight tasks, which resume under the old names and re-run their steps from the start.
-- A registered model id (a `models=` key) is folded into the model step name, so it must not
-  contain `#`, the character Absurd uses to disambiguate repeated step names. A `#` in a model id
-  is rejected with a `UserError`.
+- A model id, including a `models=` key or an id passed to `run(model=...)`, is folded into the
+  model step name, so it must not contain `#`, the character Absurd uses to disambiguate repeated
+  step names. A `#` in a model id is rejected with a `UserError`.
 - A checkpointed tool's return value is stored in Postgres as JSON, so it must be JSON-serializable.
 - Concurrent runs with the same capability name in one Absurd task context are rejected because
   encounter-order step names would let the runs claim each other's checkpoints. Await one run

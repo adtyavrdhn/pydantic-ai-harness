@@ -29,7 +29,7 @@ from pydantic_ai.agent import EventStreamHandler, ParallelExecutionMode
 from pydantic_ai.capabilities import WrapRunHandler
 from pydantic_ai.durable_exec import JSON_CODEC, BaseDurabilityCapability, DurabilityEngineSpec
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.models import Model
+from pydantic_ai.models import Model, ModelRequestContext
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset
@@ -172,6 +172,12 @@ class AbsurdDurability(BaseDurabilityCapability[AgentDepsT]):
             default_model_id=self.default_model_id,
             config=AbsurdOperationConfig(model={}, event={}, capability={}, tool={}, resolve_tool=resolve_tool_config),
         )
+
+    def _model_id_for_request(self, ctx: RunContext[AgentDepsT], request_context: ModelRequestContext) -> str | None:
+        model_id = super()._model_id_for_request(ctx, request_context)
+        if model_id is not None:
+            _reject_model_id_hash(model_id)
+        return model_id
 
     def get_wrapper_toolset(self, toolset: AbstractToolset[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
         """Register construction-time toolsets added through a decorator after agent binding."""

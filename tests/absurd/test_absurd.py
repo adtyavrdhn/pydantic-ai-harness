@@ -20,7 +20,7 @@ pytest.importorskip('absurd_sdk')
 from absurd_sdk import JsonValue
 from pydantic_ai import Agent
 from pydantic_ai.agent import ParallelExecutionMode
-from pydantic_ai.capabilities import AbstractCapability, durable_operation
+from pydantic_ai.capabilities import AbstractCapability, ResolveModelId, durable_operation
 from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import (
     AgentStreamEvent,
@@ -403,6 +403,18 @@ class TestModelSelection:
     async def test_model_id_with_hash_is_rejected(self) -> None:
         with pytest.raises(UserError, match='contains'):
             AbsurdDurability(models={'cheap#2': FunctionModel(lambda m, i: ModelResponse(parts=[]), model_name='c')})
+
+    async def test_runtime_model_id_with_hash_is_rejected_before_checkpoint(self) -> None:
+        model = _text_model()
+        resolve_model_id = ResolveModelId(lambda ctx, model_id: model if model_id == 'cheap#2' else None)
+        agent = Agent(model, name='runtime', capabilities=[resolve_model_id, AbsurdDurability()])
+
+        ctx = FakeAsyncTaskContext()
+        with absurd_task_context(ctx):
+            with pytest.raises(UserError, match='contains'):
+                await agent.run('hi', model='cheap#2')
+
+        assert ctx.stored == {}
 
     async def test_string_default_model_gets_unsuffixed_step_name(self) -> None:
         agent = Agent('test', name='strdef', capabilities=[AbsurdDurability()])
