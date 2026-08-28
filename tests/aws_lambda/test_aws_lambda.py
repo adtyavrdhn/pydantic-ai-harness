@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import re
 import threading
 import time
@@ -559,6 +560,7 @@ class TestBridgeFailureModes:
         with pytest.raises(Suspend):
             run_durable(lambda: agent.run('go'), context=ctx)
 
+    @pytest.mark.filterwarnings('ignore::pytest.PytestUnraisableExceptionWarning')
     def test_a_dead_agent_loop_fails_the_step_instead_of_blocking_forever(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -584,7 +586,8 @@ class TestBridgeFailureModes:
         with pytest.raises(_bridge.AgentLoopGone, match='agent event loop stopped'):
             run_durable(lambda: agent.run('go'), context=ctx, cancel_timeout=0.05)
 
-        shutdown(dead)
+        assert dead.is_closed()
+        gc.collect()
 
     def test_a_step_that_outlasts_the_liveness_poll_keeps_waiting(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The poll interval is not a deadline. A step that runs longer than it simply keeps
@@ -627,6 +630,7 @@ class TestBridgeFailureModes:
         assert loop.is_closed()
         assert not loop_thread.is_alive()
 
+    @pytest.mark.filterwarnings('ignore::pytest.PytestUnraisableExceptionWarning')
     def test_an_unwind_that_outlives_the_cancel_timeout_closes_the_retired_loop(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -644,42 +648,85 @@ class TestBridgeFailureModes:
             def step(self, func, name=None, config=None):  # type: ignore[no-untyped-def]
                 raise Suspend('retry scheduled')
 
-        holding_cleanup = threading.Event()
         cleanup_reached = threading.Event()
 
         async def run_with_slow_cleanup() -> str:
             try:
                 return await agent.run('go')  # type: ignore[return-value]
             finally:
-                # Cleanup that outlasts the cancel timeout, blocking the loop it runs on -- the
-                # leak into the next warm invocation that retiring the loop is there to prevent.
                 cleanup_reached.set()
-                holding_cleanup.wait(timeout=10)
+                # Refuse cancellation past the retirement deadline. The loop must still stop on
+                # schedule rather than letting this abandoned run outlive the invocation.
+                while True:
+                    try:
+                        await asyncio.sleep(10)
+                    except asyncio.CancelledError:
+                        continue
 
         agent = build_agent(act)
         abandoned = loops.get()
         abandoned_thread = loops._thread  # pyright: ignore[reportPrivateUsage]
         assert abandoned_thread is not None
 
-        try:
-            with pytest.raises(Suspend):
-                run_durable(run_with_slow_cleanup, context=SuspendingContext(), cancel_timeout=0.05)
+        with pytest.raises(Suspend):
+            run_durable(run_with_slow_cleanup, context=SuspendingContext(), cancel_timeout=0.01)
 
-            assert cleanup_reached.is_set()
-            # The handler returned while the abandoned run still holds `abandoned`, so the next
-            # invocation must not be handed that loop.
-            replacement = loops.get()
-            assert replacement is not abandoned
-        finally:
-            holding_cleanup.set()
+        assert cleanup_reached.is_set()
+        # The handler returned while the abandoned run still holds `abandoned`, so the next
+        # invocation must not be handed that loop.
+        replacement = loops.get()
+        assert replacement is not abandoned
 
+        started_waiting = time.monotonic()
         deadline = time.monotonic() + 5
         while not abandoned.is_closed() and time.monotonic() < deadline:
             time.sleep(0.01)
 
         assert abandoned.is_closed()
         assert not abandoned_thread.is_alive()
+        assert time.monotonic() - started_waiting < 0.5
         shutdown(replacement)
+        gc.collect()
+
+    def test_retirement_drains_cleanup_scheduled_when_the_main_task_finishes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setattr(_bridge, '_agent_loop', loops)
+        monkeypatch.setattr(_bridge, '_RETIRED_LOOP_GRACE_SECONDS', 0.5)
+        cleanup_finished = threading.Event()
+
+        class Suspend(BaseException):
+            pass
+
+        class SuspendingContext(FakeDurableContext):
+            def step(self, func, name=None, config=None):  # type: ignore[no-untyped-def]
+                raise Suspend('retry scheduled')
+
+        async def delayed_cleanup() -> None:
+            await asyncio.sleep(0.02)
+            cleanup_finished.set()
+
+        agent = build_agent(act)
+
+        async def abandoned_run() -> str:
+            try:
+                return await agent.run('go')  # type: ignore[return-value]
+            finally:
+                await asyncio.sleep(0.03)
+                asyncio.create_task(delayed_cleanup())
+
+        retired = loops.get()
+        thread = loops._thread  # pyright: ignore[reportPrivateUsage]
+        assert thread is not None
+
+        with pytest.raises(Suspend):
+            run_durable(abandoned_run, context=SuspendingContext(), cancel_timeout=0.01)
+
+        assert cleanup_finished.wait(timeout=5)
+        thread.join(timeout=5)
+        assert retired.is_closed()
+        assert not thread.is_alive()
 
     def test_a_stopped_loop_is_not_handed_to_the_next_invocation(self) -> None:
         """`is_closed()` answers `False` for a stopped-but-open loop, so deciding reuse on that
@@ -699,6 +746,19 @@ class TestBridgeFailureModes:
         assert replacement.is_running()
         shutdown(replacement)
         shutdown(stopped)
+
+    def test_retiring_an_unexpectedly_stopped_loop_finds_it_closed(self) -> None:
+        loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
+        stopped = loops.get()
+        thread = loops._thread  # pyright: ignore[reportPrivateUsage]
+        assert thread is not None
+
+        stopped.call_soon_threadsafe(stopped.stop)
+        thread.join(timeout=5)
+        loops.retire(stopped, None)
+
+        assert stopped.is_closed()
+        assert not thread.is_alive()
 
     def test_retiring_a_loop_that_was_already_replaced_leaves_the_current_one_alone(self) -> None:
         loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]

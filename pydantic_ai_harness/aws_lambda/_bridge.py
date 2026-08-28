@@ -106,7 +106,6 @@ class _AgentLoop:
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
-        self._close_when_stopped: threading.Event | None = None
 
     def get(self) -> asyncio.AbstractEventLoop:
         """A loop that is confirmed to be running.
@@ -124,7 +123,6 @@ class _AgentLoop:
                 return loop
             loop = asyncio.new_event_loop()
             running = threading.Event()
-            close_when_stopped = threading.Event()
 
             def run(loop: asyncio.AbstractEventLoop = loop) -> None:
                 asyncio.set_event_loop(loop)
@@ -132,15 +130,13 @@ class _AgentLoop:
                 try:
                     loop.run_forever()
                 finally:
-                    if close_when_stopped.is_set():
-                        loop.close()
+                    loop.close()
 
             thread = threading.Thread(target=run, daemon=True, name='pydantic-ai-lambda-agent')
             thread.start()
             running.wait()
             self._loop = loop
             self._thread = thread
-            self._close_when_stopped = close_when_stopped
             return loop
 
     def retire(self, loop: asyncio.AbstractEventLoop, task: asyncio.Task[Any] | None) -> None:
@@ -154,26 +150,38 @@ class _AgentLoop:
             if self._loop is not loop:
                 return
             thread = self._thread
-            close_when_stopped = self._close_when_stopped
             self._loop = None
             self._thread = None
-            self._close_when_stopped = None
-
-        assert close_when_stopped is not None  # pragma: no cover - set alongside every published loop
-        close_when_stopped.set()
-
-        def stop_after_cleanup(finished: asyncio.Task[object]) -> None:
-            del finished
-            loop.stop()
 
         def arrange_shutdown() -> None:
-            if task is None:
-                for pending in asyncio.all_tasks(loop):
-                    pending.cancel()
-                loop.call_soon(loop.stop)
-            else:
-                task.add_done_callback(stop_after_cleanup)
-                loop.call_later(_RETIRED_LOOP_GRACE_SECONDS, loop.stop)
+            deadline = loop.time() + _RETIRED_LOOP_GRACE_SECONDS
+            loop.call_at(deadline, loop.stop)
+
+            async def clean_up() -> None:
+                async def wait_within_budget(awaitable: Awaitable[object]) -> None:
+                    future = asyncio.ensure_future(awaitable)
+                    done, _ = await asyncio.wait((future,), timeout=max(0, deadline - loop.time()))
+                    if not done:
+                        future.cancel()
+
+                if task is not None and not task.done():
+                    await wait_within_budget(asyncio.shield(task))
+
+                # Let callbacks queued by the run's finalizers create any follow-up cleanup tasks
+                # before taking the snapshot that will be drained.
+                await asyncio.sleep(0)
+                current = asyncio.current_task()
+                pending = [pending for pending in asyncio.all_tasks(loop) if pending is not current]
+                if task is None:
+                    for pending_task in pending:
+                        pending_task.cancel()
+                if pending:
+                    await wait_within_budget(asyncio.gather(*pending, return_exceptions=True))
+
+                await wait_within_budget(loop.shutdown_asyncgens())
+                loop.stop()
+
+            loop.create_task(clean_up())
 
         try:
             loop.call_soon_threadsafe(arrange_shutdown)
@@ -282,10 +290,15 @@ class StepBridge:
             future: asyncio.Future[T] = loop.create_future()
 
             def reply(succeeded: bool, value: Any) -> None:
-                if succeeded:
-                    loop.call_soon_threadsafe(_set_result_if_pending, future, value)
-                else:
-                    loop.call_soon_threadsafe(_set_exception_if_pending, future, value)
+                try:
+                    if succeeded:
+                        loop.call_soon_threadsafe(_set_result_if_pending, future, value)
+                    else:
+                        loop.call_soon_threadsafe(_set_exception_if_pending, future, value)
+                except RuntimeError:
+                    # A stopped loop is closed by its owning thread. The handler's liveness check
+                    # supplies the actionable AgentLoopGone error when no callback can be delivered.
+                    pass
 
             self._queue.put(
                 _StepRequest(name=name, body=body, config=config, reply=reply, context=contextvars.copy_context())
@@ -463,10 +476,17 @@ def run_durable(
                 task.add_done_callback(lambda _: finished.set())
                 task.cancel()
 
-            loop.call_soon_threadsafe(cancel_and_notify)
-            if not finished.wait(timeout=cancel_timeout):
-                # Cleanup is still running and we are out of budget to wait for it. Returning while
-                # it holds the shared loop is the leak this wait exists to prevent, so give the loop
-                # up: the next invocation gets a fresh one instead of inheriting this one's
-                # half-torn-down state.
+            try:
+                loop.call_soon_threadsafe(cancel_and_notify)
+            except RuntimeError:
+                # The owner closes an unexpectedly stopped loop as soon as run_forever returns.
+                # There is no live loop left on which cancellation cleanup could run.
                 _agent_loop.retire(loop, task)
+            else:
+                cleanup_finished = finished.wait(timeout=cancel_timeout)
+                if not cleanup_finished:
+                    # Cleanup is still running and we are out of budget to wait for it. Returning while
+                    # it holds the shared loop is the leak this wait exists to prevent, so give the loop
+                    # up: the next invocation gets a fresh one instead of inheriting this one's
+                    # half-torn-down state.
+                    _agent_loop.retire(loop, task)
