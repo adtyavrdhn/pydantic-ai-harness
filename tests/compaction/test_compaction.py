@@ -24,6 +24,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     NativeToolCallPart,
     NativeToolReturnPart,
+    RetryFeedbackPart,
     RetryPromptPart,
     SystemPromptPart,
     TextContent,
@@ -2523,8 +2524,6 @@ class TestHelperBranchCoverage:
         the part, so it is outside this equivalence -- a fixed ~10-token undercount, in an
         estimator that counts no tool definitions at all.
         """
-        from pydantic_ai.messages import RetryFeedbackPart
-
         part = RetryFeedbackPart(
             content=[{'type': 'missing', 'loc': ('name',), 'msg': 'Field required', 'input': {}}],
             cause='validation_error',
