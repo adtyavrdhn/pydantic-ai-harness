@@ -19,12 +19,6 @@ from pydantic_ai_harness.channels import (
 )
 
 
-@pytest.fixture
-def anyio_backend() -> str:
-    """Run host tests on asyncio until Pydantic AI's agent lifecycle is backend-neutral."""
-    return 'asyncio'
-
-
 class FakeChannel:
     def __init__(self, messages: Sequence[InboundMessage] = ()) -> None:
         self.inbound = list(messages)
