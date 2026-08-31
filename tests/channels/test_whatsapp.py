@@ -260,8 +260,7 @@ class TestWhatsAppChannel:
                 assert await webhook_status(channel, request) == 200
                 assert (await anext(messages)).text == 'second'
 
-    @pytest.mark.parametrize('anyio_backend', ['asyncio'])
-    async def test_webhook_runs_agent_and_posts_reply(self, anyio_backend: str) -> None:
+    async def test_webhook_runs_agent_and_posts_reply(self) -> None:
         posted = anyio.Event()
         posts: list[dict[str, object]] = []
 
