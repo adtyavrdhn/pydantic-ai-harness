@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection
-from contextlib import aclosing
+from collections.abc import AsyncGenerator, Collection
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Generic
 
@@ -94,9 +94,9 @@ class ChannelHost(Generic[AgentDepsT]):
         turn_slots = anyio.Semaphore(self._max_pending_turns)
         lanes: dict[str, _ConversationLane] = {}
         try:
-            async with self._adapter:
+            async with _open_adapter(self._adapter):
                 async with anyio.create_task_group() as task_group:
-                    async with aclosing(self._adapter.messages()) as inbound:
+                    async with aclosing(self._adapter.messages()) as inbound:  # pragma: no branch
                         async for message in inbound:
                             if message.sender_id not in self._allowed_senders:
                                 logger.warning('Ignoring channel message from sender %s', message.sender_id)
@@ -162,3 +162,19 @@ class ChannelHost(Generic[AgentDepsT]):
             await self._adapter.send_text(conversation_id, text)
         except Exception:
             logger.exception('Channel send failed for conversation %s', conversation_id)
+
+
+@asynccontextmanager
+async def _open_adapter(adapter: ChannelAdapter) -> AsyncGenerator[None, None]:
+    await adapter.__aenter__()
+    try:
+        yield
+    except BaseException as exc:
+        suppress = False
+        with anyio.CancelScope(shield=True):
+            suppress = await adapter.__aexit__(type(exc), exc, exc.__traceback__)
+        if not suppress:
+            raise
+    else:
+        with anyio.CancelScope(shield=True):
+            await adapter.__aexit__(None, None, None)

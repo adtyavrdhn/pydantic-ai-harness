@@ -307,7 +307,9 @@ class TestChannelHost:
                 exc: BaseException | None,
                 traceback: TracebackType | None,
             ) -> bool | None:
-                events.append('adapter')
+                events.append('adapter-start')
+                await anyio.sleep(0)
+                events.append('adapter-end')
                 return await super().__aexit__(exc_type, exc, traceback)
 
             async def messages(self) -> AsyncGenerator[InboundMessage, None]:
@@ -321,11 +323,12 @@ class TestChannelHost:
         host = ChannelHost(Agent('test'), WaitingChannel(), allowed_senders={'user-1'})
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(host.serve)
-            await entered.wait()
+            with anyio.fail_after(1):
+                await entered.wait()
             await checkpoint()
             task_group.cancel_scope.cancel()
 
-        assert events == ['messages', 'adapter']
+        assert events == ['messages', 'adapter-start', 'adapter-end']
 
     async def test_rejects_concurrent_serve_calls(self) -> None:
         entered = anyio.Event()
@@ -344,10 +347,32 @@ class TestChannelHost:
         host = ChannelHost(Agent('test'), WaitingChannel(), allowed_senders={'user-1'})
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(host.serve)
-            await entered.wait()
+            with anyio.fail_after(1):
+                await entered.wait()
             with pytest.raises(RuntimeError, match='already serving'):
                 await host.serve()
             task_group.cancel_scope.cancel()
+
+    async def test_adapter_can_suppress_message_stream_failure(self) -> None:
+        class SuppressingChannel(FakeChannel):
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: TracebackType | None,
+            ) -> bool | None:
+                await super().__aexit__(exc_type, exc, traceback)
+                return exc is not None
+
+            async def messages(self) -> AsyncGenerator[InboundMessage, None]:
+                raise RuntimeError('stream failed')
+                if False:  # pragma: no cover
+                    yield inbound('unreachable')
+
+        channel = SuppressingChannel()
+        await ChannelHost(Agent('test'), channel, allowed_senders={'user-1'}).serve()
+
+        assert channel.entered is False
 
     def test_requires_at_least_one_allowed_sender(self) -> None:
         with pytest.raises(ValueError, match='allowed_senders'):
