@@ -101,9 +101,11 @@ Replace `15551234567` below with the sender's international phone number
 without `+`, matching the webhook `from` value.
 
 ```python
-import asyncio
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
+import anyio
 from pydantic_ai import Agent
 
 from pydantic_ai_harness.channels import ChannelHost, WebhookRequest, WebhookResponse
@@ -119,7 +121,7 @@ whatsapp = WhatsAppChannel(
 whatsapp_host = ChannelHost(agent, whatsapp, allowed_senders={'15551234567'})
 
 
-def receive_whatsapp(
+async def receive_whatsapp(
     method: str,
     headers: dict[str, str],
     query: dict[str, str],
@@ -129,22 +131,26 @@ def receive_whatsapp(
     return whatsapp.handle_webhook(request)
 
 
-def start_whatsapp() -> asyncio.Task[None]:
-    return asyncio.create_task(whatsapp_host.serve())
+@asynccontextmanager
+async def whatsapp_lifespan() -> AsyncIterator[None]:
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(whatsapp_host.serve)
+        yield
+        tasks.cancel_scope.cancel()
 ```
 
-Connect the two functions to your web app:
+Connect the lifespan and route to your web app:
 
-1. Call `start_whatsapp()` when the app starts.
+1. Enter `whatsapp_lifespan()` for the app's lifespan.
 2. Forward both GET and POST webhook requests to `receive_whatsapp()` and
    return its status code and body.
 3. Register that public route and the verification token in Meta, then subscribe
    it to `messages`.
-4. On shutdown, cancel the channel task, then await it while suppressing
-   `asyncio.CancelledError`.
 
-The lifespan and route must use the same process and event loop. The default
-Graph API version is `v26.0`; pass `api_version` for another supported version.
+The task group owns the channel service and waits for its turns during shutdown.
+The lifespan and route must use the same process and async event-loop thread.
+The default Graph API version is `v26.0`; pass `api_version` for another
+supported version.
 
 ## How channels fit Pydantic AI
 

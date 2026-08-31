@@ -18,13 +18,14 @@ before changing verification, deduplication, parsing, or delivery.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import math
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncGenerator, Iterator, Mapping
+from contextlib import aclosing
 from types import TracebackType
 
+import anyio
 import httpx
 from pydantic import TypeAdapter, ValidationError
 from typing_extensions import Self
@@ -125,7 +126,7 @@ class WhatsAppChannel:
         """Close the internally created HTTP client, if any."""
         self._ready = False
         self._inbox.close()
-        # A failed batch can cache IDs for messages discarded with the inbox.
+        # A failed batch can cache IDs for messages left in the old inbox.
         self._seen_messages.clear()
         await self._close_owned_client()
         self._client = None
@@ -137,7 +138,7 @@ class WhatsAppChannel:
         self._owns_client = False
 
     def handle_webhook(self, request: WebhookRequest) -> WebhookResponse:
-        """Verify a webhook request and enqueue its inbound text messages."""
+        """Verify and enqueue messages on the async thread that runs `messages()`."""
         method = request.method.upper()
         if method == 'GET':
             return self._verify_challenge(request.query)
@@ -217,9 +218,11 @@ class WhatsAppChannel:
         metadata = _mapping(value.get('metadata'))
         return metadata is not None and metadata.get('phone_number_id') == self._phone_number_id
 
-    def messages(self) -> AsyncIterator[InboundMessage]:
+    async def messages(self) -> AsyncGenerator[InboundMessage, None]:
         """Yield verified text messages until the channel closes or the task is cancelled."""
-        return self._inbox.messages()
+        async with aclosing(self._inbox.messages()) as messages:
+            async for message in messages:
+                yield message
 
     async def send_text(self, conversation_id: str, text: str) -> None:
         """Send free-form text in ordered chunks within the Cloud API limit."""
@@ -236,7 +239,7 @@ class WhatsAppChannel:
             try:
                 await self._post_message(payload)
             except _Throttled:
-                await asyncio.sleep(self._retry_delay)
+                await anyio.sleep(self._retry_delay)
                 await self._post_message(payload)
 
     async def _post_message(self, payload: Mapping[str, object]) -> None:
