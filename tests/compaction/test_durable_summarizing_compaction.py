@@ -48,52 +48,54 @@ def _history() -> list[ModelMessage]:
     ]
 
 
+_summary_calls = 0
+
+
+async def _respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    del info
+    global _summary_calls
+    if any(
+        isinstance(part, UserPromptPart) and isinstance(part.content, str) and '<messages>' in part.content
+        for message in messages
+        for part in message.parts
+    ):
+        _summary_calls += 1
+        return ModelResponse(parts=[TextPart(f'summary {_summary_calls}')])
+    return ModelResponse(parts=[TextPart('done')])
+
+
+_compaction: SummarizingCompaction[None] = SummarizingCompaction(
+    id='summarizing_compaction', max_messages=1, keep_messages=1, preserve_first_user_message=False
+)
+_agent: Agent[None, str] = Agent(
+    FunctionModel(_respond),
+    name='durable_summary',
+    deps_type=type(None),
+    capabilities=[_compaction, DBOSDurability[None]()],
+)
+
+
+@DBOS.workflow(name='durable_summary')
+async def _workflow() -> tuple[str, int]:
+    result = await _agent.run('continue', message_history=_history())
+    first = result.all_messages()[0]
+    assert isinstance(first, ModelRequest)
+    summary_part = first.parts[-1]
+    assert isinstance(summary_part, SystemPromptPart)
+    return summary_part.content, result.usage.requests
+
+
 @pytest.mark.anyio
 async def test_dbos_replays_the_recorded_summary(dbos: DBOS) -> None:
-    summary_calls = 0
-
-    async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        del info
-        nonlocal summary_calls
-        if any(
-            isinstance(part, UserPromptPart) and isinstance(part.content, str) and '<messages>' in part.content
-            for message in messages
-            for part in message.parts
-        ):
-            summary_calls += 1
-            return ModelResponse(parts=[TextPart(f'summary {summary_calls}')])
-        return ModelResponse(parts=[TextPart('done')])
-
-    compaction: SummarizingCompaction[None] = SummarizingCompaction(
-        id='summarizing_compaction',
-        max_messages=1,
-        keep_messages=1,
-        preserve_first_user_message=False,
-    )
-    agent: Agent[None, str] = Agent(
-        FunctionModel(respond),
-        name='durable_summary',
-        deps_type=type(None),
-        capabilities=[compaction, DBOSDurability[None]()],
-    )
+    global _summary_calls
+    _summary_calls = 0
     workflow_id = str(uuid.uuid4())
 
-    @DBOS.workflow(name=f'durable_summary_{workflow_id}')
-    async def workflow() -> tuple[str, int]:
-        result = await agent.run('continue', message_history=_history())
-        first = result.all_messages()[0]
-        assert isinstance(first, ModelRequest)
-        summary_part = first.parts[-1]
-        assert isinstance(summary_part, SystemPromptPart)
-        return summary_part.content, result.usage.requests
-
     with SetWorkflowID(workflow_id):
-        assert await workflow() == ('Summary of previous conversation:\n\nsummary 1', 2)
+        assert await _workflow() == ('Summary of previous conversation:\n\nsummary 1', 2)
     with SetWorkflowID(workflow_id):
-        assert await workflow() == ('Summary of previous conversation:\n\nsummary 1', 2)
+        assert await _workflow() == ('Summary of previous conversation:\n\nsummary 1', 2)
 
-    assert summary_calls == 1
+    assert _summary_calls == 1
     steps = await dbos.list_workflow_steps_async(workflow_id)
-    assert {step['function_name'] for step in steps} >= {
-        'durable_summary__capability__summarizing_compaction.summarize'
-    }
+    assert 'durable_summary__capability__summarizing_compaction.summarize' in {step['function_name'] for step in steps}

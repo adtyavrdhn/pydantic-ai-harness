@@ -33,6 +33,7 @@ dependencies = [
     # 2.33.0 is the release whose Anthropic provider is built on HTTPX2 and raises its own
     # `anthropic` floor to 1.0.0 to match. Below it, slim hands the SDK a client of the other
     # kind, and the pair only type-checks when both halves come from the same generation.
+    # 2.36.0 adds contributed durable capability operations used by summarizing compaction.
     # Earlier floors are subsumed by it: the compaction estimator and the conversation-search
     # indexer have to recognise `ToolAvailabilityDeltaPart` (2.23.0), the one `ModelRequestPart`
     # carrying no `content`, so code walking request parts raises `AttributeError` rather than
