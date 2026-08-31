@@ -39,9 +39,9 @@ from pydantic_ai.sandboxes import Sandbox
 
 from pydantic_ai_harness.e2b_sandbox import (
     E2BSandboxBackend,
-    E2BSandboxCommandTimeoutError,
     E2BSandboxUnavailableError,
 )
+from pydantic_ai_harness.e2b_sandbox._backend import E2BSandboxCommandTimeoutError
 
 _live_enabled = os.getenv('PYDANTIC_AI_HARNESS_E2B_LIVE') == '1'
 

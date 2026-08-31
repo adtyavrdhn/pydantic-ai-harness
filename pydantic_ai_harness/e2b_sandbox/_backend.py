@@ -2,8 +2,8 @@
 
 This is the mechanism layer: every E2B-specific operation (create, connect, command execution,
 file access, working-directory discovery, teardown) lives here, behind the protocol the rest of
-Pydantic AI already speaks. The capability in `_capability.py` owns the lifecycle and the
-toolset in `_toolset.py` only ever sees `ctx.sandbox`.
+Pydantic AI already speaks. The capability in `_capability.py` owns the lifecycle; tools and
+other capabilities consume the resulting `ctx.sandbox`.
 
 External assumptions last verified 2026-08-17 against E2B Python SDK 2.39.1:
 
@@ -92,21 +92,11 @@ _SDK_STREAM_UNBOUNDED = 0
 
 
 class E2BSandboxError(RuntimeError):
-    """Base class for failures reported by the E2B sandbox integration.
-
-    The toolset turns direct instances into `ModelRetry`. Terminal subclasses propagate
-    because retrying cannot restore a missing sandbox or credentials.
-    """
+    """Base class for failures reported by the E2B sandbox integration."""
 
 
 class E2BSandboxTerminalError(E2BSandboxError):
-    """A sandbox failure that retrying cannot fix, so the run should end, not loop.
-
-    The toolset lets this propagate out of the tool (ending the run) instead of turning it
-    into a `ModelRetry`: re-issuing the command would hit the same wall. Raised as
-    `E2BSandboxUnavailableError` for a sandbox that no longer exists and
-    `E2BSandboxAuthError` for rejected credentials.
-    """
+    """A sandbox failure that retrying the same operation cannot fix."""
 
 
 class E2BSandboxUnavailableError(E2BSandboxTerminalError):
@@ -484,6 +474,63 @@ class E2BSandboxBackend:
         return backend
 
     @classmethod
+    async def _create_or_connect(
+        cls,
+        *,
+        identity: Mapping[str, str],
+        template: str | None = None,
+        sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
+        working_dir: str | None = None,
+        env: Mapping[str, str] | None = None,
+        metadata: Mapping[str, str] | None = None,
+        allow_internet_access: bool = True,
+    ) -> Self:
+        """Reconnect by metadata or create an owned sandbox once.
+
+        E2B does not enforce metadata uniqueness. After creation, query again and
+        keep the oldest matching sandbox, killing this attempt if a concurrent
+        creator won the race.
+        """
+        existing = await cls._find(identity, working_dir=working_dir)
+        if existing is not None:
+            return existing
+        created = await cls.create(
+            template=template,
+            sandbox_timeout=sandbox_timeout,
+            working_dir=working_dir,
+            env=env,
+            metadata=metadata,
+            allow_internet_access=allow_internet_access,
+        )
+        canonical = await cls._find(identity, working_dir=working_dir)
+        if canonical is None or canonical.sandbox_id == created.sandbox_id:
+            return created
+        await created.close(terminate=True)
+        return canonical
+
+    @classmethod
+    async def _find(cls, metadata: Mapping[str, str], *, working_dir: str | None = None) -> Self | None:
+        """Connect to the oldest running or paused sandbox matching metadata."""
+        try:
+            import e2b
+        except ImportError as error:
+            raise E2BSandboxError(_MISSING_E2B) from error
+        try:
+            paginator = e2b.AsyncSandbox.list(
+                query=e2b.SandboxQuery(metadata=dict(metadata)),
+                limit=1,
+                order='asc',
+            )
+            matches = await paginator.next_items()
+        except e2b.AuthenticationException as error:
+            raise E2BSandboxAuthError(_AUTH_MESSAGE) from error
+        except Exception as error:
+            raise E2BSandboxError(f'Could not list E2B sandboxes: {type(error).__name__}: {error}') from error
+        if not matches:
+            return None
+        return await cls.connect(matches[0].sandbox_id, working_dir=working_dir)
+
+    @classmethod
     async def connect(cls, sandbox_id: str, *, timeout: int | None = None, working_dir: str | None = None) -> Self:
         """Attach to an E2B sandbox that already exists, without taking over its lifecycle.
 
@@ -523,19 +570,27 @@ class E2BSandboxBackend:
             return
         import e2b
 
+        error: E2BSandboxError | None = None
         with anyio.CancelScope(shield=True):
-            with anyio.move_on_after(_TEARDOWN_TIMEOUT):
+            with anyio.move_on_after(_TEARDOWN_TIMEOUT) as scope:
                 try:
                     await self.sandbox.kill()
                 except e2b.SandboxNotFoundException:
                     # A sandbox that already self-terminated (e.g. at its `sandbox_timeout`)
                     # needs no cleanup.
                     pass
-                except Exception:
-                    # Killing is best-effort: a failure must not replace the exception
-                    # unwinding through the caller, and the server-side `sandbox_timeout`
-                    # reaps the sandbox regardless.
-                    pass
+                except e2b.AuthenticationException:
+                    error = E2BSandboxAuthError(_AUTH_MESSAGE)
+                except Exception as caught:
+                    error = E2BSandboxError(
+                        f'Could not kill E2B sandbox {self.sandbox_id!r}: {type(caught).__name__}: {caught}'
+                    )
+            if scope.cancel_called:
+                error = E2BSandboxError(
+                    f'Timed out after {_TEARDOWN_TIMEOUT}s while trying to kill E2B sandbox {self.sandbox_id!r}.'
+                )
+        if error is not None:
+            raise error
 
     @functools.cached_property
     def _working_dir_lock(self) -> anyio.Lock:

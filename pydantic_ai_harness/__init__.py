@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     )
     from .conversation_search import ConversationSearch
     from .dynamic_workflow import DynamicWorkflow
+    from .e2b_sandbox import E2BSandbox
     from .exa import ExaAgent, ExaSearch
     from .filesystem import READ_ONLY_TOOL_NAMES, FileSystem
     from .guardrails import (
@@ -70,6 +71,7 @@ __all__ = [
     'DEFAULT_RESEARCHER_INSTRUCTIONS',
     'DeduplicateFileReads',
     'DynamicWorkflow',
+    'E2BSandbox',
     'ExaAgent',
     'ExaSearch',
     'FallbackCompaction',
@@ -126,6 +128,7 @@ _CAPABILITY_EXPORTS = {
     'ConversationSearch': 'conversation_search',
     'DeduplicateFileReads': 'compaction',
     'DynamicWorkflow': 'dynamic_workflow',
+    'E2BSandbox': 'e2b_sandbox',
     'ExaAgent': 'exa',
     'ExaSearch': 'exa',
     'FallbackCompaction': 'compaction',

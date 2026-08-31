@@ -299,9 +299,10 @@ class FakeFilesystem:
 class FakeSandbox:
     """Mirrors `e2b.AsyncSandbox` for the members the backend uses."""
 
-    def __init__(self, control: FakeE2B, sandbox_id: str) -> None:
+    def __init__(self, control: FakeE2B, sandbox_id: str, metadata: dict[str, str] | None = None) -> None:
         self._control = control
         self.sandbox_id = sandbox_id
+        self.metadata = metadata or {}
         self.files = FakeFilesystem(control)
         self.commands = FakeCommands(self, control)
         self.killed = False
@@ -346,7 +347,7 @@ class FakeAsyncSandboxFactory:
         await anyio.lowlevel.checkpoint()
         if self._control.create_error is not None:
             raise self._control.create_error
-        return self._control.new_sandbox(f'sbx-{len(self._control.sandboxes) + 1}')
+        return self._control.new_sandbox(f'sbx-{len(self._control.sandboxes) + 1}', metadata)
 
     async def connect(self, sandbox_id: str, timeout: int | None = None) -> FakeSandbox:
         self._control.connect_calls.append((sandbox_id, timeout))
@@ -354,6 +355,40 @@ class FakeAsyncSandboxFactory:
         if self._control.connect_error is not None:
             raise self._control.connect_error
         return self._control.new_sandbox(sandbox_id)
+
+    def list(
+        self,
+        query: FakeSandboxQuery | None = None,
+        limit: int | None = None,
+        next_token: str | None = None,
+        order: str | None = None,
+    ) -> FakeSandboxPaginator:
+        del next_token
+        metadata = query.metadata if query is not None else None
+        self._control.list_calls.append((metadata, limit, order))
+        matches = [
+            sandbox
+            for sandbox in self._control.sandboxes
+            if not sandbox.killed
+            and (metadata is None or all(sandbox.metadata.get(key) == value for key, value in metadata.items()))
+        ]
+        if order == 'desc':
+            matches.reverse()
+        return FakeSandboxPaginator(matches[:limit] if limit is not None else matches)
+
+
+@dataclass
+class FakeSandboxQuery:
+    metadata: dict[str, str] | None = None
+
+
+class FakeSandboxPaginator:
+    def __init__(self, sandboxes: list[FakeSandbox]) -> None:
+        self._sandboxes = sandboxes
+
+    async def next_items(self) -> list[FakeSandbox]:
+        await anyio.lowlevel.checkpoint()
+        return self._sandboxes
 
 
 @dataclass
@@ -364,6 +399,9 @@ class FakeE2B:
     sandboxes: list[FakeSandbox] = field(default_factory=list[FakeSandbox])
     create_calls: list[FakeCreateCall] = field(default_factory=list[FakeCreateCall])
     connect_calls: list[tuple[str, int | None]] = field(default_factory=list[tuple[str, 'int | None']])
+    list_calls: list[tuple[dict[str, str] | None, int | None, str | None]] = field(
+        default_factory=list[tuple[dict[str, str] | None, int | None, str | None]]
+    )
     create_error: Exception | None = None
     create_hangs: bool = False
     connect_error: Exception | None = None
@@ -381,8 +419,8 @@ class FakeE2B:
     def __post_init__(self) -> None:
         self.module = self._build_module()
 
-    def new_sandbox(self, sandbox_id: str) -> FakeSandbox:
-        sandbox = FakeSandbox(self, sandbox_id)
+    def new_sandbox(self, sandbox_id: str, metadata: dict[str, str] | None = None) -> FakeSandbox:
+        sandbox = FakeSandbox(self, sandbox_id, metadata)
         self.sandboxes.append(sandbox)
         return sandbox
 
@@ -407,6 +445,7 @@ class FakeE2B:
     def _build_module(self) -> types.ModuleType:
         module = types.ModuleType('e2b')
         module.AsyncSandbox = FakeAsyncSandboxFactory(self)  # type: ignore[attr-defined]
+        module.SandboxQuery = FakeSandboxQuery  # type: ignore[attr-defined]
         # The real classes, so the backend's `isinstance` checks and its unwrapping of a
         # non-zero exit run against exactly what production raises.
         module.AuthenticationException = AuthenticationException  # type: ignore[attr-defined]

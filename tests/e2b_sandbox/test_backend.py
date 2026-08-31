@@ -11,11 +11,10 @@ from pydantic_ai.sandboxes import Sandbox, SandboxBackend, SupportsFilesystem, S
 
 from pydantic_ai_harness.e2b_sandbox import (
     E2BSandboxBackend,
-    E2BSandboxCommandTimeoutError,
     E2BSandboxError,
-    E2BSandboxTerminalError,
     E2BSandboxUnavailableError,
 )
+from pydantic_ai_harness.e2b_sandbox._backend import E2BSandboxCommandTimeoutError, E2BSandboxTerminalError
 
 from .fake_e2b import FakeE2B
 
@@ -158,12 +157,11 @@ class TestClose:
         await backend.close(terminate=False)
         assert fake_e2b.sandboxes[0].killed is False
 
-    async def test_kill_failure_does_not_raise(self, fake_e2b: FakeE2B) -> None:
-        # Teardown is best-effort: a failure must not replace the exception unwinding through
-        # the caller, and `sandbox_timeout` reaps the sandbox regardless.
+    async def test_kill_failure_is_visible(self, fake_e2b: FakeE2B) -> None:
         backend = await E2BSandboxBackend.create()
         fake_e2b.kill_error = RuntimeError('kill boom')
-        await backend.close(terminate=True)
+        with pytest.raises(E2BSandboxError, match='kill boom'):
+            await backend.close(terminate=True)
 
     async def test_already_gone_sandbox_is_not_an_error(self, fake_e2b: FakeE2B) -> None:
         # An owned run that outlived its `sandbox_timeout` self-terminates; the teardown kill
@@ -179,7 +177,8 @@ class TestClose:
         backend = await E2BSandboxBackend.create()
         fake_e2b.kill_hangs = True
         with anyio.fail_after(5):
-            await backend.close(terminate=True)
+            with pytest.raises(E2BSandboxError, match='Timed out'):
+                await backend.close(terminate=True)
 
 
 class TestRun:
