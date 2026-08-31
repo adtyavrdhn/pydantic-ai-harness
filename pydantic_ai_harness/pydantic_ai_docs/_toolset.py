@@ -87,7 +87,7 @@ class PydanticAIDocsToolset(FunctionToolset[AgentDepsT]):
         path = await sandbox.resolve(sandbox_path(local_path, sandbox=sandbox, original=original))
         try:
             return await sandbox.read_text(path)
-        except (FileNotFoundError, IsADirectoryError):
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
             return None
 
     async def _fetch_remote(self, topic: PydanticAIDocsTopic) -> str:

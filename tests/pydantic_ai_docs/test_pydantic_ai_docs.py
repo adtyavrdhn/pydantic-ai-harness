@@ -139,6 +139,18 @@ class TestPydanticAIDocsToolset:
         )
         assert cache[PydanticAIDocsTopic.agent] == '# Agent remote'
 
+    async def test_remote_fallback_when_local_parent_is_not_a_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sandbox: Sandbox
+    ) -> None:
+        _install_fake_httpx(monkeypatch, text='# Agent remote')
+        local_parent = tmp_path / 'not-a-directory'
+        local_parent.write_text('file', encoding='utf-8')
+        toolset = PydanticAIDocsToolset[object](local_docs_path=local_parent, cache=None)
+
+        result = await _call_docs_tool(toolset, sandbox, 'read_pyai_docs', topic=PydanticAIDocsTopic.agent)
+
+        assert result == '# Agent remote'
+
     async def test_remote_error_without_local_checkout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_fake_httpx(monkeypatch, error=httpx.ConnectError('boom'))
         toolset = PydanticAIDocsToolset[object](local_docs_path=None, cache=None)

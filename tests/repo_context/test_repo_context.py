@@ -123,10 +123,11 @@ class TestDiscoverInstructionFiles:
         files = await discover_instruction_files(sandbox, tmp_path, None, ('CLAUDE.md',))
         assert files == []
 
-    async def test_file_disappearing_before_stat_does_not_block_capability_setup(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize('error', [FileNotFoundError(), NotADirectoryError()])
+    async def test_unreadable_model_path_does_not_block_capability_setup(self, tmp_path: Path, error: OSError) -> None:
         sandbox = MagicMock(spec=Sandbox)
         sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
-        sandbox.fs.stat = AsyncMock(side_effect=FileNotFoundError)
+        sandbox.fs.stat = AsyncMock(side_effect=error)
         cap = RepoContext[object](workspace_dir=tmp_path, expose_inventory_tool=False)
         ctx = _run_context(sandbox=sandbox)
 
@@ -224,6 +225,27 @@ class TestInstructions:
         second = _render_capability_instructions(cap, ctx)
         # Read-once: `before_run` loaded the file, so subsequent edits are not picked up.
         assert second is not None and 'second' not in second
+
+    @pytest.mark.skipif(sys.platform == 'win32', reason='host fallback is POSIX-only')
+    async def test_framework_default_sandbox_preserves_host_fallback(self, tmp_path: Path) -> None:
+        _write(tmp_path / 'CLAUDE.md', 'host instructions')
+        captured: list[list[ModelMessage]] = []
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            del info
+            captured.append(messages)
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent = Agent(
+            FunctionModel(model),
+            capabilities=[RepoContext[object](workspace_dir=tmp_path, expose_inventory_tool=False)],
+        )
+
+        await agent.run('go')
+
+        request = captured[0][0]
+        assert isinstance(request, ModelRequest)
+        assert 'host instructions' in (request.instructions or '')
 
 
 class TestToolset:
@@ -438,10 +460,11 @@ class TestNestedTraversal:
         )
         assert 'CLAUDE.md' in out
 
-    async def test_path_disappearing_before_stat_leaves_result_unchanged(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize('error', [FileNotFoundError(), NotADirectoryError()])
+    async def test_unreadable_tool_path_leaves_result_unchanged(self, tmp_path: Path, error: OSError) -> None:
         sandbox = MagicMock(spec=Sandbox)
         sandbox.resolve = AsyncMock(side_effect=(tmp_path.as_posix(), (tmp_path / 'gone').as_posix()))
-        sandbox.fs.stat = AsyncMock(side_effect=FileNotFoundError)
+        sandbox.fs.stat = AsyncMock(side_effect=error)
         cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
         call, tool_def, args = _call('list_directory', path='gone')
 

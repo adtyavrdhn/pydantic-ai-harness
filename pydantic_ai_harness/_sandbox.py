@@ -21,6 +21,15 @@ _FRAMEWORK_UNAVAILABLE_REASONS = (
 )
 
 
+def is_framework_unavailable(sandbox: Sandbox) -> bool:
+    """Whether `sandbox` is Pydantic AI's implicit no-sandbox placeholder."""
+    try:
+        backend = sandbox.backend
+    except UserError:  # pragma: no cover - deferred provider facades connect on first async operation
+        return False
+    return isinstance(backend, UnavailableSandbox) and backend.reason in _FRAMEWORK_UNAVAILABLE_REASONS
+
+
 def sandbox_or_local(sandbox: Sandbox, *, preserve_host_behavior: bool) -> Sandbox:
     """Use an explicit local fallback only for Pydantic AI's implicit unavailable sandbox.
 
@@ -28,20 +37,7 @@ def sandbox_or_local(sandbox: Sandbox, *, preserve_host_behavior: bool) -> Sandb
     configured error must survive. The fallback is POSIX-only because
     `LocalSandbox` deliberately cannot promise process-tree cancellation on Windows.
     """
-    try:
-        backend = sandbox.backend
-    except UserError:  # pragma: no cover - deferred provider facades connect on first async operation
-        # A ref or provider-backed facade has not connected yet. Its first async
-        # operation performs that connection, so it must remain unchanged.
-        return sandbox
-    if (
-        preserve_host_behavior
-        and os.name == 'posix'
-        and isinstance(backend, UnavailableSandbox)
-        # Match the full framework reasons. Prefix matching could reinterpret an
-        # application-supplied unavailable policy as permission to access the host.
-        and backend.reason in _FRAMEWORK_UNAVAILABLE_REASONS
-    ):
+    if preserve_host_behavior and os.name == 'posix' and is_framework_unavailable(sandbox):
         return Sandbox.wrap(LocalSandbox(root=Path.cwd()))
     return sandbox
 

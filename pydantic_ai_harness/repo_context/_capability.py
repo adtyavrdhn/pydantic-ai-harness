@@ -206,7 +206,7 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         candidate = Path(text)
         try:
             entry = await sandbox.fs.stat(text)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             return candidate
         return candidate.parent if not entry.is_dir else candidate
 

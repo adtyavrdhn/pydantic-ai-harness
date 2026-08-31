@@ -23,7 +23,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.sandboxes import LocalSandbox
+from pydantic_ai.sandboxes import LocalSandbox, SandboxBackend, SandboxRef, UnavailableSandbox
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import UsageLimits
@@ -45,6 +45,19 @@ class _RecordingCapability(AbstractCapability[AgentDepsT]):
             return ''
 
         return _instructions
+
+
+@dataclass
+class _SandboxProvider(AbstractCapability[object]):
+    root: Path
+
+    async def acquire_sandbox(self, ctx: RunContext[object]) -> SandboxRef:
+        return SandboxRef(provider='local-test', sandbox_id=ctx.run_id or 'sub-agent')
+
+    async def get_sandbox(self, ctx: RunContext[object], ref: SandboxRef | None) -> SandboxBackend | None:
+        if ref is None or ref.provider != 'local-test':
+            return None
+        return LocalSandbox(root=self.root)
 
 
 pytestmark = pytest.mark.anyio
@@ -237,6 +250,39 @@ class TestDelegation:
         result = await parent.run('go', sandbox=LocalSandbox(root=tmp_path))
 
         assert str(tmp_path) in _delegate_returns(result)[0]
+
+    async def test_unavailable_parent_sandbox_allows_subagent_acquisition(self, tmp_path: Path) -> None:
+        worker: Agent[object, str] = Agent(
+            TestModel(call_tools=['sandbox_working_dir']),
+            name='worker',
+            capabilities=[_SandboxProvider(tmp_path)],
+        )
+
+        @worker.tool
+        async def sandbox_working_dir(ctx: RunContext[object]) -> str:
+            return await ctx.sandbox.working_dir()
+
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('worker'), capabilities=[SubAgents(agents=[SubAgent(worker)])]
+        )
+
+        result = await parent.run('go')
+
+        assert str(tmp_path) in _delegate_returns(result)[0]
+
+    async def test_explicit_unavailable_parent_sandbox_remains_fail_closed(self) -> None:
+        worker: Agent[object, str] = Agent(TestModel(call_tools=['sandbox_working_dir']), name='worker')
+
+        @worker.tool
+        async def sandbox_working_dir(ctx: RunContext[object]) -> str:
+            return await ctx.sandbox.working_dir()
+
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('worker'), capabilities=[SubAgents(agents=[SubAgent(worker)])]
+        )
+
+        with pytest.raises(UserError, match='sandbox disabled by policy'):
+            await parent.run('go', sandbox=UnavailableSandbox('sandbox disabled by policy'))
 
     async def test_delegates_via_name_override(self) -> None:
         worker = Agent(TestModel(custom_output_text='WORKER RESULT'), name='internal')

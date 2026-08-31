@@ -50,7 +50,7 @@ async def _sandbox_is_file(sandbox: Sandbox, path: Path) -> bool:
     text = str(path)
     try:
         entry = await sandbox.fs.stat(text)
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
         return False
     return not entry.is_dir
 
