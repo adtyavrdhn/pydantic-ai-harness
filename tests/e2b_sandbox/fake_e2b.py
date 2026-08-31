@@ -20,6 +20,7 @@ import posixpath
 import types
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Literal, Protocol
 
 import anyio
@@ -300,10 +301,18 @@ class FakeFilesystem:
 class FakeSandbox:
     """Mirrors `e2b.AsyncSandbox` for the members the backend uses."""
 
-    def __init__(self, control: FakeE2B, sandbox_id: str, metadata: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        control: FakeE2B,
+        sandbox_id: str,
+        metadata: dict[str, str] | None = None,
+        *,
+        started_at: datetime,
+    ) -> None:
         self._control = control
         self.sandbox_id = sandbox_id
         self.metadata = metadata or {}
+        self.started_at = started_at
         self.files = FakeFilesystem(control)
         self.commands = FakeCommands(self, control)
         self.killed = False
@@ -362,6 +371,12 @@ class FakeAsyncSandboxFactory:
 
     async def kill(self, sandbox_id: str) -> bool:
         self._control.kill_ids.append(sandbox_id)
+        self._control.kill_started = True
+        if self._control.kill_gate is not None:
+            await self._control.kill_gate.wait()
+        if self._control.kill_hangs:
+            await anyio.sleep_forever()
+        await anyio.lowlevel.checkpoint()
         if self._control.kill_error is not None:
             raise self._control.kill_error
         for sandbox in self._control.sandboxes:
@@ -375,24 +390,23 @@ class FakeAsyncSandboxFactory:
         query: FakeSandboxQuery | None = None,
         limit: int | None = None,
         next_token: str | None = None,
-        order: str | None = None,
     ) -> FakeSandboxPaginator:
+        # E2B 2.34.0, the declared dependency floor, has no `order` parameter. Keep this
+        # signature closed so use of a newer-only list option fails in tests.
         del next_token
         metadata = query.metadata if query is not None else None
-        self._control.list_calls.append((metadata, limit, order))
+        self._control.list_calls.append((metadata, limit))
         if self._control.list_error is not None:
             raise self._control.list_error
         if self._control.list_batches:
-            return FakeSandboxPaginator(self._control.list_batches.pop(0))
+            return FakeSandboxPaginator([self._control.list_batches.pop(0)])
         matches = [
             sandbox
             for sandbox in self._control.sandboxes
             if not sandbox.killed
             and (metadata is None or all(sandbox.metadata.get(key) == value for key, value in metadata.items()))
         ]
-        if order == 'desc':
-            matches.reverse()
-        return FakeSandboxPaginator(matches[:limit] if limit is not None else matches)
+        return FakeSandboxPaginator([matches[:limit] if limit is not None else matches])
 
 
 @dataclass
@@ -401,12 +415,16 @@ class FakeSandboxQuery:
 
 
 class FakeSandboxPaginator:
-    def __init__(self, sandboxes: list[FakeSandbox]) -> None:
-        self._sandboxes = sandboxes
+    def __init__(self, pages: list[list[FakeSandbox]]) -> None:
+        self._pages = pages
+
+    @property
+    def has_next(self) -> bool:
+        return bool(self._pages)
 
     async def next_items(self) -> list[FakeSandbox]:
         await anyio.lowlevel.checkpoint()
-        return self._sandboxes
+        return self._pages.pop(0)
 
 
 @dataclass
@@ -418,8 +436,8 @@ class FakeE2B:
     create_calls: list[FakeCreateCall] = field(default_factory=list[FakeCreateCall])
     connect_calls: list[tuple[str, int | None]] = field(default_factory=list[tuple[str, 'int | None']])
     kill_ids: list[str] = field(default_factory=list[str])
-    list_calls: list[tuple[dict[str, str] | None, int | None, str | None]] = field(
-        default_factory=list[tuple[dict[str, str] | None, int | None, str | None]]
+    list_calls: list[tuple[dict[str, str] | None, int | None]] = field(
+        default_factory=list[tuple[dict[str, str] | None, int | None]]
     )
     list_batches: list[list[FakeSandbox]] = field(default_factory=list[list[FakeSandbox]])
     list_error: Exception | None = None
@@ -430,6 +448,8 @@ class FakeE2B:
     connect_error: Exception | None = None
     kill_error: Exception | None = None
     kill_hangs: bool = False
+    kill_gate: anyio.Event | None = None
+    kill_started: bool = False
     run_error: Exception | None = None
     wait_error: Exception | None = None
     command_hangs: bool = False
@@ -443,7 +463,8 @@ class FakeE2B:
         self.module = self._build_module()
 
     def new_sandbox(self, sandbox_id: str, metadata: dict[str, str] | None = None) -> FakeSandbox:
-        sandbox = FakeSandbox(self, sandbox_id, metadata)
+        started_at = datetime(2020, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=len(self.sandboxes))
+        sandbox = FakeSandbox(self, sandbox_id, metadata, started_at=started_at)
         self.sandboxes.append(sandbox)
         return sandbox
 

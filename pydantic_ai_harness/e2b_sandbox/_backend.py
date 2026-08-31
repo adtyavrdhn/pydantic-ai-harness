@@ -5,10 +5,13 @@ file access, working-directory discovery, teardown) lives here, behind the proto
 Pydantic AI already speaks. The capability in `_capability.py` owns the lifecycle; tools and
 other capabilities consume the resulting `ctx.sandbox`.
 
-External assumptions last verified 2026-08-17 against E2B Python SDK 2.39.1:
+External assumptions last verified 2026-08-31 against E2B Python SDK 2.34.0 (the package floor):
 
 * `AsyncSandbox.create` / `connect` / `kill` provide the owned and attached lifecycle, and
-  `connect` resumes a paused sandbox:
+  `connect` resumes a paused sandbox and substitutes its 300-second default when `timeout=None`:
+  https://github.com/e2b-dev/E2B/blob/main/packages/python-sdk/e2b/sandbox_async/main.py
+* `AsyncSandbox.list` accepts `query`, `limit`, and `next_token` but not `order`, and each
+  `SandboxInfo` exposes `started_at`:
   https://github.com/e2b-dev/E2B/blob/main/packages/python-sdk/e2b/sandbox_async/main.py
 * `commands.run` starts every command as `/bin/bash -l -c <string>`, its `timeout` bounds the
   event stream rather than killing the command, and `commands.kill(pid)` sends SIGKILL:
@@ -124,6 +127,38 @@ async def _create_on_asyncio(
             except Exception:
                 pass
         raise
+
+
+async def _kill_sandbox(sandbox_id: str, kill: Callable[[], Awaitable[object]]) -> None:
+    """Run an E2B kill to completion without letting cleanup replace cancellation."""
+    try:
+        import e2b
+    except ImportError as error:
+        raise E2BSandboxError(_MISSING_E2B) from error
+
+    cleanup_error: E2BSandboxError | None = None
+    with anyio.CancelScope(shield=True):
+        with anyio.move_on_after(_TEARDOWN_TIMEOUT) as scope:
+            try:
+                await kill()
+            except e2b.SandboxNotFoundException:
+                # A sandbox that already self-terminated needs no cleanup.
+                pass
+            except e2b.AuthenticationException:
+                cleanup_error = E2BSandboxAuthError(_AUTH_MESSAGE)
+            except Exception as error:
+                cleanup_error = E2BSandboxError(
+                    f'Could not kill E2B sandbox {sandbox_id!r}: {type(error).__name__}: {error}'
+                )
+        if scope.cancel_called:
+            cleanup_error = E2BSandboxError(
+                f'Timed out after {_TEARDOWN_TIMEOUT}s while trying to kill E2B sandbox {sandbox_id!r}.'
+            )
+    if cleanup_error is not None:
+        # Deliver cancellation that arrived during the shield before reporting a secondary
+        # cleanup failure. Without this checkpoint, that failure could replace cancellation.
+        await anyio.lowlevel.checkpoint()
+        raise cleanup_error
 
 
 class E2BSandboxError(RuntimeError):
@@ -562,19 +597,17 @@ class E2BSandboxBackend:
         except ImportError as error:
             raise E2BSandboxError(_MISSING_E2B) from error
         try:
-            paginator = e2b.AsyncSandbox.list(
-                query=e2b.SandboxQuery(metadata=dict(metadata)),
-                limit=1,
-                order='asc',
-            )
-            matches = await paginator.next_items()
+            paginator = e2b.AsyncSandbox.list(query=e2b.SandboxQuery(metadata=dict(metadata)))
+            oldest: e2b.SandboxInfo | None = None
+            while paginator.has_next:
+                for match in await paginator.next_items():
+                    if oldest is None or match.started_at < oldest.started_at:
+                        oldest = match
         except e2b.AuthenticationException as error:
             raise E2BSandboxAuthError(_AUTH_MESSAGE) from error
         except Exception as error:
             raise E2BSandboxError(f'Could not list E2B sandboxes: {type(error).__name__}: {error}') from error
-        if not matches:
-            return None
-        return matches[0].sandbox_id
+        return oldest.sandbox_id if oldest is not None else None
 
     @classmethod
     async def connect(cls, sandbox_id: str, *, timeout: int | None = None, working_dir: str | None = None) -> Self:
@@ -587,7 +620,8 @@ class E2BSandboxBackend:
         Args:
             sandbox_id: The E2B sandbox to attach to.
             timeout: Extends the sandbox's remaining lifetime to this many seconds when it is
-                longer than what remains. `None` leaves the lifetime as it is.
+                longer than what remains. E2B substitutes its 300-second default when `None`,
+                so connecting extends a shorter remaining lifetime to at least 300 seconds.
             working_dir: Directory commands run in; the sandbox's own default when `None`.
         """
         try:
@@ -614,29 +648,16 @@ class E2BSandboxBackend:
         """
         if not terminate:
             return
-        import e2b
+        await _kill_sandbox(self.sandbox_id, self.sandbox.kill)
 
-        error: E2BSandboxError | None = None
-        with anyio.CancelScope(shield=True):
-            with anyio.move_on_after(_TEARDOWN_TIMEOUT) as scope:
-                try:
-                    await self.sandbox.kill()
-                except e2b.SandboxNotFoundException:
-                    # A sandbox that already self-terminated (e.g. at its `sandbox_timeout`)
-                    # needs no cleanup.
-                    pass
-                except e2b.AuthenticationException:
-                    error = E2BSandboxAuthError(_AUTH_MESSAGE)
-                except Exception as caught:
-                    error = E2BSandboxError(
-                        f'Could not kill E2B sandbox {self.sandbox_id!r}: {type(caught).__name__}: {caught}'
-                    )
-            if scope.cancel_called:
-                error = E2BSandboxError(
-                    f'Timed out after {_TEARDOWN_TIMEOUT}s while trying to kill E2B sandbox {self.sandbox_id!r}.'
-                )
-        if error is not None:
-            raise error
+    @staticmethod
+    async def _kill_by_id(sandbox_id: str) -> None:
+        """Kill by ID, so durable release does not reconnect or resume a paused sandbox."""
+        try:
+            import e2b
+        except ImportError as error:
+            raise E2BSandboxError(_MISSING_E2B) from error
+        await _kill_sandbox(sandbox_id, functools.partial(e2b.AsyncSandbox.kill, sandbox_id))
 
     @functools.cached_property
     def _working_dir_lock(self) -> anyio.Lock:

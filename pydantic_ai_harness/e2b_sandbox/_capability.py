@@ -13,9 +13,7 @@ from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai_harness.e2b_sandbox._backend import (
     DEFAULT_SANDBOX_TIMEOUT,
     PROVIDER,
-    E2BSandboxAuthError,
     E2BSandboxBackend,
-    E2BSandboxError,
 )
 
 _RUN_ID_METADATA_KEY = 'pydantic-ai-run-id'
@@ -118,17 +116,4 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
         """Kill an owned sandbox; leave an attached sandbox to its owner."""
         if self.sandbox_id is not None or ref.provider != PROVIDER:
             return
-        try:
-            import e2b
-        except ImportError as error:
-            raise E2BSandboxError(
-                'The \'e2b\' package is required for E2BSandbox. Install it with `uv add "pydantic-ai-harness[e2b]"`.'
-            ) from error
-        try:
-            await e2b.AsyncSandbox.kill(ref.sandbox_id)
-        except e2b.AuthenticationException as error:
-            raise E2BSandboxAuthError('E2B rejected the credentials. Check E2B_API_KEY and try again.') from error
-        except Exception as error:
-            raise E2BSandboxError(
-                f'Could not kill E2B sandbox {ref.sandbox_id!r}: {type(error).__name__}: {error}'
-            ) from error
+        await E2BSandboxBackend._kill_by_id(ref.sandbox_id)  # pyright: ignore[reportPrivateUsage]

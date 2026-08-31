@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 
+import anyio
 import pytest
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.sandboxes import SandboxRef
@@ -53,11 +54,13 @@ class TestLifecycle:
         metadata = {'pydantic-ai-run-id': 'run-1'}
         fake_e2b.new_sandbox('oldest', metadata)
         fake_e2b.new_sandbox('newest', metadata)
+        # E2B 2.34 cannot order this query server-side, so exercise an unordered response.
+        fake_e2b.sandboxes.reverse()
 
         ref = await E2BSandbox[None]().acquire_sandbox(_ctx())
 
         assert ref.sandbox_id == 'oldest'
-        assert fake_e2b.list_calls == [(metadata, 1, 'asc')]
+        assert fake_e2b.list_calls == [(metadata, None)]
 
     async def test_concurrent_creator_loses_to_oldest_sandbox(self, fake_e2b: FakeE2B) -> None:
         canonical = fake_e2b.new_sandbox('canonical', {'pydantic-ai-run-id': 'run-1'})
@@ -82,13 +85,8 @@ class TestLifecycle:
         with pytest.raises(error_type):
             await E2BSandbox[None]().acquire_sandbox(_ctx())
 
-    async def test_fake_list_supports_descending_order(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.new_sandbox('oldest')
-        fake_e2b.new_sandbox('newest')
-
-        paginator = fake_e2b.module.AsyncSandbox.list(order='desc')
-
-        assert [item.sandbox_id for item in await paginator.next_items()] == ['newest', 'oldest']
+    def test_fake_list_pins_lowest_supported_sdk_surface(self, fake_e2b: FakeE2B) -> None:
+        assert 'order' not in inspect.signature(fake_e2b.module.AsyncSandbox.list).parameters
 
     async def test_get_sandbox_reconnects_by_ref(self, fake_e2b: FakeE2B) -> None:
         backend = await E2BSandbox[None]().get_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='sbx-existing'))
@@ -116,6 +114,51 @@ class TestLifecycle:
         await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='gone'))
 
         assert fake_e2b.kill_ids == ['gone']
+
+    async def test_release_kill_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend._TEARDOWN_TIMEOUT', 0.05)
+        fake_e2b.kill_hangs = True
+
+        with pytest.raises(e2b_sandbox.E2BSandboxError, match='Timed out'):
+            await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='sbx-hung'))
+
+    async def test_release_auth_failure_is_terminal(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.kill_error = fake_e2b.auth_type('bad key')
+
+        with pytest.raises(e2b_sandbox.E2BSandboxTerminalError, match='E2B rejected the credentials'):
+            await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='sbx-owned'))
+
+    async def test_release_kill_completes_under_cancellation(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.new_sandbox('sbx-owned')
+        fake_e2b.kill_gate = anyio.Event()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                E2BSandbox[None]().release_sandbox,
+                _ctx(),
+                SandboxRef(provider='e2b', sandbox_id='sbx-owned'),
+            )
+            while not fake_e2b.kill_started:
+                await anyio.sleep(0)
+            task_group.cancel_scope.cancel()
+            fake_e2b.kill_gate.set()
+
+        assert fake_e2b.sandboxes[0].killed is True
+
+    async def test_release_failure_does_not_replace_cancellation(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.kill_gate = anyio.Event()
+        fake_e2b.kill_error = RuntimeError('cleanup failed')
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                E2BSandbox[None]().release_sandbox,
+                _ctx(),
+                SandboxRef(provider='e2b', sandbox_id='sbx-owned'),
+            )
+            while not fake_e2b.kill_started:
+                await anyio.sleep(0)
+            task_group.cancel_scope.cancel()
+            fake_e2b.kill_gate.set()
 
     async def test_attached_sandbox_is_not_owned(self, fake_e2b: FakeE2B) -> None:
         capability = E2BSandbox[None](sandbox_id='sbx-existing')
