@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -14,16 +12,9 @@ import pytest
 pytest.importorskip('absurd_sdk')
 
 import psycopg
-from absurd_sdk import (
-    AsyncAbsurd,
-    AsyncTaskContext,
-    ClaimedTask,
-    JsonValue,
-    _create_async_task_context,
-    _current_task_context,
-)
+from absurd_sdk import AsyncAbsurd
 from docker.errors import DockerException
-from psycopg import AsyncConnection, sql
+from psycopg import AsyncConnection
 from psycopg.rows import TupleRow
 from testcontainers.community.postgres import PostgresContainer
 
@@ -51,7 +42,9 @@ def _normalize_dsn(url: str) -> str:
 def postgres_container() -> Iterator[PostgresContainer]:
     """Start the disposable PostgreSQL instance used by the integration tests."""
     _docker_host_env()
-    if 'DOCKER_HOST' not in os.environ and not Path('/var/run/docker.sock').exists():
+    if (
+        'DOCKER_HOST' not in os.environ and not Path('/var/run/docker.sock').exists()
+    ):  # pragma: no cover - local-only skip
         pytest.skip('Docker is unavailable: no Docker socket or `DOCKER_HOST` was found')
     try:
         container = PostgresContainer('postgres:16-alpine')
@@ -95,84 +88,3 @@ async def absurd(async_conn: AsyncConn) -> AsyncIterator[AsyncAbsurd]:
         yield client
     finally:
         await client.drop_queue()
-
-
-def _absurd_conn(absurd: AsyncAbsurd) -> AsyncConn:
-    conn: AsyncConn | None = absurd._conn
-    assert conn is not None
-    return conn
-
-
-def _absurd_queue(absurd: AsyncAbsurd) -> str:
-    queue: str = absurd._queue_name
-    return queue
-
-
-async def _build_ctx(absurd: AsyncAbsurd, task: ClaimedTask) -> AsyncTaskContext:
-    return await _create_async_task_context(
-        task['task_id'],
-        _absurd_conn(absurd),
-        _absurd_queue(absurd),
-        task,
-        120,
-    )
-
-
-@asynccontextmanager
-async def running_task_context(
-    absurd: AsyncAbsurd,
-    task_name: str,
-    params: JsonValue = None,
-    *,
-    max_attempts: int | None = None,
-) -> AsyncGenerator[AsyncTaskContext]:
-    """Spawn, claim, and enter an Absurd task context backed by PostgreSQL."""
-    spawned = await absurd.spawn(task_name, params, max_attempts=max_attempts)
-    claimed = await absurd.claim_tasks(batch_size=1)
-    assert claimed, f'no task was claimed for {task_name}'
-    task = claimed[0]
-    assert task['task_id'] == spawned['task_id']
-    ctx = await _build_ctx(absurd, task)
-    token = _current_task_context.set(ctx)
-    try:
-        yield ctx
-    finally:
-        _current_task_context.reset(token)
-
-
-@asynccontextmanager
-async def reenter_running_task(absurd: AsyncAbsurd, task_id: str) -> AsyncGenerator[AsyncTaskContext]:
-    """Reclaim a failed task and enter a fresh context hydrated from PostgreSQL."""
-    task = await _force_reclaim(absurd, task_id)
-    ctx = await _build_ctx(absurd, task)
-    token = _current_task_context.set(ctx)
-    try:
-        yield ctx
-    finally:
-        _current_task_context.reset(token)
-
-
-async def _force_reclaim(absurd: AsyncAbsurd, task_id: str) -> ClaimedTask:
-    conn = _absurd_conn(absurd)
-    queue = _absurd_queue(absurd)
-    run_id = await _current_run_id(conn, queue, task_id)
-    await conn.execute(
-        'SELECT absurd.fail_run(%s, %s, %s, %s)',
-        (queue, run_id, '{"type": "test.FailForReplay"}', None),
-    )
-    claimed = await absurd.claim_tasks(batch_size=1)
-    assert claimed, f'could not re-claim task {task_id} after fail_run'
-    task = claimed[0]
-    assert task['task_id'] == task_id
-    return task
-
-
-async def _current_run_id(conn: AsyncConn, queue: str, task_id: str) -> str:
-    query = sql.SQL('SELECT run_id FROM absurd.{table} WHERE task_id = %s AND state = %s').format(
-        table=sql.Identifier(f'r_{queue}')
-    )
-    cursor = conn.cursor()
-    await cursor.execute(query, (task_id, 'running'))
-    row: tuple[Any, ...] | None = await cursor.fetchone()
-    assert row is not None, f'no running run for task {task_id}'
-    return str(row[0])

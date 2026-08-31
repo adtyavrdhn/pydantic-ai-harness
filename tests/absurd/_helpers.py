@@ -30,7 +30,7 @@ R = TypeVar('R')
 
 @pytest.fixture
 def anyio_backend() -> str:
-    return 'asyncio'
+    return 'asyncio'  # pragma: no cover - overridden by the directory fixture
 
 
 class FakeAsyncTaskContext(AsyncTaskContext):
