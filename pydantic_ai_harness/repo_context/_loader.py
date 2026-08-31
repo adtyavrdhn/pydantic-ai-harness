@@ -48,8 +48,6 @@ def _walk_dirs(workspace_dir: Path, home_dir: Path | None) -> list[Path]:
 async def _sandbox_is_file(sandbox: Sandbox, path: Path) -> bool:
     """True when `path` exists and is a regular file inside `sandbox`."""
     text = str(path)
-    if not await sandbox.fs.exists(text):
-        return False
     try:
         entry = await sandbox.fs.stat(text)
     except FileNotFoundError:

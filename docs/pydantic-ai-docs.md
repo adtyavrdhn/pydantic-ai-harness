@@ -40,7 +40,7 @@ result = agent.run_sync('Read the toolsets docs, then explain how to build a Fun
 print(result.output)
 ```
 
-When no sandbox is attached, the local checkout continues to use the agent process's filesystem for backward compatibility.
+On POSIX, the framework's default no-sandbox state continues to use the agent process's filesystem for backward compatibility. An `UnavailableSandbox` with an application-specific reason remains unavailable; the framework's two default reasons are reserved for compatibility detection. On Windows, local checkout reads require an attached sandbox, while remote-only lookup still works without one.
 
 The capability also adds a short static instruction telling the model that the `read_pyai_docs` tool exists and to read the relevant topic before authoring or modifying a Pydantic AI capability, hook, tool, or toolset, rather than relying on memory. The instruction is cache-stable, so it does not invalidate the prompt-cache prefix between turns.
 
@@ -48,22 +48,22 @@ The capability also adds a short static instruction telling the model that the `
 
 Each call resolves in this order:
 
-1. **Local checkout** -- when `local_docs_path` (or the `PYDANTIC_AI_HARNESS_DOCS_PATH` env var) is set and `{path}/{topic}.md` exists, that file is read and returned.
+1. **Sandbox checkout** -- when `local_docs_path` (or the `PYDANTIC_AI_HARNESS_DOCS_PATH` environment variable) is set and `{path}/{topic}.md` exists inside the run sandbox, that file is read and returned.
 2. **Remote fetch** -- otherwise the page is fetched from `https://raw.githubusercontent.com/pydantic/pydantic-ai/main/docs/{topic}.md`.
 3. **Neither resolves** -- a descriptive error naming the local path tried and the URL.
 
 The capability never runs git. Keep the local checkout current yourself; the remote path always reads `main`, so it is the fresh fallback.
 
-`local_docs_path` takes precedence over the `PYDANTIC_AI_HARNESS_DOCS_PATH` env var. Both have `~` expanded, so a raw `~/...` path resolves to the local checkout instead of silently falling through to the remote source. With neither set, every call goes straight to the remote source.
+`local_docs_path` takes precedence over the `PYDANTIC_AI_HARNESS_DOCS_PATH` environment variable. The backward-compatible host fallback expands `~`; an attached sandbox does not, because its home directory is not the agent process's home. Use an absolute sandbox path or a path relative to its working directory. With neither path set, every call goes straight to the remote source.
 
 ## Configuration
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `local_docs_path` | `None` | Local pyai docs checkout to read first. Falls back to the `PYDANTIC_AI_HARNESS_DOCS_PATH` env var, then to the remote source. |
-| `cache` | `True` | Memoize each returned doc in-process for the capability's lifetime, so a topic is read or fetched at most once. |
+| `local_docs_path` | `None` | Pyai docs checkout inside the run sandbox. Relative paths use the sandbox working directory. Falls back to the `PYDANTIC_AI_HARNESS_DOCS_PATH` environment variable, then to the remote source. |
+| `cache` | `True` | Memoize each returned doc for one agent run, so repeated reads within that run do not repeat sandbox or network I/O. |
 
-Caching lives on the capability instance and is shared across the toolsets it builds, so a memoized topic survives multiple agent runs that reuse the same `PydanticAIDocs`. Set `cache=False` to re-read or re-fetch on every call -- useful when the local checkout changes underneath a long-lived capability.
+Caching is isolated per run so content read from one sandbox is not reused in another. Set `cache=False` to re-read or re-fetch on every call within a run.
 
 ## Agent spec (YAML/JSON)
 

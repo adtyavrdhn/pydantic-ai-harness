@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AgentToolset
 
 from pydantic_ai_harness.pydantic_ai_docs._toolset import PydanticAIDocsToolset, PydanticAIDocsTopic
@@ -61,14 +61,16 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
     `PYDANTIC_AI_HARNESS_DOCS_PATH` env var, then to the remote source."""
 
     cache: bool = True
-    """If `True`, each returned doc is memoized in-process for the capability's
-    lifetime, so a topic is read or fetched at most once."""
+    """If `True`, each returned doc is memoized for one agent run."""
 
     _cache: dict[PydanticAIDocsTopic, str] = field(
         default_factory=dict[PydanticAIDocsTopic, str], init=False, repr=False, compare=False
     )
-    """In-memory doc cache shared with the toolset, so memoized docs outlive a
-    single `get_toolset` call."""
+    """In-memory doc cache shared with toolsets created during one run."""
+
+    async def for_run(self, ctx: RunContext[AgentDepsT]) -> PydanticAIDocs[AgentDepsT]:
+        """Return a fresh per-run cache so sandbox-local content cannot cross runs."""
+        return replace(self)
 
     def _resolved_local_path(self) -> Path | None:
         """The local checkout path: `local_docs_path`, else the env var, else `None`.

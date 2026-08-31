@@ -8,7 +8,7 @@ from pathlib import Path
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from pydantic_ai_harness._sandbox import sandbox_or_local
+from pydantic_ai_harness._sandbox import sandbox_or_local, sandbox_path
 from pydantic_ai_harness.repo_context._inventory import AgentContextInventory, scan_assets
 
 
@@ -29,4 +29,6 @@ class RepoContextToolset(FunctionToolset[AgentDepsT]):
         `settings.json` (hooks) it contains. This locates assets so you can read
         and translate them; it does not parse their contents.
         """
-        return await scan_assets(sandbox_or_local(ctx.sandbox), self._workspace_dir, self._asset_roots)
+        sandbox = sandbox_or_local(ctx.sandbox, preserve_host_behavior=True)
+        workspace = Path(sandbox_path(self._workspace_dir, sandbox=sandbox, original=ctx.sandbox))
+        return await scan_assets(sandbox, workspace, self._asset_roots)

@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import posixpath
+from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, Field
-from pydantic_ai.sandboxes import Sandbox
+from pydantic_ai.sandboxes import Sandbox, SandboxFileEntry
 
 _ROOT_NOTES = {
     '.codex': 'Codex uses TOML config; assets are derived from the .claude/.agents setup.',
     '.grok': 'Grok setup is derived from the .claude/.agents setup.',
 }
+
+_MAX_SKILL_DEPTH = 8
+_MAX_INVENTORY_ENTRIES = 10_000
 
 
 class AssetRoot(BaseModel):
@@ -41,6 +45,8 @@ async def scan_assets(sandbox: Sandbox, workspace_dir: Path, asset_roots: Sequen
     workspace = await sandbox.resolve(workspace_dir.as_posix())
     roots: list[AssetRoot] = []
     for name in asset_roots:
+        if posixpath.isabs(name) or posixpath.normpath(name).startswith('../'):
+            raise ValueError(f'asset root must be relative to the workspace, got {name!r}.')
         directory = posixpath.normpath(posixpath.join(workspace, name))
         notes = _ROOT_NOTES.get(name)
         try:
@@ -52,41 +58,89 @@ async def scan_assets(sandbox: Sandbox, workspace_dir: Path, asset_roots: Sequen
             roots.append(AssetRoot(root=name, exists=False, notes=notes))
             continue
 
-        result = await sandbox.run(
-            [
-                'find',
-                '-L',
-                directory,
-                '-type',
-                'f',
-                '(',
-                '-name',
-                'SKILL.md',
-                '-o',
-                '-name',
-                '*.md',
-                '-o',
-                '-name',
-                'settings.json',
-                ')',
-            ]
+        skills = await _scan_skills(sandbox, posixpath.join(directory, 'skills'), workspace)
+        agents = await _scan_agents(sandbox, posixpath.join(directory, 'agents'), workspace)
+        settings_path = posixpath.join(directory, 'settings.json')
+        settings_entry = await _stat(sandbox, settings_path)
+        settings = (
+            _relative(settings_path, workspace) if settings_entry is not None and not settings_entry.is_dir else None
         )
-        if result.exit_code != 0:
-            raise RuntimeError(f'Could not inventory {directory}: {result.stderr.strip()}')
-        skills: list[str] = []
-        agents: list[str] = []
-        settings: str | None = None
-        prefix = f'{workspace.rstrip("/")}/'
-        for absolute in result.stdout.splitlines():
-            relative = absolute.removeprefix(prefix)
-            parts = relative.split('/')
-            if len(parts) >= 4 and parts[1] == 'skills' and parts[-1] == 'SKILL.md':
-                skills.append(relative)
-            elif len(parts) == 3 and parts[1] == 'agents' and parts[-1].endswith('.md'):
-                agents.append(relative)
-            elif len(parts) == 2 and parts[1] == 'settings.json':
-                settings = relative
         skills.sort()
         agents.sort()
         roots.append(AssetRoot(root=name, exists=True, skills=skills, agents=agents, settings=settings, notes=notes))
     return AgentContextInventory(roots=roots)
+
+
+async def _scan_skills(sandbox: Sandbox, skills_root: str, workspace: str) -> list[str]:
+    root = await _stat(sandbox, skills_root)
+    if root is None or not root.is_dir:
+        return []
+
+    found: list[str] = []
+    pending = deque([(skills_root, 0)])
+    visited = 0
+    while pending:
+        directory, depth = pending.popleft()
+        # Defensive race: the directory may disappear after `_stat`.
+        try:
+            entries = await sandbox.fs.list_dir(directory)
+        except FileNotFoundError:  # pragma: no cover
+            continue
+        visited += len(entries)
+        if visited > _MAX_INVENTORY_ENTRIES:
+            raise RuntimeError(f'Asset inventory exceeded {_MAX_INVENTORY_ENTRIES} entries below {skills_root!r}.')
+        for entry in entries:
+            path = _child_path(directory, entry.name, skills_root)
+            if path is None:
+                continue
+            if entry.is_dir:
+                if depth < _MAX_SKILL_DEPTH:
+                    pending.append((path, depth + 1))
+            elif entry.name == 'SKILL.md':
+                found.append(_relative(path, workspace))
+    return found
+
+
+async def _scan_agents(sandbox: Sandbox, agents_root: str, workspace: str) -> list[str]:
+    root = await _stat(sandbox, agents_root)
+    if root is None or not root.is_dir:
+        return []
+    # Defensive race: the directory may disappear after `_stat`.
+    try:
+        entries = await sandbox.fs.list_dir(agents_root)
+    except FileNotFoundError:  # pragma: no cover
+        return []
+    if len(entries) > _MAX_INVENTORY_ENTRIES:
+        raise RuntimeError(f'Asset inventory exceeded {_MAX_INVENTORY_ENTRIES} entries below {agents_root!r}.')
+    return [
+        _relative(path, workspace)
+        for entry in entries
+        if not entry.is_dir
+        and entry.name.endswith('.md')
+        and (path := _child_path(agents_root, entry.name, agents_root)) is not None
+    ]
+
+
+async def _stat(sandbox: Sandbox, path: str) -> SandboxFileEntry | None:
+    try:
+        return await sandbox.fs.stat(path)
+    except FileNotFoundError:
+        return None
+
+
+def _child_path(directory: str, name: str, root: str) -> str | None:
+    """Build a lexical child path and reject malformed backend entries."""
+    # Protocol-conforming backends return base names, but do not trust malformed entries.
+    if name in ('', '.', '..') or posixpath.basename(name) != name:  # pragma: no cover
+        return None
+    path = posixpath.normpath(posixpath.join(directory, name))
+    # POSIX sandbox paths share one root; this only catches malformed mixed-drive input.
+    try:
+        confined = posixpath.commonpath((root, path)) == root
+    except ValueError:  # pragma: no cover
+        return None
+    return path if confined else None
+
+
+def _relative(path: str, workspace: str) -> str:
+    return posixpath.relpath(path, workspace)

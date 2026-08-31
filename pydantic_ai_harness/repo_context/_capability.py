@@ -13,7 +13,7 @@ from pydantic_ai.sandboxes import Sandbox
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 from pydantic_ai.toolsets import AgentToolset
 
-from pydantic_ai_harness._sandbox import sandbox_or_local
+from pydantic_ai_harness._sandbox import sandbox_or_local, sandbox_path
 from pydantic_ai_harness.repo_context._loader import (
     ContextFile,
     discover_instruction_files,
@@ -116,6 +116,9 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     _seen_dirs: set[str] = field(default_factory=set[str], init=False, repr=False, compare=False)
     """Run-scoped set of directories already surfaced by Strategy 3."""
 
+    _pending_dirs: set[str] = field(default_factory=set[str], init=False, repr=False, compare=False)
+    """Directories whose context is currently being loaded by another tool result."""
+
     _resolved_workspace_dir: Path | None = field(default=None, init=False, repr=False, compare=False)
     """Absolute sandbox path used for this run."""
 
@@ -125,11 +128,18 @@ class RepoContext(AbstractCapability[AgentDepsT]):
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Load walk-up instruction files through `ctx.sandbox` so `get_instructions` is sync."""
-        sandbox = sandbox_or_local(ctx.sandbox)
-        workspace = await self._workspace(sandbox)
-        if self.autoload_instructions:
-            home = Path(await sandbox.resolve(self.home_dir.as_posix())) if self.home_dir is not None else None
-            self._context_files = await discover_instruction_files(sandbox, workspace, home, self.filenames)
+        if not self.autoload_instructions:
+            return
+        sandbox = sandbox_or_local(ctx.sandbox, preserve_host_behavior=True)
+        workspace = await self._workspace(
+            sandbox, path=sandbox_path(self.workspace_dir, sandbox=sandbox, original=ctx.sandbox)
+        )
+        home = (
+            Path(await sandbox.resolve(sandbox_path(self.home_dir, sandbox=sandbox, original=ctx.sandbox)))
+            if self.home_dir is not None
+            else None
+        )
+        self._context_files = await discover_instruction_files(sandbox, workspace, home, self.filenames)
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
         """Cache-stable instructions resolved after `before_run` loads sandbox files."""
@@ -172,17 +182,19 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         if not self.nested_traversal or call.tool_name not in self.traversal_tool_names:
             return result
         raw_path = args.get(self.traversal_path_arg)
-        if not isinstance(raw_path, str):
+        if not isinstance(raw_path, str) or not isinstance(result, str):
             return result
-        sandbox = sandbox_or_local(ctx.sandbox)
+        sandbox = sandbox_or_local(ctx.sandbox, preserve_host_behavior=True)
         directory = await self._resolve_directory(sandbox, raw_path)
-        context_file = await find_dir_context_file(sandbox, directory, self.filenames)
-        if context_file is None:
-            return result
         key = str(directory)
-        if key in self._seen_dirs:
+        if key in self._seen_dirs or key in self._pending_dirs:
             return result
-        if not isinstance(result, str):
+        self._pending_dirs.add(key)
+        try:
+            context_file = await find_dir_context_file(sandbox, directory, self.filenames)
+        finally:
+            self._pending_dirs.discard(key)
+        if context_file is None or key in self._seen_dirs:
             return result
         self._seen_dirs.add(key)
         note = self._render_note(context_file)
@@ -192,8 +204,6 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         workspace = await self._workspace(sandbox)
         text = await sandbox.resolve(raw_path, base=workspace.as_posix())
         candidate = Path(text)
-        if not await sandbox.fs.exists(text):
-            return candidate
         try:
             entry = await sandbox.fs.stat(text)
         except FileNotFoundError:
@@ -215,9 +225,9 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         except ValueError:
             return path.as_posix()
 
-    async def _workspace(self, sandbox: Sandbox) -> Path:
+    async def _workspace(self, sandbox: Sandbox, *, path: str | None = None) -> Path:
         if self._resolved_workspace_dir is None:
-            self._resolved_workspace_dir = Path(await sandbox.resolve(self.workspace_dir.as_posix()))
+            self._resolved_workspace_dir = Path(await sandbox.resolve(path or self.workspace_dir.as_posix()))
         return self._resolved_workspace_dir
 
     @classmethod

@@ -31,8 +31,12 @@ agent = Agent(
 All configured paths and discovered files refer to the run sandbox. Relative paths use its
 working directory.
 
-When no sandbox is attached, `RepoContext` continues to inspect the agent process's filesystem
-for backward compatibility.
+On POSIX, the framework's default no-sandbox state continues to inspect the agent process's
+filesystem for backward compatibility. An `UnavailableSandbox` with an application-specific
+reason remains unavailable; the framework's two default reasons are reserved for compatibility
+detection. Windows requires an attached sandbox. The backward-compatible host fallback expands
+`~`; an attached sandbox does not. Use an absolute sandbox path or one relative to the sandbox
+working directory.
 
 ### 1. Walk-up instruction autoload (on by default)
 
@@ -43,7 +47,7 @@ hash, so a symlinked `AGENTS.md -> CLAUDE.md` or two ancestors sharing identical
 content load once.
 
 When `home_dir` is `None` (the default), only `workspace_dir` is scanned -- no
-walk-up. Pass `home_dir=Path.home()` to walk up to your home directory.
+walk-up. Pass the sandbox home path explicitly to walk up to it.
 
 ### 2. Asset inventory (on by default)
 
@@ -55,6 +59,9 @@ does not parse them, leaving translation to the orchestrator.
 
 Rename the tool with `inventory_tool_name`, or scope which roots it scans with
 `asset_roots`.
+Roots must be relative to `workspace_dir`. For each root, inventory visits at most 10,000
+entries below `skills/`, lists at most 10,000 entries directly below `agents/`, and descends at
+most eight directory levels below `skills/`.
 
 ### 3. Nested-on-traversal (off by default)
 

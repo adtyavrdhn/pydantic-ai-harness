@@ -2,22 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, PropertyMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.exceptions import UserError
-from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.sandboxes import LocalSandbox, Sandbox
+from pydantic_ai.sandboxes import LocalSandbox, Sandbox, UnavailableSandbox
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness._sandbox import sandbox_or_local
 from pydantic_ai_harness.repo_context import (
     AgentContextInventory,
     ContextFile,
@@ -61,12 +61,12 @@ def _write(path: Path, content: str) -> Path:
     return path
 
 
-class TestSandboxSelection:
-    def test_unconnected_sandbox_is_preserved(self) -> None:
-        sandbox = MagicMock(spec=Sandbox)
-        type(sandbox).backend = PropertyMock(side_effect=UserError('not connected'))
-
-        assert sandbox_or_local(sandbox) is sandbox
+def _render_capability_instructions(capability: RepoContext[object], ctx: RunContext[object]) -> str | None:
+    instructions = capability.get_instructions()
+    assert callable(instructions)
+    rendered: object = instructions(ctx)  # pyright: ignore[reportCallIssue, reportUnknownVariableType]
+    assert isinstance(rendered, str) or rendered is None
+    return rendered
 
 
 class TestDiscoverInstructionFiles:
@@ -123,12 +123,16 @@ class TestDiscoverInstructionFiles:
         files = await discover_instruction_files(sandbox, tmp_path, None, ('CLAUDE.md',))
         assert files == []
 
-    async def test_file_disappearing_between_exists_and_stat_is_skipped(self, tmp_path: Path) -> None:
+    async def test_file_disappearing_before_stat_does_not_block_capability_setup(self, tmp_path: Path) -> None:
         sandbox = MagicMock(spec=Sandbox)
-        sandbox.fs.exists = AsyncMock(return_value=True)
+        sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
         sandbox.fs.stat = AsyncMock(side_effect=FileNotFoundError)
+        cap = RepoContext[object](workspace_dir=tmp_path, expose_inventory_tool=False)
+        ctx = _run_context(sandbox=sandbox)
 
-        assert await discover_instruction_files(sandbox, tmp_path, None, ('CLAUDE.md',)) == []
+        await cap.before_run(ctx)
+
+        assert cap.get_instructions() is not None
 
     async def test_duplicate_filename_is_read_once(self, tmp_path: Path, sandbox: Sandbox) -> None:
         _write(tmp_path / 'CLAUDE.md', 'once')
@@ -173,8 +177,9 @@ class TestInstructions:
     async def test_includes_files_and_inventory_hint(self, tmp_path: Path, sandbox: Sandbox) -> None:
         _write(tmp_path / 'CLAUDE.md', 'be nice')
         cap = RepoContext[object](workspace_dir=tmp_path)
-        await cap.before_run(_run_context(sandbox=sandbox))
-        instructions = cap._render_instructions()
+        ctx = _run_context(sandbox=sandbox)
+        await cap.before_run(ctx)
+        instructions = _render_capability_instructions(cap, ctx)
         assert isinstance(instructions, str)
         assert 'be nice' in instructions
         assert 'inventory_agent_context' in instructions
@@ -192,18 +197,31 @@ class TestInstructions:
         assert 'ignored' not in instructions
         assert 'inventory_agent_context' in instructions
 
-    def test_no_files_no_inventory_is_none(self, tmp_path: Path) -> None:
+    async def test_autoload_off_does_not_require_sandbox_file_access(self, tmp_path: Path) -> None:
+        agent = Agent(
+            TestModel(call_tools=[]),
+            capabilities=[RepoContext[object](workspace_dir=tmp_path, autoload_instructions=False)],
+        )
+
+        result = await agent.run('go', sandbox=UnavailableSandbox('sandbox file access is disabled'))
+
+        assert result.output is not None
+
+    async def test_no_files_no_inventory_is_none(self, tmp_path: Path, sandbox: Sandbox) -> None:
         cap = RepoContext[object](workspace_dir=tmp_path, expose_inventory_tool=False)
-        assert cap._render_instructions() is None
+        ctx = _run_context(sandbox=sandbox)
+        await cap.before_run(ctx)
+        assert _render_capability_instructions(cap, ctx) is None
 
     async def test_files_cached_across_calls(self, tmp_path: Path, sandbox: Sandbox) -> None:
         _write(tmp_path / 'CLAUDE.md', 'first')
         cap = RepoContext[object](workspace_dir=tmp_path)
-        await cap.before_run(_run_context(sandbox=sandbox))
-        first = cap._render_instructions()
+        ctx = _run_context(sandbox=sandbox)
+        await cap.before_run(ctx)
+        first = _render_capability_instructions(cap, ctx)
         assert first is not None and 'first' in first
         _write(tmp_path / 'CLAUDE.md', 'second')
-        second = cap._render_instructions()
+        second = _render_capability_instructions(cap, ctx)
         # Read-once: `before_run` loaded the file, so subsequent edits are not picked up.
         assert second is not None and 'second' not in second
 
@@ -248,6 +266,50 @@ class TestScanAssets:
         assert inv.roots[0].settings is None
         assert inv.roots[0].notes is None
 
+    @pytest.mark.parametrize('root', ('/outside', '../outside'))
+    async def test_asset_roots_must_be_relative_to_workspace(self, tmp_path: Path, sandbox: Sandbox, root: str) -> None:
+        with pytest.raises(ValueError, match='relative to the workspace'):
+            await scan_assets(sandbox, tmp_path, (root,))
+
+    async def test_skill_walk_has_a_depth_bound(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        near = tmp_path / '.claude' / 'skills'
+        for index in range(8):
+            near /= f'level-{index}'
+        _write(near / 'SKILL.md', 'near')
+        _write(near / 'level-8' / 'SKILL.md', 'deep')
+
+        inventory = await scan_assets(sandbox, tmp_path, ('.claude',))
+
+        assert inventory.roots[0].skills == [f'.claude/skills/{"/".join(f"level-{i}" for i in range(8))}/SKILL.md']
+
+    async def test_skill_inventory_has_an_entry_bound(self, tmp_path: Path) -> None:
+        sandbox = MagicMock(spec=Sandbox)
+        sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
+        sandbox.fs.stat = AsyncMock(return_value=SimpleNamespace(is_dir=True))
+        sandbox.fs.list_dir = AsyncMock(
+            return_value=[SimpleNamespace(name=f'entry-{index}', is_dir=False) for index in range(10_001)]
+        )
+
+        with pytest.raises(RuntimeError, match='exceeded 10000 entries'):
+            await scan_assets(sandbox, tmp_path, ('.claude',))
+
+    async def test_agent_inventory_has_an_entry_bound(self, tmp_path: Path) -> None:
+        sandbox = MagicMock(spec=Sandbox)
+        sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
+
+        async def stat(path: str) -> object:
+            if path.endswith('/skills'):
+                raise FileNotFoundError
+            return SimpleNamespace(is_dir=True)
+
+        sandbox.fs.stat = AsyncMock(side_effect=stat)
+        sandbox.fs.list_dir = AsyncMock(
+            return_value=[SimpleNamespace(name=f'entry-{index}.md', is_dir=False) for index in range(10_001)]
+        )
+
+        with pytest.raises(RuntimeError, match='exceeded 10000 entries'):
+            await scan_assets(sandbox, tmp_path, ('.claude',))
+
     async def test_file_at_asset_root_is_not_a_directory(self, tmp_path: Path, sandbox: Sandbox) -> None:
         _write(tmp_path / '.claude', 'not a directory')
 
@@ -255,26 +317,10 @@ class TestScanAssets:
 
         assert inv.roots[0].exists is False
 
-    async def test_inventory_command_failure_is_reported(self, tmp_path: Path) -> None:
-        sandbox = MagicMock(spec=Sandbox)
-        sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
-        sandbox.fs.stat = AsyncMock(return_value=SimpleNamespace(is_dir=True))
-        sandbox.run = AsyncMock(return_value=SimpleNamespace(exit_code=1, stderr='find failed'))
-
-        with pytest.raises(RuntimeError, match='find failed'):
-            await scan_assets(sandbox, tmp_path, ('.claude',))
-
-    async def test_unrecognized_inventory_entries_are_ignored(self, tmp_path: Path) -> None:
-        sandbox = MagicMock(spec=Sandbox)
-        sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
-        sandbox.fs.stat = AsyncMock(return_value=SimpleNamespace(is_dir=True))
-        sandbox.run = AsyncMock(
-            return_value=SimpleNamespace(
-                exit_code=0,
-                stderr='',
-                stdout=f'{tmp_path}/.claude/README.md\n{tmp_path}/.claude/settings.json\n',
-            )
-        )
+    async def test_unrecognized_inventory_entries_are_ignored(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        _write(tmp_path / '.claude' / 'README.md', 'not an agent')
+        _write(tmp_path / '.claude' / 'skills' / 'README.md', 'not a skill')
+        _write(tmp_path / '.claude' / 'settings.json', '{}')
 
         inv = await scan_assets(sandbox, tmp_path, ('.claude',))
 
@@ -285,7 +331,7 @@ class TestScanAssets:
         assert isinstance(await scan_assets(sandbox, tmp_path, ()), AgentContextInventory)
 
     @pytest.mark.skipif(sys.platform == 'win32', reason='symlinks need privileges on Windows')
-    async def test_symlinked_asset_escaping_workspace(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_symlinked_asset_uses_confined_display_path(self, tmp_path: Path, sandbox: Sandbox) -> None:
         workspace = tmp_path / 'ws'
         outside = _write(tmp_path / 'outside' / 'foo' / 'SKILL.md', 's')
         link = workspace / '.claude' / 'skills' / 'foo' / 'SKILL.md'
@@ -295,7 +341,7 @@ class TestScanAssets:
         claude = inv.roots[0]
         assert claude.exists
         assert len(claude.skills) == 1
-        assert claude.skills[0].endswith('.claude/skills/foo/SKILL.md')
+        assert claude.skills == ['.claude/skills/foo/SKILL.md']
 
 
 class TestNestedTraversal:
@@ -328,6 +374,19 @@ class TestNestedTraversal:
         second = await cap.after_tool_execute(ctx, call=call, tool_def=tool_def, args=args, result='two')
         assert 'CLAUDE.md' in first
         assert second == 'two'
+
+    async def test_concurrent_traversal_injects_directory_once(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
+        cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
+        call, tool_def, args = _call('list_directory', path='sub')
+        ctx = _run_context(sandbox=sandbox)
+
+        outputs = await asyncio.gather(
+            cap.after_tool_execute(ctx, call=call, tool_def=tool_def, args=args, result='one'),
+            cap.after_tool_execute(ctx, call=call, tool_def=tool_def, args=args, result='two'),
+        )
+
+        assert sum('CLAUDE.md' in output for output in outputs) == 1
 
     async def test_tool_name_not_matched(self, tmp_path: Path, sandbox: Sandbox) -> None:
         _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
@@ -369,21 +428,18 @@ class TestNestedTraversal:
         )
         assert 'CLAUDE.md' in out
 
-    async def test_missing_path_is_treated_as_a_directory(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        cap = RepoContext[object](workspace_dir=tmp_path)
-        cap._resolved_workspace_dir = tmp_path
-
-        assert await cap._resolve_directory(sandbox, 'missing') == tmp_path / 'missing'
-
-    async def test_path_disappearing_before_stat_is_treated_as_a_directory(self, tmp_path: Path) -> None:
+    async def test_path_disappearing_before_stat_leaves_result_unchanged(self, tmp_path: Path) -> None:
         sandbox = MagicMock(spec=Sandbox)
-        sandbox.resolve = AsyncMock(return_value=(tmp_path / 'gone').as_posix())
-        sandbox.fs.exists = AsyncMock(return_value=True)
+        sandbox.resolve = AsyncMock(side_effect=(tmp_path.as_posix(), (tmp_path / 'gone').as_posix()))
         sandbox.fs.stat = AsyncMock(side_effect=FileNotFoundError)
-        cap = RepoContext[object](workspace_dir=tmp_path)
-        cap._resolved_workspace_dir = tmp_path
+        cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
+        call, tool_def, args = _call('list_directory', path='gone')
 
-        assert await cap._resolve_directory(sandbox, 'gone') == tmp_path / 'gone'
+        result = await cap.after_tool_execute(
+            _run_context(sandbox=sandbox), call=call, tool_def=tool_def, args=args, result='listing'
+        )
+
+        assert result == 'listing'
 
     async def test_contents_mode_inlines_body(self, tmp_path: Path, sandbox: Sandbox) -> None:
         _write(tmp_path / 'sub' / 'CLAUDE.md', 'NESTED BODY')
@@ -429,16 +485,35 @@ class TestNestedTraversal:
 
 
 class TestForRunAndMisc:
-    async def test_for_run_isolates_state(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
-        base = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
-        ctx = _run_context(sandbox=sandbox)
-        run_cap = await base.for_run(ctx)
-        call, tool_def, args = _call('list_directory', path='sub')
-        await run_cap.after_tool_execute(ctx, call=call, tool_def=tool_def, args=args, result='r')
-        fresh = await base.for_run(ctx)
-        out = await fresh.after_tool_execute(ctx, call=call, tool_def=tool_def, args=args, result='r2')
-        assert 'CLAUDE.md' in out
+    async def test_agent_reuse_isolates_instruction_state_between_sandboxes(self, tmp_path: Path) -> None:
+        first_root = tmp_path / 'first'
+        second_root = tmp_path / 'second'
+        _write(first_root / 'CLAUDE.md', 'first sandbox instructions')
+        _write(second_root / 'CLAUDE.md', 'second sandbox instructions')
+        captured: list[list[ModelMessage]] = []
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            del info
+            captured.append(messages)
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent = Agent(
+            FunctionModel(model),
+            capabilities=[RepoContext[object](workspace_dir=Path('.'), expose_inventory_tool=False)],
+        )
+
+        instructions: list[str] = []
+        for root in (first_root, second_root):
+            async with LocalSandbox(root=root) as backend:
+                await agent.run('go', sandbox=backend)
+            first_request = captured[-1][0]
+            assert isinstance(first_request, ModelRequest)
+            instructions.append(first_request.instructions or '')
+
+        assert 'first sandbox instructions' in instructions[0]
+        assert 'second sandbox instructions' not in instructions[0]
+        assert 'second sandbox instructions' in instructions[1]
+        assert 'first sandbox instructions' not in instructions[1]
 
     def test_serialization_name(self) -> None:
         assert RepoContext.get_serialization_name() == 'RepoContext'

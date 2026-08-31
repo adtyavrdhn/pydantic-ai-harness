@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -10,10 +11,11 @@ import httpx
 import pytest
 from pydantic import TypeAdapter
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.sandboxes import LocalSandbox, Sandbox
+from pydantic_ai.sandboxes import LocalSandbox, Sandbox, UnavailableSandbox
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.pydantic_ai_docs import PydanticAIDocs, PydanticAIDocsToolset, PydanticAIDocsTopic
@@ -106,6 +108,7 @@ class TestPydanticAIDocsToolset:
             == '# Hooks local'
         )
 
+    @pytest.mark.skipif(os.name != 'posix', reason='host fallback is POSIX-only')
     async def test_local_hit_without_attached_sandbox_uses_host(self, tmp_path: Path) -> None:
         (tmp_path / 'hooks.md').write_text('# Hooks local', encoding='utf-8')
         toolset = PydanticAIDocsToolset[object](local_docs_path=tmp_path, cache=None)
@@ -175,6 +178,31 @@ class TestPydanticAIDocsToolset:
             await _call_docs_tool(toolset, sandbox, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks) == '# Hooks home'
         )
 
+    async def test_tilde_expands_only_for_legacy_host_fallback(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv('HOME', str(tmp_path))
+        docs = tmp_path / 'docs'
+        docs.mkdir()
+        (docs / 'hooks.md').write_text('# Hooks home', encoding='utf-8')
+        toolset = PydanticAIDocsToolset[object](local_docs_path=Path('~/docs'), cache=None)
+
+        assert await _call_docs_tool(toolset, None, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks) == '# Hooks home'
+
+    async def test_tilde_is_rejected_inside_attached_sandbox(self, sandbox: Sandbox) -> None:
+        toolset = PydanticAIDocsToolset[object](local_docs_path=Path('~/docs'), cache=None)
+
+        with pytest.raises(UserError, match='do not expand'):
+            await _call_docs_tool(toolset, sandbox, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks)
+
+    async def test_explicit_unavailable_sandbox_does_not_fall_back_to_host(self, tmp_path: Path) -> None:
+        (tmp_path / 'hooks.md').write_text('# Host hooks', encoding='utf-8')
+        policy = Sandbox.wrap(UnavailableSandbox('No sandbox is attached to this run. Filesystem disabled by policy.'))
+        toolset = PydanticAIDocsToolset[object](local_docs_path=tmp_path, cache=None)
+
+        with pytest.raises(UserError, match='Filesystem disabled by policy'):
+            await _call_docs_tool(toolset, policy, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks)
+
 
 class TestPydanticAIDocsCapability:
     def test_resolved_path_prefers_constructor_arg(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -230,3 +258,66 @@ class TestThroughAgent:
             if isinstance(part, ToolReturnPart) and part.tool_name == 'read_pyai_docs'
         ]
         assert returns == ['# Capabilities doc']
+
+    @pytest.mark.skipif(os.name != 'posix', reason='host fallback is POSIX-only')
+    async def test_framework_default_sandbox_preserves_host_fallback(self, tmp_path: Path) -> None:
+        (tmp_path / 'capabilities.md').write_text('# Host capabilities', encoding='utf-8')
+
+        def call_then_finish(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if len(messages) == 1:
+                return ModelResponse(parts=[ToolCallPart('read_pyai_docs', {'topic': 'capabilities'})])
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent = Agent(FunctionModel(call_then_finish), capabilities=[PydanticAIDocs(local_docs_path=tmp_path)])
+
+        result = await agent.run('go')
+
+        returns = [
+            part.content
+            for message in result.all_messages()
+            for part in message.parts
+            if isinstance(part, ToolReturnPart) and part.tool_name == 'read_pyai_docs'
+        ]
+        assert returns == ['# Host capabilities']
+
+    @pytest.mark.skipif(os.name == 'posix', reason='host fallback is disabled only on non-POSIX platforms')
+    async def test_framework_default_sandbox_does_not_use_host_off_posix(self, tmp_path: Path) -> None:
+        (tmp_path / 'capabilities.md').write_text('# Host capabilities', encoding='utf-8')
+
+        def call_then_finish(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ToolCallPart('read_pyai_docs', {'topic': 'capabilities'})])
+
+        agent = Agent(FunctionModel(call_then_finish), capabilities=[PydanticAIDocs(local_docs_path=tmp_path)])
+
+        with pytest.raises(UserError, match='No sandbox is attached'):
+            await agent.run('go')
+
+    async def test_cache_is_isolated_between_run_sandboxes(self, tmp_path: Path) -> None:
+        first_root = tmp_path / 'first'
+        second_root = tmp_path / 'second'
+        for root, content in ((first_root, '# First sandbox'), (second_root, '# Second sandbox')):
+            docs = root / 'docs'
+            docs.mkdir(parents=True)
+            (docs / 'capabilities.md').write_text(content, encoding='utf-8')
+
+        def call_then_finish(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if len(messages) == 1:
+                return ModelResponse(parts=[ToolCallPart('read_pyai_docs', {'topic': 'capabilities'})])
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent = Agent(FunctionModel(call_then_finish), capabilities=[PydanticAIDocs(local_docs_path=Path('docs'))])
+
+        returned: list[str] = []
+        for root in (first_root, second_root):
+            async with LocalSandbox(root=root) as backend:
+                result = await agent.run('go', sandbox=backend)
+            returned.extend(
+                part.content
+                for message in result.all_messages()
+                for part in message.parts
+                if isinstance(part, ToolReturnPart)
+                and part.tool_name == 'read_pyai_docs'
+                and isinstance(part.content, str)
+            )
+
+        assert returned == ['# First sandbox', '# Second sandbox']
