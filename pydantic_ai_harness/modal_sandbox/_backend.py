@@ -4,6 +4,21 @@ This is the mechanism layer: every Modal-specific operation (create, connect, ex
 access, working-directory discovery, teardown) lives here, behind the protocol the rest of
 Pydantic AI already speaks. The capability in `_capability.py` owns the lifecycle; tools and
 other capabilities consume the resulting `ctx.sandbox`.
+
+External assumptions last verified 2026-08-31 against Modal Python SDK 1.5.2 (the package floor):
+
+* asynchronous sandbox operations use the SDK's `.aio` call surface; `from_id` reconnects by
+  object ID; `terminate` leaves the Python client attached, so cleanup also calls `detach`:
+  https://modal.com/docs/guide/sandboxes
+* `Sandbox.exec` returns a process with separate stdout and stderr readers, and its `timeout`
+  bounds command execution; output is buffered unless the caller consumes the streams:
+  https://modal.com/docs/guide/sandbox-spawn
+* the sandbox filesystem supplies byte reads and writes, metadata, directory listing, creation,
+  and removal:
+  https://modal.com/docs/sdk/py/latest/Sandbox
+
+Re-check these sources and the installed 1.5.2 signatures before changing lifecycle, command,
+stream, or filesystem handling.
 """
 
 from __future__ import annotations
