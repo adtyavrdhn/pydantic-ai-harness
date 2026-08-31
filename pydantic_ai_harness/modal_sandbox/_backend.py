@@ -742,6 +742,9 @@ class ModalSandboxBackend:
             if error is not None:
                 errors.append(error)
         if errors:
+            # Deliver cancellation that arrived during the shield before reporting a secondary
+            # cleanup failure. Without this checkpoint, that failure could replace cancellation.
+            await anyio.lowlevel.checkpoint()
             raise errors[0]
 
     async def _close_call(self, call: Awaitable[object], *, operation: str) -> ModalSandboxError | None:

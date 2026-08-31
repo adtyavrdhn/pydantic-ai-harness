@@ -49,6 +49,19 @@ class _GatedCall:
         return result
 
 
+class _AnyIOGatedCall(_AioCallable):
+    def __init__(self, inner: _AioCallable) -> None:
+        super().__init__(lambda: None)
+        self._inner = inner
+        self.started = anyio.Event()
+        self.release = anyio.Event()
+
+    async def aio(self, *args: object, **kwargs: object) -> object:
+        self.started.set()
+        await self.release.wait()
+        return await self._inner.aio(*args, **kwargs)
+
+
 def _skip_without_asyncio() -> None:
     """Merging two Modal readers needs asyncio; the fake alone would run anywhere."""
     if sniffio.current_async_library() != 'asyncio':
@@ -349,6 +362,26 @@ class TestClose:
             await backend.close(terminate=True)
 
         assert fake_modal.sandboxes[0].detached is True
+
+    async def test_close_failure_does_not_replace_cancellation(self, fake_modal: FakeModal) -> None:
+        backend = await ModalSandboxBackend.create()
+        sandbox = fake_modal.sandboxes[0]
+        sandbox.detach_error = RuntimeError('detach failed')
+        detach = _AnyIOGatedCall(sandbox.detach)
+        sandbox.detach = detach
+        scopes: list[anyio.CancelScope] = []
+
+        async def close() -> None:
+            with anyio.CancelScope() as scope:
+                scopes.append(scope)
+                await backend.close(terminate=False)
+            assert scope.cancelled_caught is True
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(close)
+            await detach.started.wait()
+            scopes[0].cancel()
+            detach.release.set()
 
     async def test_hanging_terminate_is_bounded_and_detach_still_runs(
         self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
