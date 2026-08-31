@@ -35,9 +35,11 @@ control. Replace `U0123456789` below with your Slack member id from
 **Profile > Copy member ID**.
 
 ```python
-import asyncio
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
+import anyio
 from pydantic_ai import Agent
 
 from pydantic_ai_harness.channels import ChannelHost, WebhookRequest, WebhookResponse
@@ -51,25 +53,28 @@ channel = SlackChannel(
 host = ChannelHost(agent, channel, allowed_senders={'U0123456789'})
 
 
-def receive_slack(method: str, headers: dict[str, str], body: bytes) -> WebhookResponse:
+async def receive_slack(method: str, headers: dict[str, str], body: bytes) -> WebhookResponse:
     request = WebhookRequest(method=method, headers=headers, query={}, body=body)
     return channel.handle_webhook(request)
 
 
-def start_channel() -> asyncio.Task[None]:
-    return asyncio.create_task(host.serve())
+@asynccontextmanager
+async def channel_lifespan() -> AsyncIterator[None]:
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(host.serve)
+        yield
+        tasks.cancel_scope.cancel()
 ```
 
-Connect the two functions to your web app:
+Connect the lifespan and route to your web app:
 
-1. Call `start_channel()` when the app starts.
+1. Enter `channel_lifespan()` for the app's lifespan.
 2. Forward the Events API route to `receive_slack()` and return its status code
    and body.
-3. On shutdown, cancel the channel task, then await it while suppressing
-   `asyncio.CancelledError`.
 
-The lifespan and route must use the same process and event loop. Multi-worker
-deployments need external ingress routing and storage.
+The task group owns the channel service and waits for its turns during shutdown.
+The lifespan and route must use the same process and async event-loop thread.
+Multi-worker deployments need external ingress routing and storage.
 
 ## How channels fit Pydantic AI
 

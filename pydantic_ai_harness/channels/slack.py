@@ -14,15 +14,16 @@ before changing authentication, acknowledgement, deduplication, or delivery.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import math
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
+from contextlib import aclosing
 from types import TracebackType
 
+import anyio
 import httpx
 from pydantic import TypeAdapter, ValidationError
 from typing_extensions import Self
@@ -127,8 +128,8 @@ class SlackChannel:
     def handle_webhook(self, request: WebhookRequest) -> WebhookResponse:
         """Authenticate and enqueue one Slack Events API request.
 
-        This method performs no agent work and is safe to call from an HTTP
-        request handler that must acknowledge Slack promptly.
+        This method performs no agent work and acknowledges Slack promptly. Call
+        it on the same async event-loop thread that runs `messages()`.
         """
         if request.method.upper() != 'POST':
             return WebhookResponse(405)
@@ -232,9 +233,11 @@ class SlackChannel:
             text=text,
         )
 
-    def messages(self) -> AsyncIterator[InboundMessage]:
+    async def messages(self) -> AsyncGenerator[InboundMessage, None]:
         """Yield verified direct messages and app mentions until cancelled."""
-        return self._inbox.messages()
+        async with aclosing(self._inbox.messages()) as messages:
+            async for message in messages:
+                yield message
 
     async def send_text(self, conversation_id: str, text: str) -> None:
         """Post text in ordered chunks no longer than Slack's recommended limit."""
@@ -253,7 +256,7 @@ class SlackChannel:
             try:
                 await self._call('chat.postMessage', params)
             except _RateLimited as exc:
-                await asyncio.sleep(exc.retry_after)
+                await anyio.sleep(exc.retry_after)
                 await self._call('chat.postMessage', params)
 
     async def _call(self, method: str, params: Mapping[str, object] | None = None) -> dict[str, object]:
