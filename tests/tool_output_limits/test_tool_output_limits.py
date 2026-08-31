@@ -758,6 +758,22 @@ class TestSummarize:
         out = await _run(cap, 'a' * 100)
         assert isinstance(out, str) and 'truncated' in out
 
+    async def test_nested_per_tool_model_summarizer(self):
+        summarize = Summarize(model=_fixed_model('NESTED SUMMARY'))
+        cap: ToolOutputLimits[object] = ToolOutputLimits(
+            bands=[Band(over=5, action=Passthrough())],
+            per_tool={'big_tool': [Band(over=5, action=Spill(then=summarize))]},
+            store=_BrokenStore(),
+        )
+
+        assert await _run(cap, 'x' * 100) == 'NESTED SUMMARY'
+
+    def test_summarize_path_rejects_action_outside_configuration(self):
+        cap: ToolOutputLimits[object] = ToolOutputLimits(bands=[Band(over=5, action=Passthrough())])
+
+        with pytest.raises(RuntimeError, match='not part of this capability'):
+            cap._summarize_path(Summarize())
+
 
 # ---------------------------------------------------------------------------
 # Passthrough action + per-tool + band selection
