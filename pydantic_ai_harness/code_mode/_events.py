@@ -100,6 +100,8 @@ class SpeculativeCallSettledEvent(CapabilityEvent, namespace=CODE_MODE_EVENTS):
     """
 
     launch_id: str
+    """Identifier from this launch's `SpeculativeCallLaunchedEvent`."""
+
     outcome: Literal['ready', 'failed']
     """Whether the early run produced a result or an error (delivered at claim, like a cold call's)."""
 
@@ -112,6 +114,8 @@ class SpeculativeCallClaimedEvent(CapabilityEvent, namespace=CODE_MODE_EVENTS):
     """The executing snippet dispatched a call and adopted an in-flight launch: a hit."""
 
     launch_id: str
+    """Identifier from this launch's `SpeculativeCallLaunchedEvent`."""
+
     nested_tool_call_id: str
     """The adopted call's id in message history (`{part_id}__{n}`), distinct from the launch id."""
 
@@ -147,6 +151,8 @@ class SpeculativeCallEvictedEvent(CapabilityEvent, namespace=CODE_MODE_EVENTS):
     """
 
     launch_id: str
+    """Identifier from this launch's `SpeculativeCallLaunchedEvent`."""
+
     wrapped_tool_name: str
     state: Literal['pending', 'ready', 'failed']
     """Where the launch was when discarded: still running, or settled with a result or error."""

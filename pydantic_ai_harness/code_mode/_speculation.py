@@ -65,7 +65,7 @@ _RUN_CODE_TOOL_NAME = 'run_code'
 _MAX_SPECULATIONS_PER_PART = 32
 
 
-@dataclass
+@dataclass(kw_only=True)
 class SpeculationStats:
     """Aggregate speculation counters, shared across the runs of one `CodeMode` instance."""
 
@@ -79,7 +79,7 @@ class SpeculationStats:
     """Early calls cancelled or discarded without being claimed."""
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class _SpecOutcome:
     """What a speculative task settles to. Exactly one of `error`/the value fields is meaningful."""
 
@@ -99,7 +99,7 @@ class _SpecOutcome:
     """Set when a handler denied the call, so adoption can record `outcome='denied'`."""
 
 
-@dataclass
+@dataclass(kw_only=True)
 class SpeculativeCall:
     """One in-flight early launch, waiting to be claimed by the executing snippet."""
 
