@@ -4,18 +4,24 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field
+from typing import TYPE_CHECKING
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 
 from pydantic_ai_harness.stackone._toolset import (
     STACKONE_BASE_URL,
-    MCPToolsetClient,
     StackOneToolset,
     ToolMode,
     resolve_tool_mode,
     validate_configuration,
 )
+
+if TYPE_CHECKING:
+    # Imported from its defining module rather than through `_toolset` so pyright does not
+    # flag a non-re-exported name; kept type-only so a missing `stackone` extra still fails
+    # through `_toolset`'s guarded import with the actionable message.
+    from pydantic_ai.mcp import MCPToolsetClient
 
 _DEFAULT_ID = 'stackone'
 _DEFAULT_DESCRIPTION = 'Use actions from a linked business application through StackOne.'
