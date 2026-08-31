@@ -146,6 +146,37 @@ class TestConnect:
             await E2BSandboxBackend.connect('sbx-keep')
 
 
+class TestFind:
+    async def test_missing_e2b_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _hide_e2b(monkeypatch)
+
+        with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
+            await E2BSandboxBackend._find({'run': 'one'})
+
+    async def test_auth_error_is_terminal(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fail_list(**kwargs: object) -> object:
+            del kwargs
+            raise fake_e2b.auth_type('bad key')
+
+        monkeypatch.setattr(fake_e2b.module.AsyncSandbox, 'list', fail_list)
+
+        with pytest.raises(E2BSandboxTerminalError, match='E2B rejected the credentials'):
+            await E2BSandboxBackend._find({'run': 'one'})
+
+    async def test_other_list_failures_are_recoverable(
+        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fail_list(**kwargs: object) -> object:
+            del kwargs
+            raise RuntimeError('control plane unavailable')
+
+        monkeypatch.setattr(fake_e2b.module.AsyncSandbox, 'list', fail_list)
+
+        with pytest.raises(E2BSandboxError, match='Could not list E2B sandboxes') as exc:
+            await E2BSandboxBackend._find({'run': 'one'})
+        assert not isinstance(exc.value, E2BSandboxTerminalError)
+
+
 class TestClose:
     async def test_kills_when_owned(self, fake_e2b: FakeE2B) -> None:
         backend = await E2BSandboxBackend.create()
@@ -169,6 +200,13 @@ class TestClose:
         backend = await E2BSandboxBackend.create()
         fake_e2b.kill_error = fake_e2b.sandbox_gone_type('already gone')
         await backend.close(terminate=True)
+
+    async def test_auth_failure_during_kill_is_typed(self, fake_e2b: FakeE2B) -> None:
+        backend = await E2BSandboxBackend.create()
+        fake_e2b.kill_error = fake_e2b.auth_type('bad key')
+
+        with pytest.raises(E2BSandboxTerminalError, match='E2B rejected the credentials'):
+            await backend.close(terminate=True)
 
     async def test_hanging_kill_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
         # Teardown runs shielded, so a hanging kill would be uncancellable; its own deadline

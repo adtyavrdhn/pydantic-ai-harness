@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic_ai.models.test import TestModel
@@ -58,6 +59,27 @@ class TestLifecycle:
 
         assert ref.sandbox_id == 'oldest'
         assert fake_e2b.list_calls == [(metadata, 1, 'asc')]
+
+    async def test_concurrent_creator_loses_to_oldest_sandbox(
+        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        created = await E2BSandboxBackend.create()
+        canonical = await E2BSandboxBackend.create()
+        monkeypatch.setattr(E2BSandboxBackend, '_find', AsyncMock(side_effect=[None, canonical]))
+        monkeypatch.setattr(E2BSandboxBackend, 'create', AsyncMock(return_value=created))
+
+        selected = await E2BSandboxBackend._create_or_connect(identity={'run': 'one'})
+
+        assert selected is canonical
+        assert created.sandbox.killed is True  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+    async def test_fake_list_supports_descending_order(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.new_sandbox('oldest')
+        fake_e2b.new_sandbox('newest')
+
+        paginator = fake_e2b.module.AsyncSandbox.list(order='desc')
+
+        assert [item.sandbox_id for item in await paginator.next_items()] == ['newest', 'oldest']
 
     async def test_get_sandbox_reconnects_by_ref(self, fake_e2b: FakeE2B) -> None:
         backend = await E2BSandbox[None]().get_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='sbx-existing'))
@@ -117,6 +139,10 @@ class TestConfiguration:
     def test_rejects_relative_workdir(self) -> None:
         with pytest.raises(ValueError, match='absolute'):
             E2BSandbox(workdir='repo')
+
+    def test_rejects_non_boolean_internet_access(self) -> None:
+        with pytest.raises(ValueError, match='allow_internet_access'):
+            E2BSandbox(allow_internet_access=1)  # type: ignore[arg-type]
 
     def test_reserves_retry_identity_metadata(self) -> None:
         with pytest.raises(ValueError, match='reserved'):
