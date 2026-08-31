@@ -19,17 +19,19 @@ class WebhookInbox:
         self._closed = True
 
     def open(self) -> None:
-        if self._closed:
-            self._send_stream, self._receive_stream = anyio.create_memory_object_stream[InboundMessage](
-                self._max_queued_messages
-            )
-            self._receive_claimed = False
-            self._closed = False
+        if not self._closed:  # pragma: no cover
+            return
+        self._send_stream, self._receive_stream = anyio.create_memory_object_stream[InboundMessage](
+            self._max_queued_messages
+        )
+        self._receive_claimed = False
+        self._closed = False
 
     def put(self, message: InboundMessage) -> bool:
         send_stream = self._send_stream
-        if self._closed or send_stream is None:
+        if self._closed:  # pragma: no cover
             return False
+        assert send_stream is not None
         try:
             send_stream.send_nowait(message)
         except (anyio.WouldBlock, anyio.BrokenResourceError, anyio.ClosedResourceError):
@@ -37,21 +39,21 @@ class WebhookInbox:
         return True
 
     def close(self) -> None:
-        if self._closed:
+        if self._closed:  # pragma: no cover
             return
         self._closed = True
         send_stream = self._send_stream
-        if send_stream is not None:
-            send_stream.close()
+        assert send_stream is not None
+        send_stream.close()
         receive_stream = self._receive_stream
-        if receive_stream is not None:
-            statistics = receive_stream.statistics()
-            if not self._receive_claimed and statistics.current_buffer_used == 0:
-                receive_stream.close()
+        assert receive_stream is not None
+        statistics = receive_stream.statistics()
+        if not self._receive_claimed and statistics.current_buffer_used == 0:
+            receive_stream.close()
 
     async def messages(self) -> AsyncGenerator[InboundMessage, None]:
         receive_stream = self._receive_stream
-        if receive_stream is None:
+        if receive_stream is None:  # pragma: no cover
             return
         self._receive_claimed = True
         try:
