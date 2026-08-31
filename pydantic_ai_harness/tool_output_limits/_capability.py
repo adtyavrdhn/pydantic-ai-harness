@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, TypeGuard, cast
+from typing import Any, TypeGuard
 
 from pydantic_ai import FunctionToolset
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
@@ -452,13 +452,15 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
     def _summary_model(ctx: RunContext[AgentDepsT], action: Summarize) -> Model[Any] | str:
         """Resolve and validate the model on both the caller and durable worker paths."""
         model = action.model if action.model is not None else ctx.model
-        if isinstance(model, AbstractModel) and not isinstance(model, Model):
+        if isinstance(model, str):
+            return model
+        if not _is_request_response_model(model):
             raise UserError(
                 'Summarizing oversized tool output needs a request-response model, but the run '
                 f'uses {type(model).__name__}, which is not one. Set a `model=` on the '
                 '`Summarize` action to use for summarization.'
             )
-        return cast('Model[Any] | str', model)
+        return model
 
     def _summarize_path(self, target: Summarize) -> str:
         for prefix, bands in [
@@ -524,6 +526,11 @@ def _handle_key(ctx: RunContext[AgentDepsT], call: ToolCallPart, suffix: str = '
 def _is_mapping(value: object) -> TypeGuard[Mapping[object, object]]:
     """`TypeGuard` so a mapping narrows to a known element type, not `Unknown`."""
     return isinstance(value, Mapping)
+
+
+def _is_request_response_model(value: AbstractModel) -> TypeGuard[Model[Any]]:
+    """Narrow an abstract model without losing its provider client type."""
+    return isinstance(value, Model)
 
 
 def _with_handles(

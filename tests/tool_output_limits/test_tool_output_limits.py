@@ -722,6 +722,18 @@ class TestSummarize:
         assert out == 'FROM EXPLICIT MODEL'
         assert ctx.usage.requests == 1
 
+    async def test_explicit_model_name_overrides_ctx(self):
+        ctx = _make_ctx(model=_fixed_model('FROM CTX MODEL'))
+        cap: ToolOutputLimits[object] = ToolOutputLimits(bands=[Band(over=5, action=Summarize(model='test:summary'))])
+        mock_result = AsyncMock(output='FROM NAMED MODEL')
+        mock_agent = AsyncMock()
+        mock_agent.run.return_value = mock_result
+
+        with patch('pydantic_ai.Agent', return_value=mock_agent) as agent_type:
+            assert await _run(cap, 'x' * 100, ctx=ctx) == 'FROM NAMED MODEL'
+
+        agent_type.assert_called_once_with('test:summary', instructions='You summarize oversized tool output.')
+
     async def test_realtime_run_without_a_model_raises(self):
         """A realtime run has no request-response model to summarize with; ask for one (#585)."""
 
