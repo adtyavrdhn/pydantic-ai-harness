@@ -118,18 +118,22 @@ Step names are built from the agent's `name` and each toolset's `id`:
 |---|---|
 | `{name}__model.request` | one model request segment |
 | `{name}__model.request_stream` | one streamed model request segment |
+| `{name}__model.compact_messages` | one model message-compaction operation |
 | `{name}__model.cancel_suspended_response` | tearing down a suspended response |
+| `{name}__capability__{capability_id}.{operation}` | an operation contributed by another capability |
+| `{name}__function_toolset__{id}.validate_args` | validating a function tool call's arguments |
 | `{name}__function_toolset__{id}.call_tool:{tool}` | a function tool call |
 | `{name}__mcp_server__{id}.get_tools` | listing an MCP server's tools |
 | `{name}__mcp_server__{id}.get_instructions` | an MCP server's instructions |
 | `{name}__mcp_server__{id}.call_tool` | an MCP tool call |
 | `{name}__dynamic_toolset__{id}.get_tools` | resolving a dynamic toolset |
+| `{name}__dynamic_toolset__{id}.validate_args` | validating a dynamic toolset call's arguments |
 | `{name}__dynamic_toolset__{id}.call_tool:{tool}` | a dynamic toolset's tool call |
 | `{name}__event_stream_handler` | one event delivered to an `event_stream_handler` |
 
-A request that does not use the agent's default model records its model id in the step name
-(`{name}__model.request.{model_id}`), so a resumed execution maps each checkpoint back to the model
-it was recorded for. The default model keeps the plain, suffix-less name.
+A model operation that does not use the agent's default model records its model id in the step name
+(for example, `{name}__model.request.{model_id}`), so a resumed execution maps each checkpoint back
+to the model it was recorded for. The default model keeps the plain, suffix-less name.
 
 ## Constraints
 
@@ -141,7 +145,7 @@ it was recorded for. The default model keeps the plain, suffix-less name.
   re-execution after an interruption *within* an attempt, but the retry policy still starts further
   attempts that do execute the body. For a tool that must not repeat, set both:
 
-    ```python {test="skip" lint="skip"}
+    ```python {names="defined"}
     from aws_durable_execution_sdk_python.config import StepSemantics
     from aws_durable_execution_sdk_python.retries import RetryPresets
 
