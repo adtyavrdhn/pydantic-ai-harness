@@ -67,8 +67,9 @@ chat. If sending a reply fails, the host logs the failure and continues serving.
 History remains saved after a successful run even when delivery cannot be
 confirmed.
 
-`serve()` runs until it is cancelled or the adapter ends. It closes the adapter
-and cancels in-flight turns when the serving task is cancelled.
+`serve()` runs until it is cancelled or the adapter ends. It owns every turn in
+an AnyIO task group, so no turn task outlives it. Cancellation closes the
+message iterator, cancels in-flight turns, and then closes the adapter.
 
 ## Security
 

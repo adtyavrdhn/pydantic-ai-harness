@@ -3,5 +3,5 @@ import pytest
 
 @pytest.fixture
 def anyio_backend() -> str:
-    """Channels use asyncio because `ChannelHost` owns asyncio tasks and locks."""
+    """Pydantic AI's agent run lifecycle currently creates asyncio tasks."""
     return 'asyncio'

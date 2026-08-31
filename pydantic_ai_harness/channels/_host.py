@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Collection
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Generic
 
+import anyio
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.tools import AgentDepsT
 
@@ -26,7 +27,7 @@ _DEFAULT_RESET_REPLY = 'Started a new conversation.'
 
 @dataclass(slots=True)
 class _ConversationLane:
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    lock: anyio.Lock = field(default_factory=anyio.Lock)
     users: int = 0
 
 
@@ -82,44 +83,46 @@ class ChannelHost(Generic[AgentDepsT]):
         self._deps = deps
         self._error_reply = error_reply
         self._reset_reply = reset_reply
-        self._turn_slots = asyncio.Semaphore(max_pending_turns)
-        self._lanes: dict[str, _ConversationLane] = {}
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._max_pending_turns = max_pending_turns
+        self._serving = False
 
     async def serve(self) -> None:
         """Receive and handle messages until the adapter ends or this task is cancelled."""
-        async with self._adapter:
-            try:
-                async for message in self._adapter.messages():
-                    if message.sender_id not in self._allowed_senders:
-                        logger.warning('Ignoring channel message from sender %s', message.sender_id)
-                        continue
-                    await self._turn_slots.acquire()
-                    task = asyncio.create_task(self._handle_serialized(message))
-                    self._tasks.add(task)
-                    task.add_done_callback(self._tasks.discard)
-                await asyncio.gather(*tuple(self._tasks))
-            except BaseException:
-                await self._cancel_tasks()
-                raise
+        if self._serving:
+            raise RuntimeError('ChannelHost is already serving')
+        self._serving = True
+        turn_slots = anyio.Semaphore(self._max_pending_turns)
+        lanes: dict[str, _ConversationLane] = {}
+        try:
+            async with self._adapter:
+                async with anyio.create_task_group() as task_group:
+                    async with aclosing(self._adapter.messages()) as inbound:
+                        async for message in inbound:
+                            if message.sender_id not in self._allowed_senders:
+                                logger.warning('Ignoring channel message from sender %s', message.sender_id)
+                                continue
+                            await turn_slots.acquire()
+                            lane = lanes.setdefault(message.conversation_id, _ConversationLane())
+                            lane.users += 1
+                            task_group.start_soon(self._handle_serialized, message, lane, lanes, turn_slots)
+        finally:
+            self._serving = False
 
-    async def _cancel_tasks(self) -> None:
-        tasks = tuple(self._tasks)
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _handle_serialized(self, message: InboundMessage) -> None:
-        lane = self._lanes.setdefault(message.conversation_id, _ConversationLane())
-        lane.users += 1
+    async def _handle_serialized(
+        self,
+        message: InboundMessage,
+        lane: _ConversationLane,
+        lanes: dict[str, _ConversationLane],
+        turn_slots: anyio.Semaphore,
+    ) -> None:
         try:
             async with lane.lock:
                 await self._handle(message)
         finally:
             lane.users -= 1
             if lane.users == 0:
-                self._lanes.pop(message.conversation_id, None)
-            self._turn_slots.release()
+                del lanes[message.conversation_id]
+            turn_slots.release()
 
     async def _handle(self, message: InboundMessage) -> None:
         if message.text.strip() == '/new':

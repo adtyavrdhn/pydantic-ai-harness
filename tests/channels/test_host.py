@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from types import TracebackType
 
+import anyio
 import pytest
+from anyio.lowlevel import checkpoint
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -38,7 +39,7 @@ class FakeChannel:
         self.entered = False
         return None
 
-    async def messages(self) -> AsyncIterator[InboundMessage]:
+    async def messages(self) -> AsyncGenerator[InboundMessage, None]:
         for message in self.inbound:
             yield message
 
@@ -52,8 +53,8 @@ class GateStore(InMemoryConversationStore):
     def __init__(self) -> None:
         super().__init__()
         self.started: list[str] = []
-        self.two_started = asyncio.Event()
-        self.release = asyncio.Event()
+        self.two_started = anyio.Event()
+        self.release = anyio.Event()
 
     async def load(self, conversation_id: str) -> Sequence[ModelMessage]:
         self.started.append(conversation_id)
@@ -142,12 +143,12 @@ class TestChannelHost:
             ]
         )
         agent: Agent[None, str] = Agent('test')
-        serve = asyncio.create_task(ChannelHost(agent, channel, allowed_senders={'user-1'}, store=store).serve())
-
-        await asyncio.wait_for(store.two_started.wait(), timeout=1)
-        assert store.started == ['chat-1', 'chat-2']
-        store.release.set()
-        await serve
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(ChannelHost(agent, channel, allowed_senders={'user-1'}, store=store).serve)
+            with anyio.fail_after(1):
+                await store.two_started.wait()
+            assert store.started == ['chat-1', 'chat-2']
+            store.release.set()
 
         assert store.started == ['chat-1', 'chat-2', 'chat-1']
 
@@ -161,22 +162,20 @@ class TestChannelHost:
             ]
         )
         agent: Agent[None, str] = Agent('test')
-        serve = asyncio.create_task(
-            ChannelHost(
-                agent,
-                channel,
-                allowed_senders={'user-1'},
-                store=store,
-                max_pending_turns=2,
-            ).serve()
+        host = ChannelHost(
+            agent,
+            channel,
+            allowed_senders={'user-1'},
+            store=store,
+            max_pending_turns=2,
         )
-
-        await asyncio.wait_for(store.two_started.wait(), timeout=1)
-        await asyncio.sleep(0)
-        assert store.started == ['chat-1', 'chat-2']
-
-        store.release.set()
-        await serve
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(host.serve)
+            with anyio.fail_after(1):
+                await store.two_started.wait()
+            await checkpoint()
+            assert store.started == ['chat-1', 'chat-2']
+            store.release.set()
         assert store.started == ['chat-1', 'chat-2', 'chat-3']
 
     async def test_run_failure_replies_without_leaking_the_error(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -227,33 +226,122 @@ class TestChannelHost:
 
     @pytest.mark.parametrize('finite_adapter', [False, True])
     async def test_cancellation_closes_adapter_and_cancels_turn(self, finite_adapter: bool) -> None:
-        started = asyncio.Event()
-        cancelled = asyncio.Event()
+        started = anyio.Event()
+        cancelled = anyio.Event()
 
         async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             started.set()
             try:
-                await asyncio.Future()
+                await anyio.sleep_forever()
             finally:
                 cancelled.set()
             raise AssertionError('cancelled model returned')  # pragma: no cover
 
         class WaitingChannel(FakeChannel):
-            async def messages(self) -> AsyncIterator[InboundMessage]:
+            async def messages(self) -> AsyncGenerator[InboundMessage, None]:
                 yield inbound('wait')
-                await asyncio.Future()
+                await anyio.sleep_forever()
 
         channel = FakeChannel([inbound('wait')]) if finite_adapter else WaitingChannel()
         agent: Agent[None, str] = Agent(FunctionModel(model))
-        task = asyncio.create_task(ChannelHost(agent, channel, allowed_senders={'user-1'}).serve())
-        await asyncio.wait_for(started.wait(), timeout=1)
-
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(ChannelHost(agent, channel, allowed_senders={'user-1'}).serve)
+            with anyio.fail_after(1):
+                await started.wait()
+            task_group.cancel_scope.cancel()
 
         assert cancelled.is_set()
         assert channel.entered is False
+
+    async def test_cancellation_while_waiting_for_turn_capacity(self) -> None:
+        started = anyio.Event()
+        second_yielded = anyio.Event()
+        cancelled = anyio.Event()
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            started.set()
+            try:
+                await anyio.sleep_forever()
+            finally:
+                cancelled.set()
+            raise AssertionError('cancelled model returned')  # pragma: no cover
+
+        class WaitingChannel(FakeChannel):
+            async def messages(self) -> AsyncGenerator[InboundMessage, None]:
+                yield inbound('one')
+                second_yielded.set()
+                yield inbound('two', conversation_id='chat-2')
+
+        channel = WaitingChannel()
+        host = ChannelHost(Agent(FunctionModel(model)), channel, allowed_senders={'user-1'}, max_pending_turns=1)
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(host.serve)
+            with anyio.fail_after(1):
+                await started.wait()
+                await second_yielded.wait()
+            await checkpoint()
+            task_group.cancel_scope.cancel()
+
+        assert cancelled.is_set()
+        assert channel.entered is False
+
+    async def test_closes_message_iterator_before_adapter(self) -> None:
+        events: list[str] = []
+        entered = anyio.Event()
+
+        class WaitingChannel(FakeChannel):
+            async def __aenter__(self) -> Self:
+                await super().__aenter__()
+                entered.set()
+                return self
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: TracebackType | None,
+            ) -> bool | None:
+                events.append('adapter')
+                return await super().__aexit__(exc_type, exc, traceback)
+
+            async def messages(self) -> AsyncGenerator[InboundMessage, None]:
+                try:
+                    await anyio.sleep_forever()
+                    if False:  # pragma: no cover
+                        yield inbound('unreachable')
+                finally:
+                    events.append('messages')
+
+        host = ChannelHost(Agent('test'), WaitingChannel(), allowed_senders={'user-1'})
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(host.serve)
+            await entered.wait()
+            await checkpoint()
+            task_group.cancel_scope.cancel()
+
+        assert events == ['messages', 'adapter']
+
+    async def test_rejects_concurrent_serve_calls(self) -> None:
+        entered = anyio.Event()
+
+        class WaitingChannel(FakeChannel):
+            async def __aenter__(self) -> Self:
+                await super().__aenter__()
+                entered.set()
+                return self
+
+            async def messages(self) -> AsyncGenerator[InboundMessage, None]:
+                await anyio.sleep_forever()
+                if False:  # pragma: no cover
+                    yield inbound('unreachable')
+
+        host = ChannelHost(Agent('test'), WaitingChannel(), allowed_senders={'user-1'})
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(host.serve)
+            await entered.wait()
+            with pytest.raises(RuntimeError, match='already serving'):
+                await host.serve()
+            task_group.cancel_scope.cancel()
 
     def test_requires_at_least_one_allowed_sender(self) -> None:
         with pytest.raises(ValueError, match='allowed_senders'):
