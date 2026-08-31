@@ -156,3 +156,22 @@ class SpeculativeCallEvictedEvent(CapabilityEvent, namespace=CODE_MODE_EVENTS):
     wrapped_tool_name: str
     state: Literal['pending', 'ready', 'failed']
     """Where the launch was when discarded: still running, or settled with a result or error."""
+
+
+@dataclass(kw_only=True)
+class EagerPrefixCommittedEvent(CapabilityEvent, namespace=CODE_MODE_EVENTS):
+    """An eagerly executed prefix was adopted by the snippet's `run_code` dispatch.
+
+    Emitted once per eager part whose pump fed at least one statement, after the tail
+    executed successfully. The generation overlap the prefix bought is `executed_ms`
+    minus `waited_ms`: what the pump ran versus what the dispatch still had to wait.
+    """
+
+    statements: int
+    """Fragments the pump executed before the dispatch committed the tail."""
+
+    executed_ms: float
+    """Wall-clock the pump spent running the prefix statements."""
+
+    waited_ms: float
+    """How long the dispatch waited for the pump to drain before feeding the tail."""

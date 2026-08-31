@@ -313,9 +313,10 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         args: ValidatedToolArgs,
         result: Any,
     ) -> Any:
-        """Flush buffered speculation events, and announce newly-discovered tools.
+        """Flush buffered speculation and eager events, and announce newly-discovered tools.
 
-        Speculation claim/miss/eviction events buffer during `run_code` execution because
+        Speculation claim/miss/eviction events and the eager prefix-commit event buffer
+        during `run_code` execution because
         capability-event attribution requires a capability hook context; this dispatch is the
         first one after the snippet finishes. The discovery announcement is only active with
         `dynamic_catalog=True`; the native-search path is handled by
@@ -325,6 +326,8 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         """
         if self._speculation_state is not None:
             await self._speculation_state.flush_events(ctx)
+        if self._eager_state is not None:
+            await self._eager_state.flush_events(ctx)
         if self.dynamic_catalog and tool_def.tool_kind == 'tool-search':
             self._announce_newly_discovered(ctx, _extract_discovered_names(result))
         return result

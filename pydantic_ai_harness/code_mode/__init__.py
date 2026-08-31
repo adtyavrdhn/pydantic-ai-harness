@@ -3,6 +3,7 @@
 from pydantic_ai_harness.code_mode._capability import CodeMode
 from pydantic_ai_harness.code_mode._events import (
     CODE_MODE_EVENTS,
+    EagerPrefixCommittedEvent,
     SpeculativeCallClaimedEvent,
     SpeculativeCallEvictedEvent,
     SpeculativeCallLaunchedEvent,
@@ -29,6 +30,7 @@ __all__ = [
     'CodeModeToolset',
     'SpeculationStats',
     'SpeculativeCallClaimedEvent',
+    'EagerPrefixCommittedEvent',
     'SpeculativeCallEvictedEvent',
     'SpeculativeCallLaunchedEvent',
     'SpeculativeCallMissedEvent',

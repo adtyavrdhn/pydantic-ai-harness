@@ -313,6 +313,10 @@ field: `streaming` launches overlap the model's own generation, while `execution
 are the prefetch that runs when the snippet starts executing -- the complete code is parsed
 and every literal eligible call not already in flight starts at once, so the snippet's
 sequential awaits collect from concurrently-running tasks instead of blocking one another.
+With `eager` also enabled, each committed prefix reports an `EagerPrefixCommittedEvent`:
+how many statements the pump executed during generation (`executed_ms`) and how long the
+dispatch still waited for it (`waited_ms`); the difference is the generation overlap eager
+bought for that snippet.
 Delivery differs by phase:
 stream-phase events (updates, launches, settles) are yielded directly into the wrapped event
 stream, interleaved live with the argument deltas that produced them -- so they reach stream

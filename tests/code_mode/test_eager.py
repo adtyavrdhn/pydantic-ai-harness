@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Sequence
 
 import pytest
 from pydantic_ai import Agent, RunContext, Tool
@@ -18,6 +18,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import (
     AgentStreamEvent,
+    CapabilityEvent,
     ModelMessage,
     ModelResponse,
     PartDeltaEvent,
@@ -32,7 +33,7 @@ from pydantic_ai.tool_manager import ToolManager
 from pydantic_ai.toolsets.function import FunctionToolset
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.code_mode import CodeMode, CodeModeToolset
+from pydantic_ai_harness.code_mode import CodeMode, CodeModeToolset, EagerPrefixCommittedEvent
 
 pytestmark = pytest.mark.anyio
 
@@ -137,12 +138,26 @@ class TestEagerExecution:
         )
         agent.tool_plain(search)
 
-        result = await agent.run('go')
+        events: list[CapabilityEvent] = []
+
+        async def collect(ctx: RunContext[None], stream: AsyncIterable[AgentStreamEvent]) -> None:
+            async for event in stream:
+                if isinstance(event, CapabilityEvent):
+                    events.append(event)
+
+        result = await agent.run('go', event_stream_handler=collect)
 
         assert result.output == 'done'
         assert calls == ['alpha', 'beta']
         content = _run_code_return_content(result.all_messages())
         assert content == {'output': 'result:alpha\nresult:beta\n', 'result': 'ok'}
+        commits = [event for event in events if isinstance(event, EagerPrefixCommittedEvent)]
+        assert len(commits) == 1
+        # The first three statements closed and fed before the held-back final chunk;
+        # `print(b)` and the provisional `"ok"` ran as the dispatch tail.
+        assert commits[0].statements == 3
+        assert commits[0].executed_ms > 0
+        assert commits[0].waited_ms >= 0
 
     async def test_failed_statement_surfaces_and_earlier_state_persists(self):
         """A statement that fails mid-stream stops the pump; the retry sees prior assignments.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import keyword
 import re
+import time
 import warnings
 from collections.abc import Callable, Coroutine, Sequence
 from contextlib import ExitStack
@@ -54,6 +55,7 @@ except ImportError as _import_error:  # pragma: no cover
 from pydantic_ai_harness._monty_exec import MontyExecutor, PrintCapture, is_sandbox_panic
 from pydantic_ai_harness.code_mode._eager import EagerState, _EagerPart  # pyright: ignore[reportPrivateUsage]
 from pydantic_ai_harness.code_mode._events import (
+    EagerPrefixCommittedEvent,
     SpeculativeCallClaimedEvent,
     SpeculativeCallMissedEvent,
 )
@@ -806,8 +808,11 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         part = None
         if isinstance(code, str) and not _in_temporal_workflow(ctx):
             part = self.eager.pop_watch(ctx.tool_call_id or 'pyd_ai_code_mode', code)
+        waited_seconds = 0.0
         if part is not None:
+            drain_started = time.perf_counter()
             await self.eager.drain(part)
+            waited_seconds = time.perf_counter() - drain_started
         if part is None:
             # Nothing streamed for this part (non-streaming run, Temporal, or a part the
             # watcher never saw): the normal path handles it.
@@ -842,6 +847,17 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # Same contract as the speculation-only path: eviction only on success, so a
             # failed tail keeps its launches for the retry to adopt.
             await self.speculation.evict_part(ctx.tool_call_id or 'pyd_ai_code_mode')
+        if part.feed_count:
+            # Buffered rather than emitted: capability-event attribution requires a hook
+            # context, and `CodeMode.after_tool_execute` is the next one after this dispatch.
+            self.eager.pending_events.append(
+                EagerPrefixCommittedEvent(
+                    tool_call_id=ctx.tool_call_id,
+                    statements=part.feed_count,
+                    executed_ms=part.busy_seconds * 1000,
+                    waited_ms=waited_seconds * 1000,
+                ),
+            )
         return result
 
     async def feed_eager_fragment(self, part: _EagerPart, source: str, ctx: RunContext[AgentDepsT]) -> None:
