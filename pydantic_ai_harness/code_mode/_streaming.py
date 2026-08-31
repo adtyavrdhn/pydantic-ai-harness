@@ -1,0 +1,61 @@
+"""Shared scanner for streamed `run_code` arguments.
+
+Streaming tiers of `CodeMode` (eager execution now, speculative execution planned) watch
+the model stream the `run_code` tool call and act on the code before the call completes.
+Both need the same two primitives: recovering the `code` string prefix from partially
+streamed JSON arguments, and deciding which top-level statements of that prefix are
+complete enough to act on.
+"""
+
+from __future__ import annotations
+
+import ast
+
+from pydantic import TypeAdapter, ValidationError
+from pydantic_core import from_json
+from typing_extensions import NotRequired, TypedDict
+
+
+class _PartialArgs(TypedDict):
+    """Lenient view of partially streamed `run_code` arguments: only the code we scan."""
+
+    code: NotRequired[object]
+
+
+_PARTIAL_ARGS_ADAPTER: TypeAdapter[_PartialArgs] = TypeAdapter(_PartialArgs)
+
+
+def decode_partial_code(args_text: str) -> str | None:
+    """Recover the `code` string prefix from partially streamed JSON arguments."""
+    if not args_text:
+        return None
+    try:
+        decoded = _PARTIAL_ARGS_ADAPTER.validate_python(from_json(args_text, allow_partial='trailing-strings'))
+    except (ValueError, ValidationError):
+        return None
+    code = decoded.get('code')
+    return code if isinstance(code, str) else None
+
+
+def closed_statements(code: str, consumed: int) -> tuple[list[ast.stmt], int]:
+    """Return newly closed top-level statements in `code`, past the first `consumed`.
+
+    Only fully streamed lines participate, and the final parsed statement always stays
+    provisional: a trailing compound (`for`, `if`, `try`) can still grow an indented body, so a
+    statement counts as closed only once a later top-level statement follows it. A prefix that
+    does not parse yields nothing -- either an open bracket/triple-quote closes later, or the
+    model wrote broken code and the real run will surface the error.
+
+    The full prefix is re-parsed on each delta. That is quadratic in snippet length, which is
+    acceptable for model-written snippets; the reference implementation's incremental scanner is
+    the known upgrade path.
+    """
+    end = code.rfind('\n')
+    if end < 0:
+        return [], consumed
+    try:
+        tree = ast.parse(code[: end + 1])
+    except SyntaxError:
+        return [], consumed
+    closed = tree.body[:-1]
+    return closed[consumed:], max(consumed, len(closed))

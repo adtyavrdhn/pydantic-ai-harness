@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, AsyncIterable, Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -10,16 +10,24 @@ from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import AbstractToolset
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.capabilities._tool_search import ToolSearch as _ToolSearch
-from pydantic_ai.messages import ModelResponse, NativeToolSearchReturnPart, SystemPromptPart
+from pydantic_ai.messages import AgentStreamEvent, ModelResponse, NativeToolSearchReturnPart, SystemPromptPart
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector
 from typing_extensions import TypedDict
 
-from pydantic_ai_harness.code_mode._toolset import CodeModeMount, CodeModeOS, CodeModeResourceLimits, CodeModeToolset
+from pydantic_ai_harness.code_mode._eager import EagerState
+from pydantic_ai_harness.code_mode._toolset import (
+    CodeModeMount,
+    CodeModeOS,
+    CodeModeResourceLimits,
+    CodeModeToolset,
+    _in_temporal_workflow,  # pyright: ignore[reportPrivateUsage]
+)
 
 if TYPE_CHECKING:
     from pydantic_ai.capabilities.abstract import ValidatedToolArgs
     from pydantic_ai.messages import ToolCallPart
     from pydantic_ai.models import ModelRequestContext
+    from pydantic_ai.run import AgentRunResult
 
 
 _DISCOVERY_ANNOUNCEMENT_PREFIX = (
@@ -110,6 +118,20 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     both caps.
     """
 
+    eager: bool = False
+    """Execute streamed `run_code` statements in the live REPL as they close.
+
+    Experimental. The lighter streaming tier: no calls are predicted, so nothing can miss or
+    be wasted -- each top-level statement runs, in program order, as soon as it has fully
+    streamed, and the `run_code` dispatch only executes the remainder. Side effects land
+    before the tool call is committed and are not rolled back; a statement that fails leaves
+    the session exactly as a failed snippet does today (assignments before the failing line
+    persist) and surfaces the error as the `run_code` result. Enabling this puts runs in
+    streaming mode, and has no effect under Temporal durable execution.
+    """
+
+    _eager_state: EagerState | None = field(default=None, init=False, repr=False)
+
     dynamic_catalog: bool = False
     """Keep the `run_code` tool definition cache-stable as the sandboxed toolset grows.
 
@@ -147,14 +169,19 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         return CapabilityOrdering(position='outermost', wraps=[_ToolSearch])
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> CodeMode[AgentDepsT]:
-        """Return a fresh instance so concurrent runs don't share `_announced_tools`."""
-        if not self.dynamic_catalog:
+        """Return a fresh instance so concurrent runs don't share mutable per-run state."""
+        if not self.dynamic_catalog and not self.eager:
             return self
-        return replace(self)
+        # `replace` re-runs `__init__`, resetting `init=False` fields: `_announced_tools`
+        # starts fresh (intended).
+        clone = replace(self)
+        if self.eager:
+            clone._eager_state = EagerState()
+        return clone
 
     def get_wrapper_toolset(self, toolset: AbstractToolset[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
         """Wrap the agent's assembled toolset, splitting it into native + sandboxed subsets if needed."""
-        return CodeModeToolset(
+        wrapper = CodeModeToolset(
             wrapped=toolset,
             tool_selector=self.tools,
             max_retries=self.max_retries,
@@ -163,7 +190,57 @@ class CodeMode(AbstractCapability[AgentDepsT]):
             dynamic_catalog=self.dynamic_catalog,
             os_access=self.os_access,
             mount=self.mount,
+            eager=self._eager_state,
         )
+        if self._eager_state is not None:
+            self._eager_state.bind(wrapper)
+        return wrapper
+
+    @property
+    def has_wrap_run_event_stream(self) -> bool:
+        """Report the stream hook only when eager execution is enabled.
+
+        The base class detects a class-level override, which would put every `CodeMode` user in
+        streaming mode; gating on the instance keeps plain `CodeMode` runs non-streaming.
+        """
+        return self.eager
+
+    async def wrap_run_event_stream(
+        self,
+        ctx: RunContext[AgentDepsT],
+        *,
+        stream: AsyncIterable[AgentStreamEvent],
+    ) -> AsyncIterable[AgentStreamEvent]:
+        """Feed streamed `run_code` argument deltas to the eager statement pump.
+
+        Wrapped events pass through unmodified; the watcher acts purely by side effect,
+        enqueueing closed statements for execution in the live REPL. Inactive under Temporal,
+        where overlapping non-deterministic work with the stream has no place in a replayed
+        workflow.
+        """
+        state = self._eager_state
+        if state is not None and _in_temporal_workflow(ctx):
+            state = None
+        try:
+            async for event in stream:
+                yield event
+                if state is not None:
+                    await state.observe(event, ctx)
+        finally:
+            if isinstance(stream, AsyncGenerator):
+                await stream.aclose()
+
+    async def after_run(self, ctx: RunContext[AgentDepsT], *, result: AgentRunResult[Any]) -> AgentRunResult[Any]:
+        """Stop any statement pump the stream abandoned before the run returns."""
+        if self._eager_state is not None:
+            await self._eager_state.close()
+        return result
+
+    async def on_run_error(self, ctx: RunContext[AgentDepsT], *, error: BaseException) -> AgentRunResult[Any]:
+        """Stop any statement pump when the run fails, then let the error propagate."""
+        if self._eager_state is not None:
+            await self._eager_state.close()
+        raise error
 
     async def after_tool_execute(
         self,
@@ -174,9 +251,9 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         args: ValidatedToolArgs,
         result: Any,
     ) -> Any:
-        """Announce newly-discovered tools from a local `search_tools` return.
+        """Announce newly-discovered tools when `dynamic_catalog` is enabled.
 
-        Only active with `dynamic_catalog=True`. The native-search path is handled by
+        The native-search path is handled by
         [`after_model_request`][pydantic_ai_harness.CodeMode.after_model_request] instead
         (server-side search emits a `NativeToolSearchReturnPart` rather than a regular tool
         execute result).

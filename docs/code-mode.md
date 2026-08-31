@@ -219,6 +219,32 @@ time-bounded work behind a Temporal activity instead.
 
 State persists between `run_code` calls within the same agent run -- variables, imports, and function definitions carry over. Pass `restart: true` in the tool call to reset state. If a worker crash or host-side execution failure invalidates the session, `run_code` returns a model retry that reports the reset; the next snippet must recreate any required state.
 
+## Eager execution (experimental)
+
+`eager=True` executes streamed `run_code` snippets while the model is still generating
+them: each top-level statement runs in the live REPL as soon as it has fully streamed,
+and the `run_code` dispatch executes only the remainder. This overlaps execution latency
+with model generation. Nothing is predicted, so nothing runs that the program did not
+ask for -- and nothing is rolled back: side effects land before the tool call is
+committed, which is why the tier is opt-in.
+
+```python
+agent = Agent(
+    'openai:gpt-5',
+    capabilities=[CodeMode(eager=True)],
+)
+```
+
+A statement that fails mid-stream leaves the session exactly as a failed snippet does
+today: assignments made before the failing line persist, and the error surfaces as the
+`run_code` result for the model to retry against. `restart: true` discards the executed
+prefix along with the rest of the session. If the code submitted at execution no longer
+matches the prefix that already ran (a provider rewriting the part mid-stream), the
+session resets and the model is asked to resend the snippet.
+
+Enabling `eager` puts runs in streaming mode. Under Temporal durable execution the
+option is inactive: statements only run when the completed tool call executes.
+
 ## Temporal durability
 
 Install both integrations:
