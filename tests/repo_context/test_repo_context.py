@@ -18,6 +18,7 @@ from pydantic_ai.sandboxes import LocalSandbox, Sandbox, UnavailableSandbox
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage
 
+from pydantic_ai_harness._sandbox import sandbox_or_local
 from pydantic_ai_harness.repo_context import (
     AgentContextInventory,
     ContextFile,
@@ -225,6 +226,13 @@ class TestInstructions:
         second = _render_capability_instructions(cap, ctx)
         # Read-once: `before_run` loaded the file, so subsequent edits are not picked up.
         assert second is not None and 'second' not in second
+
+    def test_application_unavailable_sandbox_never_enables_host_fallback(self) -> None:
+        default = RunContext[None](deps=None, model=TestModel(), usage=RunUsage()).sandbox.backend
+        assert isinstance(default, UnavailableSandbox)
+        policy = Sandbox(UnavailableSandbox(default.reason))
+
+        assert sandbox_or_local(policy, preserve_host_behavior=True) is policy
 
     @pytest.mark.skipif(sys.platform == 'win32', reason='host fallback is POSIX-only')
     async def test_framework_default_sandbox_preserves_host_fallback(self, tmp_path: Path) -> None:
