@@ -228,6 +228,8 @@ The serializable backends are `memory`, `file`, and `sqlite`. A namespace callab
 | DBOS | Automatic snapshot loading is a DBOS step. Ordinary `FunctionToolset` calls are not DBOS-durable; wrap memory tool operations in application-provided DBOS steps when required. |
 
 Set an explicit, stable `id` on `Memory` when using durable execution so workers recover the snapshot operation under the same identity. The memory backend and workflow state backend remain independent. Durable execution does not make an in-memory notebook persistent.
+When a durability capability is attached, omitting the `id` raises `UserError` during agent construction.
+Each model request records one bounded snapshot result in workflow history, so choose `max_memory_size` and `max_tokens` with the engine's history limits in mind.
 
 ## Security and provenance
 

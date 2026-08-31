@@ -109,7 +109,7 @@ async def every_tenth(ctx):
 SystemReminders(dynamic_reminders=[every_tenth])
 ```
 
-A direct `LLMReminder` entry in `dynamic_reminders` is a journaled capability operation under durability engines that support capability operations. Replay restores the generated reminder instead of repeating the model call. Set an explicit, stable `id` on `SystemReminders` so workers recover the operation under the same identity. A wrapper such as `every_tenth` above calls `LLMReminder` outside that direct-instance route, so use the direct form for durable runs or accept that a wrapped generation can repeat on replay. Without a durability engine, generation runs directly with the same fallback to `GoalReanchor` on error.
+A direct `LLMReminder` entry in `dynamic_reminders` is a journaled capability operation under durability engines that support capability operations. Generation errors are recorded as a fallback result rather than inheriting the engine's retry policy, so a best-effort reminder cannot stall the run; replay restores that recorded result instead of repeating the model call. Durable execution requires an explicit, stable `id` on `SystemReminders` so workers recover the operation under the same identity; omitting it raises `UserError` during agent construction. A wrapper such as `every_tenth` above calls `LLMReminder` outside that direct-instance route, so use the direct form for durable runs or accept that a wrapped generation can repeat on replay. Without a durability engine, generation runs directly with the same fallback to `GoalReanchor` on error.
 
 ## Configuration
 

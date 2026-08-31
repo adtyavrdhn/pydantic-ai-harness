@@ -163,6 +163,7 @@ The plan is never injected into the system prompt or instructions. Static usage 
 With a durable-execution capability attached, the plan read used to build that reminder is a
 journaled capability operation. Replay reuses the recorded plan instead of reading the store again.
 Set an explicit, stable `id` on `Planning` so workers recover the operation under the same identity.
+When a durability capability is attached, omitting the `id` raises `UserError` during agent construction.
 
 ## Configuration
 

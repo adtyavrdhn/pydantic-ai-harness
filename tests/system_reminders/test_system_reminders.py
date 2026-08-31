@@ -28,7 +28,6 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.system_reminders import (
-    AsyncDynamicReminder,
     DynamicReminder,
     GoalReanchor,
     LLMReminder,
@@ -606,15 +605,14 @@ class TestLLMReminder:
         assert 'system_reminders__capability__system_reminders.generate_reminder' in {name for name, _ in bound.calls}
 
     async def test_generation_uses_stable_snapshot_when_an_earlier_callback_mutates_configuration(self) -> None:
-        dynamic: list[DynamicReminder[None] | AsyncDynamicReminder[None]] = []
-
         def remove_self(ctx: RunContext[None]) -> None:
             del ctx
-            dynamic.pop(0)
+            capability.dynamic_reminders = ()
             return None
 
-        dynamic.extend([remove_self, LLMReminder(model=_capture_model({}, output='generated from snapshot'))])
-        capability = SystemReminders(dynamic_reminders=dynamic)
+        capability = SystemReminders(
+            dynamic_reminders=[remove_self, LLMReminder(model=_capture_model({}, output='generated from snapshot'))]
+        )
         messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart('keep going')])]
 
         seen = await _run_wrap(capability, messages, ctx=_ctx(messages=messages))
@@ -622,18 +620,53 @@ class TestLLMReminder:
         assert _fired_text(seen) == 'generated from snapshot'
 
     async def test_generation_operation_failure_falls_back_to_goal_reanchor(self) -> None:
-        capability = SystemReminders(dynamic_reminders=[LLMReminder(model=_capture_model({}, output='unreachable'))])
-        messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart('ship the durable fix')])]
+        operation = 'system_reminders__capability__system_reminders.generate_reminder'
+        seen: dict[str, list[ModelMessage]] = {}
 
-        with pytest.MonkeyPatch.context() as monkeypatch:
+        def model(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            seen['messages'] = messages
+            return ModelResponse(parts=[TextPart('done')])
 
-            async def fail_generation(_ctx: RunContext[None], _index: int) -> str | None:
-                raise RuntimeError('durability backend unavailable')
+        capability = SystemReminders(
+            id='system_reminders',
+            dynamic_reminders=[LLMReminder(model=_capture_model({}, output='unreachable'))],
+        )
+        durability = RecordingDurability(fail_operations=frozenset({operation}))
+        agent = Agent(FunctionModel(model), name='system_reminders', capabilities=[capability, durability])
 
-            monkeypatch.setattr(capability, '_generate_reminder', fail_generation)
-            seen = await _run_wrap(capability, messages, ctx=_ctx(messages=messages))
+        await agent.run('ship the durable fix')
 
-        assert 'ship the durable fix' in (_fired_text(seen) or '')
+        assert 'Check that your next action advances it.' in _all_text(seen['messages'])
+        assert operation in {name for name, _ in durability.calls}
+
+    async def test_generation_error_is_journaled_as_goal_reanchor(self) -> None:
+        operation = 'system_reminders__capability__system_reminders.generate_reminder'
+        seen: dict[str, list[ModelMessage]] = {}
+
+        def fail_generation(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            raise RuntimeError('reminder unavailable')
+
+        def model(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            seen['messages'] = messages
+            return ModelResponse(parts=[TextPart('done')])
+
+        durability = RecordingDurability()
+        agent = Agent(
+            FunctionModel(model),
+            name='system_reminders',
+            capabilities=[
+                SystemReminders(
+                    id='system_reminders',
+                    dynamic_reminders=[LLMReminder(model=FunctionModel(fail_generation))],
+                ),
+                durability,
+            ],
+        )
+
+        await agent.run('ship the durable fix')
+
+        assert operation in {name for name, _ in durability.calls}
+        assert 'Check that your next action advances it.' in _all_text(seen['messages'])
 
     async def test_generates_from_transcript(self) -> None:
         store: dict[str, str] = {}
