@@ -125,6 +125,8 @@ class WhatsAppChannel:
         """Close the internally created HTTP client, if any."""
         self._ready = False
         self._inbox.close()
+        # A failed batch can cache IDs for messages discarded with the inbox.
+        self._seen_messages.clear()
         await self._close_owned_client()
         self._client = None
         return None
@@ -216,7 +218,7 @@ class WhatsAppChannel:
         return metadata is not None and metadata.get('phone_number_id') == self._phone_number_id
 
     def messages(self) -> AsyncIterator[InboundMessage]:
-        """Yield verified text messages until cancelled."""
+        """Yield verified text messages until the channel closes or the task is cancelled."""
         return self._inbox.messages()
 
     async def send_text(self, conversation_id: str, text: str) -> None:

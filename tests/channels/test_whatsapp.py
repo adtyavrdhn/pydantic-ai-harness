@@ -358,9 +358,18 @@ class TestWhatsAppChannel:
 
         with pytest.raises(StopAsyncIteration):
             await pending_message
+        await client.aclose()
+
+    async def test_reopening_accepts_a_message_discarded_during_shutdown(self) -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response({})))
+        channel = WhatsAppChannel('token', _PHONE_ID, _APP_SECRET, 'verify-token', http_client=client)
+        request = signed_request(webhook_payload([text_message()]))
 
         async with channel:
-            assert channel.handle_webhook(signed_request(webhook_payload([text_message()]))).status_code == 200
+            assert channel.handle_webhook(request).status_code == 200
+
+        async with channel:
+            assert channel.handle_webhook(request).status_code == 200
             assert (await anext(channel.messages())).message_id == 'wamid.1'
         await client.aclose()
 
