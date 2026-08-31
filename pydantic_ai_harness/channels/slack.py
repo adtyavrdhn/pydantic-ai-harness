@@ -39,7 +39,6 @@ from pydantic_ai_harness.channels._webhook import WebhookInbox
 _API_BASE = 'https://slack.com/api'
 _MAX_TEXT_CHARS = 4000
 _MAX_SEEN_EVENTS = 10_000
-_MAX_RETRY_AFTER = 60.0
 _REQUEST_TIMEOUT = 10.0
 _SIGNATURE_TOLERANCE_SECONDS = 300
 _MAPPING_ADAPTER = TypeAdapter(dict[str, object])
@@ -54,6 +53,7 @@ class SlackChannel:
         signing_secret: str,
         *,
         http_client: httpx.AsyncClient | None = None,
+        api_base_url: str = _API_BASE,
         max_queued_messages: int = 100,
     ) -> None:
         """Configure the Slack adapter without opening it.
@@ -62,6 +62,7 @@ class SlackChannel:
             bot_token: Bot token with `chat:write` and subscribed-event scopes.
             signing_secret: Secret used to authenticate Events API requests.
             http_client: Optional client whose lifecycle remains owned by the caller.
+            api_base_url: Slack Web API root. Use `https://slack-gov.com/api` for GovSlack.
             max_queued_messages: Maximum verified messages waiting for the host.
 
         Raises:
@@ -71,12 +72,15 @@ class SlackChannel:
             raise ValueError('bot_token must not be empty')
         if not signing_secret:
             raise ValueError('signing_secret must not be empty')
+        if not api_base_url:
+            raise ValueError('api_base_url must not be empty')
         if type(max_queued_messages) is not int or max_queued_messages <= 0:
             raise ValueError('max_queued_messages must be a positive integer')
 
         self._bot_token = bot_token
         self._signing_secret = signing_secret.encode()
         self._provided_client = http_client
+        self._api_base_url = api_base_url.rstrip('/')
         self._client: httpx.AsyncClient | None = None
         self._owns_client = False
         self._inbox = WebhookInbox(max_queued_messages)
@@ -267,7 +271,7 @@ class SlackChannel:
             raise RuntimeError('SlackChannel must be opened before use')
         try:
             response = await client.post(
-                f'{_API_BASE}/{method}',
+                f'{self._api_base_url}/{method}',
                 headers={'Authorization': f'Bearer {self._bot_token}'},
                 json=dict(params or {}),
                 timeout=_REQUEST_TIMEOUT,
@@ -313,7 +317,7 @@ def _retry_after(headers: httpx.Headers) -> float | None:
         seconds = float(value)
     except ValueError:
         return None
-    if not math.isfinite(seconds) or not 0 <= seconds <= _MAX_RETRY_AFTER:
+    if not math.isfinite(seconds) or seconds < 0:
         return None
     return seconds
 

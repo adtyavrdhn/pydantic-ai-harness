@@ -342,8 +342,14 @@ class TestSlackChannel:
             }
         ]
 
-    async def test_chunks_messages_and_retries_one_explicit_rate_limit(self) -> None:
+    async def test_chunks_messages_and_retries_one_explicit_rate_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         posts: list[dict[str, object]] = []
+        delays: list[float] = []
+
+        async def sleep(delay: float) -> None:
+            delays.append(delay)
+
+        monkeypatch.setattr(anyio, 'sleep', sleep)
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path.endswith('/auth.test'):
@@ -353,7 +359,7 @@ class TestSlackChannel:
                 return response(
                     {'ok': False, 'error': 'ratelimited'},
                     status_code=429,
-                    headers={'Retry-After': '0'},
+                    headers={'Retry-After': '61'},
                 )
             return response({'ok': True, 'ts': str(len(posts))})
 
@@ -368,6 +374,26 @@ class TestSlackChannel:
             {'channel': 'D1', 'text': 'a' * 4000, 'mrkdwn': False, 'unfurl_links': False, 'unfurl_media': False},
             {'channel': 'D1', 'text': 'a', 'mrkdwn': False, 'unfurl_links': False, 'unfurl_media': False},
         ]
+        assert delays == [61]
+        await client.aclose()
+
+    async def test_uses_configured_api_root(self) -> None:
+        urls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            urls.append(str(request.url))
+            return auth_response()
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        async with SlackChannel(
+            'token',
+            _SIGNING_SECRET,
+            http_client=client,
+            api_base_url='https://slack-gov.com/api/',
+        ):
+            pass
+
+        assert urls == ['https://slack-gov.com/api/auth.test']
         await client.aclose()
 
     async def test_surfaces_api_and_transport_errors_without_credentials(self) -> None:
@@ -542,6 +568,8 @@ class TestSlackChannel:
             SlackChannel('', _SIGNING_SECRET)
         with pytest.raises(ValueError, match='signing_secret'):
             SlackChannel('token', '')
+        with pytest.raises(ValueError, match='api_base_url'):
+            SlackChannel('token', _SIGNING_SECRET, api_base_url='')
         for value in (0, True):
             with pytest.raises(ValueError, match='max_queued_messages'):
                 SlackChannel('token', _SIGNING_SECRET, max_queued_messages=value)

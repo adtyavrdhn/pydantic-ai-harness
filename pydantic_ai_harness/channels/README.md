@@ -15,7 +15,7 @@ This quickstart uses Anthropic. Install the provider extra and set
 `ANTHROPIC_API_KEY` before running it:
 
 ```bash
-uv add "pydantic-ai-harness[anthropic]"
+uv add "pydantic-ai-harness[anthropic]" starlette uvicorn
 ```
 
 ## Slack: DMs and app mentions
@@ -36,8 +36,12 @@ from contextlib import asynccontextmanager
 
 import anyio
 from pydantic_ai import Agent
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
-from pydantic_ai_harness.channels import ChannelHost, WebhookRequest, WebhookResponse
+from pydantic_ai_harness.channels import ChannelHost, WebhookRequest
 from pydantic_ai_harness.channels.slack import SlackChannel
 
 agent = Agent('anthropic:claude-fable-5')
@@ -48,24 +52,30 @@ channel = SlackChannel(
 host = ChannelHost(agent, channel, allowed_senders={'U0123456789'})
 
 
-async def receive_slack(method: str, headers: dict[str, str], body: bytes) -> WebhookResponse:
-    request = WebhookRequest(method=method, headers=headers, query={}, body=body)
-    return channel.handle_webhook(request)
+async def receive_slack(request: Request) -> PlainTextResponse:
+    result = channel.handle_webhook(
+        WebhookRequest(request.method, request.headers, request.query_params, await request.body())
+    )
+    return PlainTextResponse(result.body, status_code=result.status_code)
 
 
 @asynccontextmanager
-async def channel_lifespan() -> AsyncIterator[None]:
+async def channel_lifespan(_app: Starlette) -> AsyncIterator[None]:
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(host.serve)
         yield
         tasks.cancel_scope.cancel()
+
+
+app = Starlette(
+    routes=[Route('/slack/events', receive_slack, methods=['POST'])],
+    lifespan=channel_lifespan,
+)
 ```
 
-Connect the lifespan and route to your web app:
-
-1. Enter `channel_lifespan()` for the app's lifespan.
-2. Forward the Events API route to `receive_slack()` and return its status code
-   and body.
+Save this as `app.py`, run `uvicorn app:app`, and point Slack's Events API URL
+at `/slack/events`.
+For GovSlack, pass `api_base_url='https://slack-gov.com/api'` to `SlackChannel`.
 
 The task group owns the channel service and waits for its turns during shutdown.
 The lifespan and route must use the same process and async event-loop thread.
@@ -114,7 +124,7 @@ History remains saved after a successful run even when delivery cannot be
 confirmed.
 
 `SlackChannel` retries one `chat.postMessage` call after an HTTP 429 with a
-valid `Retry-After` of at most 60 seconds. It does not retry timeouts or other
+valid non-negative `Retry-After`. It does not retry timeouts or other
 ambiguous failures because Slack may already have accepted the message.
 
 The webhook handler verifies and enqueues a request before returning HTTP 200.
