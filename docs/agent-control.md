@@ -149,7 +149,8 @@ from pydantic_ai_harness.logfire import AgentConfig
 AgentConfig(instructions='Always confirm the order total.')
 ```
 
-**An `id` swaps out a block that already exists** -- replacing its text, or dropping it with `None`:
+**An `id` swaps out a block that already exists** -- replacing its text, or dropping it with `None`.
+The block has to be one whose text the agent wrote down, not one it computes per request; see below:
 
 ```python
 from pydantic_ai_harness.logfire import AgentConfig, InstructionBlock
@@ -191,6 +192,16 @@ toolset or capability that has no `id` of its own — without a source key there
 to hang off. Give the toolset or capability an `id`, or name the part, if you want it reachable. An
 `id` that matches nothing here is inert rather than an error, so one config can be applied across
 services that don't all install the same toolsets.
+
+**A block the agent recomputes per request is not addressable either**, keyed or not. Replacing it
+would pin whatever it evaluated to once; dropping it would remove the computation. Either way the
+block stops doing what it was written to do, and the managed value carries nothing that says which
+was meant — so both are ignored, with a warning. This covers every instruction *function*: one
+registered with `@agent.instructions`, `@toolset.instructions` or `@capability.instructions`, even
+when it returns fixed text. Write text you mean to manage remotely as text — `Agent(instructions=...)`,
+`Capability(instructions=...)`, a `get_instructions()` string — and it stays addressable. Which side
+of this line a block falls on is published in its baseline `dynamic` flag, so the Logfire editor can
+show a block without offering to change it.
 
 !!! warning "Don't re-add the prompt you already have"
     Copying an agent's observed system prompt into a managed value as *added* text -- lifted out of a

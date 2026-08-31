@@ -647,7 +647,10 @@ AGENT_CONFIG_JSON_SCHEMA: dict[str, Any] = {
                                         'description': (
                                             "The instruction block to address: 'agent', 'toolset:<id>', "
                                             "'capability:<id>', or one of those plus ':<declared id>'. "
-                                            'Omit to add a block instead.'
+                                            'Omit to add a block instead. A block the agent recomputes '
+                                            'per request cannot be addressed: replacing it would pin one '
+                                            'rendering and dropping it would remove the computation, so '
+                                            'either is ignored.'
                                         ),
                                     },
                                     'instructions': {
@@ -664,8 +667,10 @@ AGENT_CONFIG_JSON_SCHEMA: dict[str, Any] = {
                                     'dynamic': {
                                         'type': 'boolean',
                                         'description': (
-                                            'Whether the addressed block is recomputed per request. '
-                                            'Informational, set on the code-side baseline; ignored here.'
+                                            'Whether the block is recomputed per request. Set on the '
+                                            'code-side baseline and ignored on input -- but a block '
+                                            'marked true is not addressable, so an editor should offer '
+                                            'no override for it.'
                                         ),
                                     },
                                 },
@@ -1198,11 +1203,22 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
     def _apply_instruction_overrides(self, request_context: ModelRequestContext) -> ModelRequestContext:
         """Replace or drop the assembled instruction parts the managed config addresses by `id`.
 
-        `dynamic` is deliberately carried over untouched. Pydantic AI sorts static blocks ahead of
-        dynamic ones so a provider can cache the stable prefix, so re-flagging a replaced block would
-        move the cache boundary for every request -- a silent cost regression in exchange for nothing.
-        Replacing a dynamic block's text does pin it, which is what the baseline snapshot's `dynamic`
-        flag exists to warn about before anyone publishes that.
+        A dynamic block is not one of them. Its text is recomputed per request from whatever the run
+        carries, so replacing it pins one rendering forever and dropping it removes the computation --
+        either way the block stops doing the thing it was written to do, and nothing about the managed
+        value says which. Overriding it is refused and warned about rather than applied. That is also
+        why a dynamic block publishes only its seam to the baseline: the editor can show that the block
+        is there and that it is not yours to change.
+
+        A function that returns a constant is flagged dynamic all the same, which is a real cost here:
+        a toolset's `@toolset.instructions` returning fixed text becomes unaddressable. That is what
+        pydantic-ai#7391 is for -- letting an instruction function declare itself static, which makes it
+        both cacheable and overridable.
+
+        `dynamic` is deliberately carried over untouched on the parts that *are* replaced. Pydantic AI
+        sorts static blocks ahead of dynamic ones so a provider can cache the stable prefix, so
+        re-flagging a replaced block would move the cache boundary for every request -- a silent cost
+        regression in exchange for nothing.
 
         A part with no `id` is unaddressable by construction and passes through. An `id` that matches no
         part is inert.
@@ -1225,6 +1241,15 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
         for part in parameters.instruction_parts:
             key = _instruction_key(part)
             if key is None or key not in overrides:
+                parts.append(part)
+                continue
+            if part.dynamic:
+                _warn_dropped(
+                    f'Managed agent config addresses instruction block {key!r}, which the agent recomputes '
+                    'per request; a managed value would pin or remove that computation, so it is ignored '
+                    'and the block keeps what the code produces. An instruction function that returns '
+                    'fixed text is flagged this way too -- see pydantic-ai#7391.'
+                )
                 parts.append(part)
                 continue
             replacement = overrides[key]
@@ -1299,11 +1324,21 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
         that can't be built must not reach the run.
         """
         own_instruction_id = f'capability:{self.id}'
-        instructions: list[InstructionText | InstructionBlock] = [
-            InstructionBlock(id=_instruction_key(part), instructions=part.content, dynamic=part.dynamic)
-            for part in request_context.model_request_parameters.instruction_parts or []
-            if part.content.strip() and _instruction_key(part) != own_instruction_id
-        ]
+        instructions: list[InstructionText | InstructionBlock] = []
+        for part in request_context.model_request_parameters.instruction_parts or []:
+            key = _instruction_key(part)
+            if not part.content.strip() or key == own_instruction_id:
+                continue
+            if not part.dynamic:
+                instructions.append(InstructionBlock(id=key, instructions=part.content, dynamic=False))
+                continue
+            # A dynamic block contributes that it exists, not what it said once. Its text is this
+            # request's rendering, built from whatever the run carried -- a tenant name, a user id, a
+            # retrieved document -- and the baseline is published to a variable every project member
+            # can read. The seam is what the editor needs anyway: enough to show the block and that it
+            # is recomputed per request, which is why it is not something to override.
+            if key is not None:
+                instructions.append(InstructionBlock(id=key, dynamic=True))
         tool_definitions: list[ToolDefinitionOverride] = []
         for tool in self._code_tools.get() or []:
             descriptions: dict[str, str] = {}

@@ -214,21 +214,16 @@ TOOLSET_BLOCK = ('toolset:weather', 'TOOLSET: call get_weather first.', True)
             id='one-list-can-add-and-address',
         ),
         pytest.param(
-            'blocks_replace_drop',
-            {
-                'instructions': [
-                    {'id': 'agent', 'instructions': 'REMOTE: refund specialist.'},
-                    {'id': 'toolset:weather', 'instructions': None},
-                ]
-            },
-            [('agent', 'REMOTE: refund specialist.', False), TODAY_BLOCK],
-            id='replace-the-agent-literal-and-drop-a-toolsets-own',
+            'blocks_replace',
+            {'instructions': [{'id': 'agent', 'instructions': 'REMOTE: refund specialist.'}]},
+            [('agent', 'REMOTE: refund specialist.', False), TODAY_BLOCK, TOOLSET_BLOCK],
+            id='replace-the-agent-literal',
         ),
         pytest.param(
-            'blocks_pin',
-            {'instructions': [{'id': 'agent:today', 'instructions': 'PINNED: it is always Monday.'}]},
-            [AGENT_BLOCK, ('agent:today', 'PINNED: it is always Monday.', True), TOOLSET_BLOCK],
-            id='pin-one-declared-dynamic-block',
+            'blocks_drop',
+            {'instructions': [{'id': 'agent', 'instructions': None}]},
+            [TODAY_BLOCK, TOOLSET_BLOCK],
+            id='drop-the-agent-literal',
         ),
         pytest.param(
             'blocks_inert',
@@ -252,26 +247,43 @@ async def test_instruction_blocks_the_model_receives(
     assert triples(await run_blocks(capfire, name, value)) == expected
 
 
+@pytest.mark.parametrize(
+    'value',
+    [
+        pytest.param(
+            {'instructions': [{'id': 'agent:today', 'instructions': 'PINNED: it is always Monday.'}]},
+            id='replacing-it',
+        ),
+        pytest.param({'instructions': [{'id': 'toolset:weather', 'instructions': None}]}, id='dropping-it'),
+    ],
+)
+async def test_a_dynamic_block_is_not_addressable(capfire: CaptureLogfire, value: dict[str, Any]) -> None:
+    """A block the agent recomputes per request is not the managed config's to change.
+
+    Replacing it pins one rendering forever; dropping it removes the computation. Either way the block
+    stops doing what it was written to do, so both are refused and warned about. Note `toolset:weather`
+    returns a constant and is flagged dynamic all the same -- the cost pydantic-ai#7391 addresses.
+    """
+    with pytest.warns(UserWarning, match='which the agent recomputes per request'):
+        blocks = triples(await run_blocks(capfire, 'blocks_dynamic_refused', value))
+    assert blocks == [AGENT_BLOCK, TODAY_BLOCK, TOOLSET_BLOCK]
+
+
 async def test_an_override_never_moves_the_static_prefix(capfire: CaptureLogfire) -> None:
     # `dynamic` decides which side of the provider's cacheable prefix a block sorts on, and an override
-    # rewrites text in place without touching it. So overriding the agent's static literal *and* a
-    # dynamic block leaves every block's key and flag exactly where code put them: the cache boundary
-    # does not move, which is the whole reason the flag is carried over rather than recomputed.
+    # rewrites text in place without touching it. So overriding the agent's static literal leaves every
+    # block's key and flag exactly where code put them: the cache boundary does not move, which is the
+    # whole reason the flag is carried over rather than recomputed.
     baseline = await run_blocks(capfire, 'prefix_baseline', {})
     overridden = await run_blocks(
         capfire,
         'prefix_overridden',
-        {
-            'instructions': [
-                {'id': 'agent', 'instructions': 'REMOTE: refund specialist.'},
-                {'id': 'agent:today', 'instructions': 'PINNED: it is always Monday.'},
-            ]
-        },
+        {'instructions': [{'id': 'agent', 'instructions': 'REMOTE: refund specialist.'}]},
     )
     assert [(part.id, part.dynamic) for part in overridden] == [(part.id, part.dynamic) for part in baseline]
     assert [part.content for part in overridden] == [
         'REMOTE: refund specialist.',
-        'PINNED: it is always Monday.',
+        'DYNAMIC: today is Monday.',
         'TOOLSET: call get_weather first.',
     ]
 
@@ -579,15 +591,20 @@ async def test_auto_create_snapshots_every_instruction_block(
     example = json.loads(created[0].example or '{}')
     assert example['instructions'] == [
         {'id': 'agent', 'instructions': 'AGENT: You are a concise checkout assistant.', 'dynamic': False},
-        {'id': 'agent:today', 'instructions': 'DYNAMIC: today is Monday.', 'dynamic': True},
-        # No `id` key at all: the function declared none, so Pydantic AI cannot key the block and the
-        # UI has nothing to address it by. Its absence, not a placeholder, is what tells the UI that.
-        {'instructions': 'UNNAMED: no declared id.', 'dynamic': True},
-        {'id': 'toolset:weather', 'instructions': 'TOOLSET: call get_weather first.', 'dynamic': True},
+        # A dynamic block contributes its seam and not its text: what it rendered to here is one
+        # request's answer, built from whatever that run carried, and the baseline is published to a
+        # variable every project member can read. The `id` and the flag are what the editor needs --
+        # enough to show the block and that it is recomputed per request.
+        {'id': 'agent:today', 'dynamic': True},
+        {'id': 'toolset:weather', 'dynamic': True},
     ]
-    # `dynamic` is what powers the one warning that matters: replacing a computed block pins whatever
-    # it evaluated to when the snapshot happened to be taken.
-    assert [block['dynamic'] for block in example['instructions']] == [False, True, True, True]
+    # `UNNAMED: no declared id.` is absent entirely: the function declared no id, so there is nothing
+    # to address it by, and it is dynamic, so there is no text to publish. Nothing left to say about it.
+    assert 'UNNAMED' not in (created[0].example or '')
+    # A toolset's instruction function is `dynamic` too even when it returns a constant, so one rule
+    # covers agent-level and toolset-level blocks alike. See pydantic-ai#7391 for letting a function
+    # declare itself static, which is what gets a constant like this one published (and overridable).
+    assert [block['dynamic'] for block in example['instructions']] == [False, True, True]
 
 
 async def test_existing_variable_publishes_changed_baseline_once_without_clobbering_config(
@@ -600,18 +617,23 @@ async def test_existing_variable_publishes_changed_baseline_once_without_clobber
     )
     config.variables['agent__published_baseline'] = original
     today = ['Monday']
-    agent = Agent(
-        TestModel(),
-        name='published_baseline',
-        instructions='AGENT: code instructions.',
-        toolsets=[weather_toolset()],
-        capabilities=[AgentControl(label='production')],
-    )
 
-    @agent.instructions(name='today')
-    def dynamic(_ctx: RunContext[object]) -> str:
-        return f'DYNAMIC: today is {today[0]}.'
+    def build(instructions: str) -> Agent[object, str]:
+        agent = Agent(
+            TestModel(),
+            name='published_baseline',
+            instructions=instructions,
+            toolsets=[weather_toolset()],
+            capabilities=[AgentControl(label='production')],
+        )
 
+        @agent.instructions(name='today')
+        def dynamic(_ctx: RunContext[object]) -> str:
+            return f'DYNAMIC: today is {today[0]}.'
+
+        return agent
+
+    agent = build('AGENT: code instructions.')
     with variables_provider(capfire, config):
         provider = logfire.DEFAULT_LOGFIRE_INSTANCE.config.get_variable_provider()
         updates: list[VariableConfig] = []
@@ -626,17 +648,21 @@ async def test_existing_variable_publishes_changed_baseline_once_without_clobber
         _agent_control._reset_baseline_publish_guard()  # model a fresh process with the published baseline
         await agent.run('unchanged')
         _agent_control._reset_baseline_publish_guard()
+        # A dynamic block renders differently, and the baseline does not move: its text was never in
+        # there. One fewer republish, and one fewer read-modify-write racing the UI (see #565).
         today[0] = 'Tuesday'
-        await agent.run('changed')
+        await agent.run('dynamic value changed')
+        assert len(updates) == 1
+        _agent_control._reset_baseline_publish_guard()
+        await build('AGENT: rewritten instructions.').run('code changed')
 
     assert len(updates) == 2
-    first_example = json.loads(updates[0].example or '{}')
-    assert first_example['instructions'] == [
+    assert json.loads(updates[0].example or '{}')['instructions'] == [
         {'id': 'agent', 'instructions': 'AGENT: code instructions.', 'dynamic': False},
-        {'id': 'agent:today', 'instructions': 'DYNAMIC: today is Monday.', 'dynamic': True},
-        {'id': 'toolset:weather', 'instructions': 'TOOLSET: call get_weather first.', 'dynamic': True},
+        {'id': 'agent:today', 'dynamic': True},
+        {'id': 'toolset:weather', 'dynamic': True},
     ]
-    assert json.loads(updates[1].example or '{}')['instructions'][1]['instructions'] == 'DYNAMIC: today is Tuesday.'
+    assert json.loads(updates[1].example or '{}')['instructions'][0]['instructions'] == 'AGENT: rewritten instructions.'
     for updated in updates:
         assert updated.model_copy(update={'example': original.example}) == original
 
@@ -1076,3 +1102,45 @@ async def test_rename_routes_to_the_tool_the_model_was_handed(capfire: CaptureLo
         ).run('hello')
 
     assert authorized == ['first']
+
+
+async def test_a_dynamic_blocks_rendered_text_never_reaches_the_baseline(
+    capfire: CaptureLogfire, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a dynamic block rendered to is one request's answer, and the baseline is not private.
+
+    An instruction function reads the run: a tenant, a user, a retrieved document. The `example` it
+    would land in is published to a Logfire variable every project member can read, and it is there to
+    describe the agent, not to record a request. So a dynamic block contributes its `id` and its flag
+    and nothing else -- which is also all an editor needs to show it and to not offer to change it.
+    """
+    monkeypatch.setattr(_agent_control, '_spawn_baseline_publish', _agent_control._publish_baseline)
+    with variables_provider(capfire, published_value('agent__no_request_data', {})):
+        provider = logfire.DEFAULT_LOGFIRE_INSTANCE.config.get_variable_provider()
+        updates: list[VariableConfig] = []
+        original_update = provider.update_variable
+
+        def record_update(name: str, updated: VariableConfig) -> VariableConfig:
+            updates.append(updated)
+            return original_update(name, updated)
+
+        monkeypatch.setattr(provider, 'update_variable', record_update)
+        agent = Agent(
+            FunctionModel(lambda _messages, _info: ModelResponse(parts=[TextPart('done')])),
+            deps_type=str,
+            instructions='You are a support agent.',
+            capabilities=[AgentControl('no_request_data')],
+        )
+
+        @agent.instructions(name='tenant')
+        def tenant(ctx: RunContext[str]) -> str:
+            return f'You are serving tenant {ctx.deps}. Their account token is tok_SECRET_9f2.'
+
+        await agent.run('hello', deps='ACME Health (patient records)')
+
+    example = updates[0].example or ''
+    assert 'tok_SECRET_9f2' not in example and 'ACME Health' not in example
+    assert json.loads(example)['instructions'] == [
+        {'id': 'agent', 'instructions': 'You are a support agent.', 'dynamic': False},
+        {'id': 'agent:tenant', 'dynamic': True},
+    ]
