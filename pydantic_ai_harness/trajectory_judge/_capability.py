@@ -67,6 +67,13 @@ _JUDGE_INSTRUCTIONS = (
 _PROMPT_HEADER = "Review the running agent's recent trajectory and deliver your verdict."
 
 
+def _validate_positive_int(name: str, value: object) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f'{name} must be an int, got {value!r}')
+    if value < 1:
+        raise ValueError(f'{name} must be >= 1, got {value}')
+
+
 @dataclass(kw_only=True)
 class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     """Review a live run with a second model on a cadence, and steer it mid-run.
@@ -148,10 +155,8 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.every < 1:
-            raise ValueError(f'every must be >= 1, got {self.every}')
-        if self.window < 1:
-            raise ValueError(f'window must be >= 1, got {self.window}')
+        _validate_positive_int('every', self.every)
+        _validate_positive_int('window', self.window)
         if self.agent is None:
             if self.model is None:
                 raise ValueError('Provide a judge `model` (with optional `instructions`) or a full judge `agent`.')
@@ -166,6 +171,13 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
                 raise ValueError('Provide either a judge `model` or a full judge `agent`, not both.')
             if self.instructions is not None:
                 raise ValueError('`instructions` configures the built-in judge; a passed `agent` owns its own.')
+            # Pydantic AI has no public validator-introspection API; this is the list its run
+            # boundary checks before accepting a custom `output_type`.
+            if self.agent._output_validators:  # pyright: ignore[reportPrivateUsage]
+                raise ValueError(
+                    'A judge `agent` must not have output validators because each evaluation sets a custom '
+                    '`output_type`.'
+                )
             self._judge = self.agent
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> TrajectoryJudge[AgentDepsT]:

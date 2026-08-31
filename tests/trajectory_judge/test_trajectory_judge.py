@@ -121,9 +121,29 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match='owns its own'):
             TrajectoryJudge(agent=judge, instructions='be strict')
 
+    def test_rejects_agent_with_output_validator(self) -> None:
+        judge = Agent(_all_good_model())
+
+        @judge.output_validator
+        def validate_output(output: str) -> str:
+            return output
+
+        with pytest.raises(ValueError, match='must not have output validators'):
+            TrajectoryJudge(agent=judge)
+
+    @pytest.mark.parametrize('value', [1.5, True])
+    def test_rejects_non_integer_every(self, value: float | bool) -> None:
+        with pytest.raises(ValueError, match='every must be an int'):
+            TrajectoryJudge(model='test', every=value)  # pyright: ignore[reportArgumentType]
+
     def test_rejects_every_below_one(self) -> None:
         with pytest.raises(ValueError, match='every must be >= 1'):
             TrajectoryJudge(model='test', every=0)
+
+    @pytest.mark.parametrize('value', [1.5, True])
+    def test_rejects_non_integer_window(self, value: float | bool) -> None:
+        with pytest.raises(ValueError, match='window must be an int'):
+            TrajectoryJudge(model='test', window=value)  # pyright: ignore[reportArgumentType]
 
     def test_rejects_window_below_one(self) -> None:
         with pytest.raises(ValueError, match='window must be >= 1'):
