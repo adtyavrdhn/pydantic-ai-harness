@@ -41,7 +41,7 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
     """Idle minutes before Daytona stops an owned sandbox."""
 
     workdir: str | None = None
-    """Absolute working directory for commands and relative filesystem paths."""
+    """Absolute working directory for commands."""
 
     env: Mapping[str, str] | None = None
     """Environment variables configured on an owned sandbox."""

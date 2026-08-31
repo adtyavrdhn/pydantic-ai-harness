@@ -9,7 +9,7 @@ import posixpath
 import shlex
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -130,7 +130,12 @@ class _DaytonaProcess:
             except Exception:
                 pass
             raise DaytonaSandboxCommandTimeoutError('Daytona command timed out and cleanup was requested.') from error
-        await self.kill()
+        try:
+            await self.kill()
+        except Exception:
+            # The command completed successfully. Keep the tracked process identity so
+            # backend close can retry cleanup without turning success into a rerunnable failure.
+            pass
         return _DaytonaResult(exit_code=exit_code, stdout=''.join(self._stdout), stderr=''.join(self._stderr))
 
     async def kill(self) -> None:
@@ -138,30 +143,29 @@ class _DaytonaProcess:
 
 
 class _DaytonaFilesystem:
-    def __init__(self, session: DaytonaSandboxSession, resolve_path: Callable[[str], Awaitable[str]]) -> None:
+    def __init__(self, session: DaytonaSandboxSession) -> None:
         self._session = session
-        self._resolve_path = resolve_path
 
     async def read_bytes(self, path: str) -> bytes:
-        return await self._session.read_bytes(await self._resolve_path(path))
+        return await self._session.read_bytes(path)
 
     async def write_bytes(self, path: str, data: bytes) -> None:
-        await self._session.write_bytes(await self._resolve_path(path), data)
+        await self._session.write_bytes(path, data)
 
     async def stat(self, path: str) -> _DaytonaFileEntry:
-        return _DaytonaFileEntry(*await self._session.file_info(await self._resolve_path(path)))
+        return _DaytonaFileEntry(*await self._session.file_info(path))
 
     async def list_dir(self, path: str) -> Sequence[_DaytonaFileEntry]:
-        return [_DaytonaFileEntry(*entry) for entry in await self._session.list_entries(await self._resolve_path(path))]
+        return [_DaytonaFileEntry(*entry) for entry in await self._session.list_entries(path)]
 
     async def make_dir(self, path: str) -> None:
-        await self._session.make_dir(await self._resolve_path(path))
+        await self._session.make_dir(path)
 
     async def remove(self, path: str) -> None:
-        await self._session.remove(await self._resolve_path(path))
+        await self._session.remove(path)
 
     async def exists(self, path: str) -> bool:
-        return await self._session.exists(await self._resolve_path(path))
+        return await self._session.exists(path)
 
 
 class DaytonaSandboxBackend:
@@ -183,7 +187,7 @@ class DaytonaSandboxBackend:
         self._sandbox_id = sandbox_id
         self._working_dir = _absolute_path('working_dir', working_dir)
         self._created_here = False
-        self.fs = _DaytonaFilesystem(session, self._resolve_path)
+        self.fs = _DaytonaFilesystem(session)
 
     @property
     def sandbox_id(self) -> str:
@@ -275,11 +279,6 @@ class DaytonaSandboxBackend:
                         )
                     self._working_dir = posixpath.normpath(discovered)
         return self._working_dir
-
-    async def _resolve_path(self, path: str) -> str:
-        if posixpath.isabs(path):
-            return posixpath.normpath(path)
-        return posixpath.normpath(posixpath.join(await self.working_dir(), path))
 
     async def run(
         self,

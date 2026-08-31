@@ -218,12 +218,26 @@ class TestBackend:
         assert sandbox.process_command == "printf 'a b'"
         assert sandbox.process_sessions == set()
 
+    async def test_success_is_returned_when_process_cleanup_needs_retry(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_stdout = ['done']
+        sandbox.process_delete_error = RuntimeError('delete failed')
+
+        result = await backend.run(['work'])
+
+        assert (result.stdout, result.exit_code) == ('done', 0)
+        assert sandbox.process_sessions
+        sandbox.process_delete_error = None
+        await backend.close(terminate=False)
+        assert sandbox.process_sessions == set()
+
     async def test_timeout_uses_one_deadline_and_kills_process(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
         sandbox = fake_daytona.sandboxes[0]
         sandbox.process_waits_for_input = True
         with pytest.raises(TimeoutError, match='timed out and cleanup was requested'):
-            await backend.run(['sleep', '30'], timeout=0.01)
+            await backend.run(['sleep', '30'], timeout=0.1)
         assert sandbox.process_sessions == set()
 
     async def test_failed_timeout_cleanup_is_retried_without_masking_timeout(self, fake_daytona: FakeDaytona) -> None:
@@ -233,7 +247,7 @@ class TestBackend:
         sandbox.process_delete_error = RuntimeError('delete failed')
 
         with pytest.raises(DaytonaSandboxCommandTimeoutError, match='timed out and cleanup was requested'):
-            await backend.run(['sleep', '30'], timeout=0.01)
+            await backend.run(['sleep', '30'], timeout=0.1)
         assert sandbox.process_sessions
 
         with pytest.raises(DaytonaSandboxError, match='delete failed'):
@@ -287,40 +301,15 @@ class TestBackend:
     async def test_filesystem_roundtrip_and_metadata(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create(working_dir='/workspace')
         sandbox = Sandbox(backend)
-        await sandbox.fs.write_bytes('notes/a.txt', b'hello')
-        assert await sandbox.fs.read_bytes('notes/a.txt') == b'hello'
-        entry = await sandbox.fs.stat('notes/a.txt')
+        await sandbox.fs.write_bytes('/workspace/notes/a.txt', b'hello')
+        assert await sandbox.fs.read_bytes('/workspace/notes/a.txt') == b'hello'
+        entry = await sandbox.fs.stat('/workspace/notes/a.txt')
         assert (entry.path, entry.name, entry.size, entry.is_dir) == (
             '/workspace/notes/a.txt',
             'a.txt',
             5,
             False,
         )
-
-    async def test_relative_filesystem_paths_use_discovered_absolute_workdir(self, fake_daytona: FakeDaytona) -> None:
-        backend = await DaytonaSandboxBackend.create()
-        sandbox = fake_daytona.sandboxes[0]
-        await backend.fs.make_dir('notes')
-        await backend.fs.write_bytes('notes/a.txt', b'hello')
-
-        assert await backend.fs.read_bytes('notes/a.txt') == b'hello'
-        entry = await backend.fs.stat('notes/a.txt')
-        listed = await backend.fs.list_dir('notes')
-        assert await backend.fs.exists('notes/a.txt') is True
-        await backend.fs.remove('notes/a.txt')
-
-        assert entry.path == '/srv/repo/notes/a.txt'
-        assert listed[0].path == '/srv/repo/notes/a.txt'
-        assert sandbox.fs_calls == [
-            ('mkdir', '/srv/repo/notes', 30),
-            ('upload', '/srv/repo/notes/a.txt', 30),
-            ('download', '/srv/repo/notes/a.txt', 30),
-            ('stat', '/srv/repo/notes/a.txt', 30),
-            ('list', '/srv/repo/notes', None, 30),
-            ('stat', '/srv/repo/notes/a.txt', 30),
-            ('delete', '/srv/repo/notes/a.txt', True, 30),
-        ]
-        assert sandbox.workdir_calls == 1
 
     async def test_missing_file_uses_builtin_error(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create(working_dir='/workspace')

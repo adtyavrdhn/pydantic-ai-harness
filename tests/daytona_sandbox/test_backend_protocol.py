@@ -184,13 +184,13 @@ class TestBackendLifecycle:
 
     async def test_filesystem_facade_delegates_all_operations(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create(working_dir='/work')
-        await backend.fs.make_dir('pkg')
-        await backend.fs.write_bytes('pkg/a.py', b'x')
+        await backend.fs.make_dir('/work/pkg')
+        await backend.fs.write_bytes('/work/pkg/a.py', b'x')
 
-        assert (await backend.fs.list_dir('.'))[0].name == 'pkg'
-        assert await backend.fs.exists('pkg/a.py') is True
-        await backend.fs.remove('pkg')
-        assert await backend.fs.exists('pkg/a.py') is False
+        assert (await backend.fs.list_dir('/work'))[0].name == 'pkg'
+        assert await backend.fs.exists('/work/pkg/a.py') is True
+        await backend.fs.remove('/work/pkg')
+        assert await backend.fs.exists('/work/pkg/a.py') is False
 
 
 class TestSessionConfiguration:
@@ -535,7 +535,7 @@ class TestManagedProcess:
                 assert process.process_id == 'broker'
                 await process.send('go', timeout=5)
                 assert await process.wait(timeout=6) == 3
-            assert sandbox.process_command == "cd -- /work && env -- A=b sh -c 'python child.py'"
+            assert sandbox.process_command == 'cd -- /work && python child.py'
         assert (stdout, stderr) == (['ready', 'done'], ['warning'])
 
     def test_process_configuration_validation(self, fake_daytona: FakeDaytona) -> None:
@@ -684,54 +684,54 @@ class TestManagedProcess:
 class TestFilesystem:
     async def test_directory_operations(self, fake_daytona: FakeDaytona) -> None:
         async with DaytonaSandboxSession(workdir='/work') as session:
-            await session.make_dir('pkg')
-            await session.write_bytes('pkg/a.py', b'x')
+            await session.make_dir('/work/pkg')
+            await session.write_bytes('/work/pkg/a.py', b'x')
             sandbox = fake_daytona.sandboxes[0]
             sandbox.files['/work/readme'] = b'hi'
             sandbox.files['/other/file'] = b'ignored'
             sandbox.files['/work/'] = b'ignored empty name'
             sandbox.directories.update({'/other', '/work/'})
-            entries = await session.list_entries('.')
+            entries = await session.list_entries('/work')
             assert entries == [
                 ('pkg', '/work/pkg', True, None),
                 ('readme', '/work/readme', False, 2),
             ]
-            assert await session.file_info('pkg') == ('pkg', '/work/pkg', True, None)
-            assert await session.exists('pkg/a.py') is True
-            assert await session.exists('missing') is False
-            await session.remove('pkg')
-            assert await session.exists('pkg/a.py') is False
+            assert await session.file_info('/work/pkg') == ('pkg', '/work/pkg', True, None)
+            assert await session.exists('/work/pkg/a.py') is True
+            assert await session.exists('/work/missing') is False
+            await session.remove('/work/pkg')
+            assert await session.exists('/work/pkg/a.py') is False
 
     async def test_file_and_generic_errors_are_translated(self, fake_daytona: FakeDaytona) -> None:
         async with DaytonaSandboxSession() as session:
             sandbox = fake_daytona.sandboxes[0]
             sandbox.fs_error = DaytonaNotFoundError('gone')
             with pytest.raises(FileNotFoundError):
-                await session.file_info('missing')
+                await session.file_info('/missing')
             with pytest.raises(FileNotFoundError):
-                await session.read_bytes('missing')
+                await session.read_bytes('/missing')
             with pytest.raises(FileNotFoundError):
-                await session.list_entries('missing')
+                await session.list_entries('/missing')
             with pytest.raises(FileNotFoundError):
-                await session.remove('missing')
+                await session.remove('/missing')
             sandbox.fs_error = DaytonaAuthenticationError('denied')
             with pytest.raises(DaytonaSandboxAuthError):
-                await session.make_dir('pkg')
+                await session.make_dir('/pkg')
             with pytest.raises(DaytonaSandboxAuthError):
-                await session.write_bytes('a', b'x')
+                await session.write_bytes('/a', b'x')
             with pytest.raises(DaytonaSandboxAuthError):
-                await session.exists('a')
+                await session.exists('/a')
             with pytest.raises(DaytonaSandboxAuthError):
-                await session.file_info('a')
+                await session.file_info('/a')
 
     async def test_failed_parent_creation_is_reported(self, fake_daytona: FakeDaytona) -> None:
         async with DaytonaSandboxSession() as session:
             fake_daytona.sandboxes[0].mkdir_exit_code = 1
             with pytest.raises(DaytonaSandboxError, match='Could not create'):
-                await session.write_bytes('pkg/a.py', b'x')
+                await session.write_bytes('/pkg/a.py', b'x')
 
     async def test_parent_creation_sdk_failure_is_translated(self, fake_daytona: FakeDaytona) -> None:
         async with DaytonaSandboxSession() as session:
             fake_daytona.sandboxes[0].exec_error = DaytonaConnectionError('offline')
             with pytest.raises(DaytonaSandboxError, match='offline'):
-                await session.write_bytes('pkg/a.py', b'x')
+                await session.write_bytes('/pkg/a.py', b'x')

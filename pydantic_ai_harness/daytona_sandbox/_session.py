@@ -1,11 +1,13 @@
 """Small Daytona SDK boundary used by `DaytonaSandbox`.
 
-External assumptions, verified 2026-08-23 against Daytona Python SDK 0.198.0:
+External assumptions, verified 2026-08-31 against Daytona Python SDK 0.198.0:
 
 - `AsyncDaytona.create`, `get`, `delete(wait=True)`, and `close` own sandbox lifecycle.
 - process sessions provide bounded waits, input without echo, streamed stdout
   and stderr, exit status, and explicit deletion.
 - `sandbox.fs` provides metadata, byte upload/download, and directory listing.
+- `CreateSandboxFromSnapshotParams.env_vars` configures the sandbox environment;
+  commands do not need to reapply it after reconnecting.
 - `CreateSandboxFromSnapshotParams.network_block_all=True` blocks outbound traffic.
 
 Sources:
@@ -422,15 +424,7 @@ class DaytonaSandboxSession:
         except Exception as error:
             raise _translate_error(error, unavailable=False) from error
 
-    def _path(self, path: str) -> str:
-        if self._workdir is None or posixpath.isabs(path):
-            return path
-        return posixpath.normpath(posixpath.join(self._workdir, path))
-
     def _command(self, command: str) -> str:
-        if self._env:
-            assignments = ' '.join(shlex.quote(f'{name}={value}') for name, value in self._env.items())
-            command = f'env -- {assignments} sh -c {shlex.quote(command)}'
         if self._workdir is not None:
             command = f'cd -- {shlex.quote(self._workdir)} && {command}'
         return command
@@ -461,30 +455,28 @@ class DaytonaSandboxSession:
 
     async def file_info(self, path: str) -> tuple[str, str, bool, int | None]:
         """Return the protocol-facing metadata for one path."""
-        resolved = self._path(path)
         try:
-            entry = await self._require_sandbox().fs.get_file_info(resolved, request_timeout=_DEFAULT_REQUEST_TIMEOUT)
+            entry = await self._require_sandbox().fs.get_file_info(path, request_timeout=_DEFAULT_REQUEST_TIMEOUT)
         except Exception as error:
             raise _translate_file_error(error, path) from error
-        return posixpath.basename(resolved.rstrip('/')), resolved, entry.is_dir, None if entry.is_dir else entry.size
+        return posixpath.basename(path.rstrip('/')), path, entry.is_dir, None if entry.is_dir else entry.size
 
     async def read_bytes(self, path: str) -> bytes:
         try:
-            data = await self._require_sandbox().fs.download_file(self._path(path), int(_DEFAULT_REQUEST_TIMEOUT))
+            data = await self._require_sandbox().fs.download_file(path, int(_DEFAULT_REQUEST_TIMEOUT))
         except Exception as error:
             raise _translate_file_error(error, path) from error
         return data
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         sandbox = self._require_sandbox()
-        resolved = self._path(path)
-        parent = posixpath.dirname(resolved)
+        parent = posixpath.dirname(path)
         try:
             if parent not in ('', '.', '/'):
                 mkdir = await sandbox.process.exec(f'mkdir -p -- {shlex.quote(parent)}', timeout=30)
                 if mkdir.exit_code != 0:
                     raise DaytonaSandboxError(mkdir.result or f'Could not create {parent!r}.')
-            await sandbox.fs.upload_file(data, resolved, timeout=int(_DEFAULT_REQUEST_TIMEOUT))
+            await sandbox.fs.upload_file(data, path, timeout=int(_DEFAULT_REQUEST_TIMEOUT))
         except DaytonaSandboxError:
             raise
         except Exception as error:
@@ -492,15 +484,14 @@ class DaytonaSandboxSession:
 
     async def list_entries(self, path: str) -> list[tuple[str, str, bool, int | None]]:
         """Return direct children with their protocol-facing metadata."""
-        resolved = self._path(path)
         try:
-            entries = await self._require_sandbox().fs.list_files(resolved, request_timeout=_DEFAULT_REQUEST_TIMEOUT)
+            entries = await self._require_sandbox().fs.list_files(path, request_timeout=_DEFAULT_REQUEST_TIMEOUT)
         except Exception as error:
             raise _translate_file_error(error, path) from error
         return [
             (
                 entry.name,
-                posixpath.join(resolved, entry.name),
+                posixpath.join(path, entry.name),
                 entry.is_dir,
                 None if entry.is_dir else entry.size,
             )
@@ -509,23 +500,19 @@ class DaytonaSandboxSession:
 
     async def make_dir(self, path: str) -> None:
         try:
-            await self._require_sandbox().fs.create_folder(
-                self._path(path), '755', request_timeout=_DEFAULT_REQUEST_TIMEOUT
-            )
+            await self._require_sandbox().fs.create_folder(path, '755', request_timeout=_DEFAULT_REQUEST_TIMEOUT)
         except Exception as error:
             raise _translate_error(error, unavailable=False) from error
 
     async def remove(self, path: str) -> None:
         try:
-            await self._require_sandbox().fs.delete_file(
-                self._path(path), recursive=True, request_timeout=_DEFAULT_REQUEST_TIMEOUT
-            )
+            await self._require_sandbox().fs.delete_file(path, recursive=True, request_timeout=_DEFAULT_REQUEST_TIMEOUT)
         except Exception as error:
             raise _translate_file_error(error, path) from error
 
     async def exists(self, path: str) -> bool:
         try:
-            await self._require_sandbox().fs.get_file_info(self._path(path), request_timeout=_DEFAULT_REQUEST_TIMEOUT)
+            await self._require_sandbox().fs.get_file_info(path, request_timeout=_DEFAULT_REQUEST_TIMEOUT)
         except Exception as error:
             try:
                 from daytona import DaytonaNotFoundError
