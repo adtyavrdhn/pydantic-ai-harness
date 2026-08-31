@@ -267,9 +267,12 @@ option is inactive: statements only run when the completed tool call executes.
 ## Speculative execution (experimental)
 
 `speculate` names tools that may start executing while the model is still streaming the
-`run_code` call. The streamed `code` argument is parsed as it arrives; calls to named tools
-whose arguments are all keyword literals launch immediately, and when the completed snippet
-executes, matching dispatches claim the in-flight results instead of starting the tool cold.
+`run_code` call. The streamed `code` argument is scanned as it arrives; a call to a named
+tool whose arguments are all keyword literals launches as soon as its closing paren streams,
+even while its enclosing statement (an `if` arm, a `with` body) is still being generated.
+When the completed snippet executes, matching dispatches claim the in-flight results instead
+of starting the tool cold. Extraction is textual, so a call spelled inside a string literal
+or comment can launch too; such launches waste a pure call and are evicted at commit.
 This overlaps tool latency with model generation (speculative programmatic tool calling,
 <https://alexzhang13.github.io/blog/2026/spec-ptc/>).
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import re
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -248,28 +249,108 @@ def _literal_calls(statements: Sequence[ast.stmt], eligible: frozenset[str]) -> 
             func = call.func
             if not isinstance(func, ast.Name) or func.id not in eligible:
                 continue
-            if call.args:
+            kwargs = _literal_kwargs(call, func.id)
+            if kwargs is None:
                 continue
-            kwargs: dict[str, Any] = {}
-            literal = True
-            for keyword in call.keywords:
-                if keyword.arg is None:
-                    literal = False
-                    break
-                try:
-                    kwargs[keyword.arg] = ast.literal_eval(keyword.value)
-                except ValueError:
-                    literal = False
-                    break
-            if literal:
-                out.append(
-                    _ExtractedCall(
-                        sandbox_name=func.id,
-                        kwargs=kwargs,
-                        line_start=statement.lineno,
-                        line_end=statement.end_lineno or statement.lineno,
-                    )
+            out.append(
+                _ExtractedCall(
+                    sandbox_name=func.id,
+                    kwargs=kwargs,
+                    line_start=statement.lineno,
+                    line_end=statement.end_lineno or statement.lineno,
                 )
+            )
+    return out
+
+
+def _literal_kwargs(call: ast.Call, name: str) -> dict[str, Any] | None:
+    """Return the call's arguments as literal keyword values, or None if any are not.
+
+    Positional arguments are never speculated: the sandbox rejects them at execution time,
+    so an early launch would run a call the real snippet cannot claim.
+    """
+    if not isinstance(call.func, ast.Name) or call.func.id != name or call.args:
+        return None
+    kwargs: dict[str, Any] = {}
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            return None
+        try:
+            kwargs[keyword.arg] = ast.literal_eval(keyword.value)
+        except ValueError:
+            return None
+    return kwargs
+
+
+def _close_paren(code: str, start: int) -> int | None:
+    """Return the index just past the paren that closes `code[start]`, or None if still open.
+
+    A small scanner rather than a parse: the enclosing statement is usually incomplete, so
+    only the call expression itself can be balanced. Tracks nesting across all bracket kinds
+    and skips string literals (with escapes); the extracted span is verified by `ast.parse`
+    afterwards, so the scanner only has to find a plausible end, not validate syntax.
+    """
+    depth = 0
+    quote: str | None = None
+    i = start
+    while i < len(code):
+        ch = code[i]
+        if quote is not None:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in '"\'':
+            quote = ch
+        elif ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _text_literal_calls(code: str, eligible: frozenset[str]) -> list[_ExtractedCall]:
+    """Extract complete eligible calls straight from streamed text, closed statement or not.
+
+    This is what makes launches fire as soon as a call finishes streaming: `_literal_calls`
+    only sees statements the line-conservative scanner has closed, which for a call inside a
+    compound statement (an `if`/`else` arm) can trail the call's own text by many lines. Here
+    a call is launchable once its closing paren has streamed, wherever its statement stands.
+
+    Text-level extraction cannot see context, so a call spelled inside a string literal, a
+    comment, or a `def` body can launch too. Those launches waste a pure call and are evicted
+    at commit; the `def`/attribute lookbehind filters the two cheap-to-catch shapes.
+    """
+    out: list[_ExtractedCall] = []
+    for name in eligible:
+        for match in re.finditer(rf'\b{re.escape(name)}\s*\(', code):
+            before = code[: match.start()]
+            if before.rstrip().endswith('.') or re.search(r'\bdef\s*$', before):
+                continue
+            end = _close_paren(code, match.end() - 1)
+            if end is None:
+                continue
+            try:
+                expression = ast.parse(code[match.start() : end], mode='eval')
+            except SyntaxError:
+                continue
+            if not isinstance(expression.body, ast.Call):
+                continue  # pragma: no cover - a `name(...)` span that parses is always a Call
+            kwargs = _literal_kwargs(expression.body, name)
+            if kwargs is None:
+                continue
+            out.append(
+                _ExtractedCall(
+                    sandbox_name=name,
+                    kwargs=kwargs,
+                    line_start=before.count('\n') + 1,
+                    line_end=code[:end].count('\n') + 1,
+                )
+            )
     return out
 
 
@@ -418,9 +499,9 @@ class SpeculationState:
                 body = ast.parse(code).body
             except SyntaxError:
                 return
-            fresh, watch.consumed_statements = body[watch.consumed_statements :], len(body)
+            watch.consumed_statements = len(body)
         else:
-            fresh, watch.consumed_statements = closed_statements(code, watch.consumed_statements)
+            _, watch.consumed_statements = closed_statements(code, watch.consumed_statements)
         produced.append(
             SpeculativeCodeUpdateEvent(
                 tool_call_id=watch.tool_call_id,
@@ -428,11 +509,19 @@ class SpeculationState:
                 closed_statements=watch.consumed_statements,
             )
         )
-        for extracted in _literal_calls(fresh, step.eligible):
+        # Launch from the raw text, not the closed statements: a call is ready the moment
+        # its closing paren streams, even while its enclosing statement (an `if` arm, a
+        # `with` body) is still being generated. Rescans recount every occurrence in the
+        # grown prefix, so `demanded` is reconciled to the count rather than incremented.
+        seen: dict[str, int] = {}
+        for extracted in _text_literal_calls(code, step.eligible):
+            key = _canonical_key(extracted.sandbox_name, extracted.kwargs)
+            seen[key] = seen.get(key, 0) + 1
+            if seen[key] <= watch.demanded.get(key, 0):
+                continue
             if watch.launched >= _MAX_SPECULATIONS_PER_PART:
                 return
-            key = _canonical_key(extracted.sandbox_name, extracted.kwargs)
-            watch.demanded[key] = watch.demanded.get(key, 0) + 1
+            watch.demanded[key] = seen[key]
             in_flight = sum(len(w.calls.get(key, ())) for w in self._parts.values())
             if watch.demanded[key] <= in_flight:
                 # Already covered, usually by a failed attempt's surviving launch; the

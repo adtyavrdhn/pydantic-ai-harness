@@ -589,7 +589,10 @@ class TestSpeculationEdgeCases:
         assert run_capability.speculation_stats.launched == 0
 
         await toolset.get_tools(ctx)
-        big = '\n'.join(f'x{i} = await search(query="q{i}")' for i in range(33)) + '\nprint(1)'
+        # The def body and the lambda hold eligible-looking calls that must not launch:
+        # the AST extractor skips container statements and container children.
+        skip_shapes = 'def helper():\n    return search(query="never")\nfn = lambda: search(query="never")\n'
+        big = skip_shapes + '\n'.join(f'x{i} = await search(query="q{i}")' for i in range(33)) + '\nprint(1)'
         toolset.speculation.prelaunch_for_execution('p1', big, ctx)
         assert run_capability.speculation_stats.launched == 32
 
@@ -629,12 +632,12 @@ class TestSpeculationEdgeCases:
         assert run_capability.speculation_stats.adopted == 2
 
     async def test_part_end_launches_the_statements_streaming_held_back(self):
-        """A snippet's trailing statements launch when the arguments finish streaming.
+        """A snippet whose scans never fired still launches when the arguments finish.
 
-        Streamed code rarely ends with a newline, and the line-conservative scanner only
-        closes a statement once a complete later line exists -- so without the final scan, a
-        short snippet's calls never launch and their dispatches go cold. This is the exact
-        shape observed dogfooding: one read call plus a print, no trailing newline.
+        Text-level extraction launches a call as soon as its closing paren streams, but
+        scans are newline-batched: a call whose paren closes in a later delta on the same
+        line is not seen mid-stream, so without the final scan it would never launch and
+        its dispatch would go cold.
         """
 
         def search(query: str) -> str:
@@ -648,11 +651,11 @@ class TestSpeculationEdgeCases:
         assert isinstance(toolset, CodeModeToolset)
         await toolset.get_tools(ctx)
 
-        code = 'a = await search(query="alpha")\nprint(a)'
-        part = ToolCallPart(tool_name='run_code', args={}, tool_call_id='c1')
+        part = ToolCallPart(tool_name='run_code', args='', tool_call_id='c1')
         events: list[AgentStreamEvent] = [
             PartStartEvent(index=0, part=part),
-            PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': code})),
+            PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta='{"code": "a = await search(query=')),
+            PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta='\\"alpha\\")"}')),
         ]
         async for _ in run_capability.wrap_run_event_stream(ctx, stream=_PlainEventStream(events)):
             pass
@@ -667,7 +670,7 @@ class TestSpeculationEdgeCases:
         launches = [e for e in seen if isinstance(e, SpeculativeCallLaunchedEvent)]
         assert [e.wrapped_tool_name for e in launches] == ['search']
         updates = [e for e in seen if isinstance(e, SpeculativeCodeUpdateEvent)]
-        assert updates[-1].closed_statements == 2
+        assert updates[-1].closed_statements == 1
 
     async def test_watcher_handles_dict_args_odd_indexes_and_caps_launches(self):
         """Dict-argument deltas, unknown part indexes, plain (non-generator) streams, and the
@@ -1111,3 +1114,92 @@ class TestTierComposition:
         assert capability.speculation_stats.launched == 2
         assert capability.speculation_stats.adopted == 1
         assert capability.speculation_stats.evicted == 1
+
+
+class TestCallLevelLaunch:
+    """Launches fire when a call's text completes, not when its statement closes."""
+
+    async def test_call_launches_while_its_statement_is_still_streaming(self):
+        """Deadlock-unless-call-level: the stream stalls until the open `if` arm's call starts.
+
+        The `if` statement never closes before the model's last chunks (closure requires a
+        later top-level statement), so statement-level launching would deadlock here: the
+        model refuses to finish generating until the call inside the open arm is running.
+        """
+        started = asyncio.Event()
+
+        async def search(query: str) -> str:
+            """Return a canned result."""
+            started.set()
+            return f'result:{query}'
+
+        code = 'if 1 == 1:\n    a = await search(query="alpha")\nelse:\n    a = "cold"\nprint(a)\n"ok"'
+
+        async def stream_code(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if len(messages) > 1:
+                yield 'done'
+                return
+            args = json.dumps({'code': code})
+            hold_from = args.index('else')
+            yield {1: DeltaToolCall(name='run_code')}
+            yield {1: DeltaToolCall(json_args=args[:hold_from])}
+            await asyncio.wait_for(started.wait(), timeout=5)
+            yield {1: DeltaToolCall(json_args=args[hold_from:])}
+
+        capability = CodeMode[None](speculate=['search'])
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_code),
+            deps_type=type(None),
+            capabilities=[capability],
+            tools=[Tool(search)],
+        )
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert capability.speculation_stats.launched == 1
+        assert capability.speculation_stats.adopted == 1
+
+    async def test_text_extraction_skips_non_calls_and_non_literals(self):
+        """The raw-text extractor launches only genuine literal-keyword calls.
+
+        Attribute access, `def` parameter lists, unclosed spans, positional or non-literal
+        arguments are all skipped; nested container literals and escaped quotes inside
+        argument strings are matched through.
+        """
+        starts: list[str] = []
+
+        async def search(query: str | dict[str, list[int]]) -> str:
+            """Return a canned result."""
+            starts.append(repr(query))
+            return 'r'
+
+        ctx = build_run_context(None)
+        capability = CodeMode[None](speculate=['search'])
+        run_capability = await capability.for_run(ctx)
+        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[Tool(search)]))
+        assert isinstance(toolset, CodeModeToolset)
+        await toolset.get_tools(ctx)
+
+        code = (
+            'client.search(query="attribute")\n'
+            'def search(query="param"): pass\n'
+            "s = 'search(query=\"unclosed\\'\n"
+            'bad = "search(,)"\n'
+            'ref = await search(query=variable)\n'
+            'pos = await search("positional")\n'
+            'a = await search(query="a\\"b")\n'
+            'b = await search(query={"k": [1, 2]})\n'
+            'c = 1\n'
+        )
+        part = ToolCallPart(tool_name='run_code', args={}, tool_call_id='c1')
+        events: list[AgentStreamEvent] = [
+            PartStartEvent(index=0, part=part),
+            PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': code})),
+        ]
+        async for _ in run_capability.wrap_run_event_stream(ctx, stream=_PlainEventStream(events)):
+            pass
+
+        await asyncio.sleep(0.05)
+        assert run_capability.speculation_stats.launched == 2
+        assert sorted(starts) == ["'a\"b'", "{'k': [1, 2]}"]
