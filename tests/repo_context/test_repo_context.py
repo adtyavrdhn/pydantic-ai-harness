@@ -5,15 +5,19 @@ from __future__ import annotations
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 import pytest
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.sandboxes import LocalSandbox, Sandbox
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage
 
+from pydantic_ai_harness._sandbox import sandbox_or_local
 from pydantic_ai_harness.repo_context import (
     AgentContextInventory,
     ContextFile,
@@ -57,6 +61,14 @@ def _write(path: Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding='utf-8')
     return path
+
+
+class TestSandboxSelection:
+    def test_unconnected_sandbox_is_preserved(self) -> None:
+        sandbox = MagicMock(spec=Sandbox)
+        type(sandbox).backend = PropertyMock(side_effect=UserError('not connected'))
+
+        assert sandbox_or_local(sandbox) is sandbox
 
 
 class TestDiscoverInstructionFiles:
@@ -112,6 +124,20 @@ class TestDiscoverInstructionFiles:
     async def test_missing_files_skipped(self, tmp_path: Path, sandbox: Sandbox) -> None:
         files = await discover_instruction_files(sandbox, tmp_path, None, ('CLAUDE.md',))
         assert files == []
+
+    async def test_file_disappearing_between_exists_and_stat_is_skipped(self, tmp_path: Path) -> None:
+        sandbox = MagicMock(spec=Sandbox)
+        sandbox.fs.exists = AsyncMock(return_value=True)
+        sandbox.fs.stat = AsyncMock(side_effect=FileNotFoundError)
+
+        assert await discover_instruction_files(sandbox, tmp_path, None, ('CLAUDE.md',)) == []
+
+    async def test_duplicate_filename_is_read_once(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        _write(tmp_path / 'CLAUDE.md', 'once')
+
+        files = await discover_instruction_files(sandbox, tmp_path, None, ('CLAUDE.md', 'CLAUDE.md'))
+
+        assert [file.content for file in files] == ['once']
 
     async def test_non_utf8_file_does_not_crash(self, tmp_path: Path, sandbox: Sandbox) -> None:
         (tmp_path / 'CLAUDE.md').write_bytes(b'caf\xe9 instructions')
@@ -224,6 +250,39 @@ class TestScanAssets:
         assert inv.roots[0].settings is None
         assert inv.roots[0].notes is None
 
+    async def test_file_at_asset_root_is_not_a_directory(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        _write(tmp_path / '.claude', 'not a directory')
+
+        inv = await scan_assets(sandbox, tmp_path, ('.claude',))
+
+        assert inv.roots[0].exists is False
+
+    async def test_inventory_command_failure_is_reported(self, tmp_path: Path) -> None:
+        sandbox = MagicMock(spec=Sandbox)
+        sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
+        sandbox.fs.stat = AsyncMock(return_value=SimpleNamespace(is_dir=True))
+        sandbox.run = AsyncMock(return_value=SimpleNamespace(exit_code=1, stderr='find failed'))
+
+        with pytest.raises(RuntimeError, match='find failed'):
+            await scan_assets(sandbox, tmp_path, ('.claude',))
+
+    async def test_unrecognized_inventory_entries_are_ignored(self, tmp_path: Path) -> None:
+        sandbox = MagicMock(spec=Sandbox)
+        sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
+        sandbox.fs.stat = AsyncMock(return_value=SimpleNamespace(is_dir=True))
+        sandbox.run = AsyncMock(
+            return_value=SimpleNamespace(
+                exit_code=0,
+                stderr='',
+                stdout=f'{tmp_path}/.claude/README.md\n{tmp_path}/.claude/settings.json\n',
+            )
+        )
+
+        inv = await scan_assets(sandbox, tmp_path, ('.claude',))
+
+        assert inv.roots[0].settings == '.claude/settings.json'
+        assert inv.roots[0].skills == []
+
     async def test_returns_model(self, tmp_path: Path, sandbox: Sandbox) -> None:
         assert isinstance(await scan_assets(sandbox, tmp_path, ()), AgentContextInventory)
 
@@ -311,6 +370,22 @@ class TestNestedTraversal:
             _run_context(sandbox=sandbox), call=call, tool_def=tool_def, args=args, result='file body'
         )
         assert 'CLAUDE.md' in out
+
+    async def test_missing_path_is_treated_as_a_directory(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        cap = RepoContext[object](workspace_dir=tmp_path)
+        cap._resolved_workspace_dir = tmp_path
+
+        assert await cap._resolve_directory(sandbox, 'missing') == tmp_path / 'missing'
+
+    async def test_path_disappearing_before_stat_is_treated_as_a_directory(self, tmp_path: Path) -> None:
+        sandbox = MagicMock(spec=Sandbox)
+        sandbox.resolve = AsyncMock(return_value=(tmp_path / 'gone').as_posix())
+        sandbox.fs.exists = AsyncMock(return_value=True)
+        sandbox.fs.stat = AsyncMock(side_effect=FileNotFoundError)
+        cap = RepoContext[object](workspace_dir=tmp_path)
+        cap._resolved_workspace_dir = tmp_path
+
+        assert await cap._resolve_directory(sandbox, 'gone') == tmp_path / 'gone'
 
     async def test_contents_mode_inlines_body(self, tmp_path: Path, sandbox: Sandbox) -> None:
         _write(tmp_path / 'sub' / 'CLAUDE.md', 'NESTED BODY')
