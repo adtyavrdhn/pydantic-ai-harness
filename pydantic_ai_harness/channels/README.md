@@ -97,8 +97,9 @@ an integration, not an `AbstractCapability`.
   ids are dropped before the history store or agent is called.
 - Turns in one conversation run in arrival order. Different conversations may
   run concurrently.
-- At most 100 accepted turns may be running or waiting by default. Set
-  `max_pending_turns` to tune this backpressure limit.
+- At most 100 turns may be running or waiting inside the host by default. Set
+  `max_pending_turns` to tune this limit. Webhook adapters separately buffer up
+  to `max_queued_messages` verified messages before the host accepts them.
 - `/new` waits for earlier turns in the conversation, then deletes its stored
   Pydantic AI message history. It does not cancel an active turn.
 - `InMemoryConversationStore` is the default. It keeps history only for the

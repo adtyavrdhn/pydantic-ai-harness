@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import AsyncGenerator
 
 import anyio
@@ -15,23 +16,16 @@ class WebhookInbox:
         self._max_queued_messages = max_queued_messages
         self._send_stream: MemoryObjectSendStream[InboundMessage] | None = None
         self._receive_stream: MemoryObjectReceiveStream[InboundMessage] | None = None
-        self._receive_claimed = False
-        self._closed = True
 
     def open(self) -> None:
-        if not self._closed:  # pragma: no cover
-            return
         self._send_stream, self._receive_stream = anyio.create_memory_object_stream[InboundMessage](
             self._max_queued_messages
         )
-        self._receive_claimed = False
-        self._closed = False
 
     def put(self, message: InboundMessage) -> bool:
         send_stream = self._send_stream
-        if self._closed:  # pragma: no cover
+        if send_stream is None:  # pragma: no cover
             return False
-        assert send_stream is not None
         try:
             send_stream.send_nowait(message)
         except (anyio.WouldBlock, anyio.BrokenResourceError, anyio.ClosedResourceError):
@@ -39,30 +33,38 @@ class WebhookInbox:
         return True
 
     def close(self) -> None:
-        if self._closed:  # pragma: no cover
-            return
-        self._closed = True
         send_stream = self._send_stream
-        assert send_stream is not None
-        send_stream.close()
         receive_stream = self._receive_stream
-        assert receive_stream is not None
-        statistics = receive_stream.statistics()
-        if not self._receive_claimed and statistics.current_buffer_used == 0:
-            receive_stream.close()
+        self._send_stream = None
+        self._receive_stream = None
+        assert send_stream is not None and receive_stream is not None
+        send_stream.close()
+        receive_stream.close()
 
     async def messages(self) -> AsyncGenerator[InboundMessage, None]:
         receive_stream = self._receive_stream
         if receive_stream is None:  # pragma: no cover
             return
-        self._receive_claimed = True
         try:
-            try:
-                async with receive_stream:
-                    async for message in receive_stream:
-                        yield message
-            except anyio.ClosedResourceError:
-                return
-        finally:
-            if receive_stream is self._receive_stream:
-                self._receive_claimed = False
+            async with receive_stream:
+                async for message in receive_stream:
+                    yield message
+        except anyio.ClosedResourceError:
+            return
+
+
+class RecentMessageIds:
+    def __init__(self, max_size: int) -> None:
+        self._max_size = max_size
+        self._ids: OrderedDict[str, None] = OrderedDict()
+
+    def __contains__(self, message_id: str) -> bool:
+        return message_id in self._ids
+
+    def add(self, message_id: str) -> None:
+        self._ids[message_id] = None
+        if len(self._ids) > self._max_size:
+            self._ids.popitem(last=False)
+
+    def clear(self) -> None:
+        self._ids.clear()

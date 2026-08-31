@@ -18,9 +18,7 @@ import hashlib
 import hmac
 import math
 import time
-from collections import OrderedDict
 from collections.abc import AsyncGenerator, Mapping
-from contextlib import aclosing
 from types import TracebackType
 
 import anyio
@@ -34,7 +32,7 @@ from pydantic_ai_harness.channels._types import (
     WebhookRequest,
     WebhookResponse,
 )
-from pydantic_ai_harness.channels._webhook import WebhookInbox
+from pydantic_ai_harness.channels._webhook import RecentMessageIds, WebhookInbox
 
 _API_BASE = 'https://slack.com/api'
 _MAX_TEXT_CHARS = 4000
@@ -82,9 +80,8 @@ class SlackChannel:
         self._provided_client = http_client
         self._api_base_url = api_base_url.rstrip('/')
         self._client: httpx.AsyncClient | None = None
-        self._owns_client = False
         self._inbox = WebhookInbox(max_queued_messages)
-        self._seen_events: OrderedDict[str, None] = OrderedDict()
+        self._seen_events = RecentMessageIds(_MAX_SEEN_EVENTS)
         self._team_id: str | None = None
         self._bot_user_id: str | None = None
 
@@ -94,7 +91,6 @@ class SlackChannel:
             raise RuntimeError('SlackChannel is already open')
         self._inbox.open()
         self._client = self._provided_client or httpx.AsyncClient()
-        self._owns_client = self._provided_client is None
         try:
             identity = await self._call('auth.test')
             team_id = identity.get('team_id')
@@ -115,20 +111,20 @@ class SlackChannel:
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         traceback: TracebackType | None,
-    ) -> bool | None:
+    ) -> None:
         """Close the internally created HTTP client, if any."""
         self._inbox.close()
+        # Events still queued at shutdown were acknowledged but not handled.
+        self._seen_events.clear()
         await self._close_owned_client()
         self._client = None
         self._team_id = None
         self._bot_user_id = None
-        return None
 
     async def _close_owned_client(self) -> None:
-        if self._owns_client and self._client is not None:
+        if self._provided_client is None and self._client is not None:
             with anyio.CancelScope(shield=True):
                 await self._client.aclose()
-        self._owns_client = False
 
     def handle_webhook(self, request: WebhookRequest) -> WebhookResponse:
         """Authenticate and enqueue one Slack Events API request.
@@ -172,9 +168,7 @@ class SlackChannel:
         if not self._inbox.put(message):
             return WebhookResponse(503)
 
-        self._seen_events[event_id] = None
-        if len(self._seen_events) > _MAX_SEEN_EVENTS:
-            self._seen_events.popitem(last=False)
+        self._seen_events.add(event_id)
         return WebhookResponse(200)
 
     def _valid_signature(self, request: WebhookRequest) -> bool:
@@ -238,11 +232,9 @@ class SlackChannel:
             text=text,
         )
 
-    async def messages(self) -> AsyncGenerator[InboundMessage, None]:
+    def messages(self) -> AsyncGenerator[InboundMessage, None]:
         """Yield verified direct messages and app mentions until cancelled."""
-        async with aclosing(self._inbox.messages()) as messages:
-            async for message in messages:
-                yield message
+        return self._inbox.messages()
 
     async def send_text(self, conversation_id: str, text: str) -> None:
         """Post text in ordered chunks no longer than Slack's recommended limit."""

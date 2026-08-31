@@ -515,18 +515,6 @@ class TestSlackChannel:
                 assert (await anext(messages)).message_id == 'Ev1'
         await client.aclose()
 
-    async def test_closing_full_inbox_drains_accepted_message(self) -> None:
-        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: auth_response()))
-        channel = SlackChannel('token', _SIGNING_SECRET, http_client=client, max_queued_messages=1)
-        messages = channel.messages()
-        async with channel:
-            assert channel.handle_webhook(event_request('Ev1', direct_message())).status_code == 200
-
-        assert (await anext(messages)).message_id == 'Ev1'
-        with pytest.raises(StopAsyncIteration):
-            await anext(messages)
-        await client.aclose()
-
     async def test_closed_message_iterator_rejects_new_webhooks(self) -> None:
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: auth_response()))
         channel = SlackChannel('token', _SIGNING_SECRET, http_client=client)
@@ -550,6 +538,9 @@ class TestSlackChannel:
         async with channel:
             with pytest.raises(StopAsyncIteration):
                 await anext(messages)
+            async with aclosing(channel.messages()) as reopened_messages:
+                assert channel.handle_webhook(event_request('Ev1', direct_message())).status_code == 200
+                assert (await anext(reopened_messages)).message_id == 'Ev1'
         await client.aclose()
 
     async def test_open_failure_ends_pending_message_iterator(self) -> None:
