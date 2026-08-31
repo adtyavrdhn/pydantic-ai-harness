@@ -1400,5 +1400,5 @@ class TestTelemetryAndComposition:
         Agent(
             TestModel(),
             name='memory-agent',
-            capabilities=[Memory[object](inject_memory=False), TemporalDurability()],
+            capabilities=[Memory[object](id='memory', inject_memory=False), TemporalDurability()],
         )
