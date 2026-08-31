@@ -1,8 +1,15 @@
+---
+title: Trajectory Judge
+description: Review a live agent run with a second model on a cadence, and steer it back on course mid-run, while a correction is still cheap.
+---
+
 # Trajectory Judge
 
 Watch a live agent run with a second model, and steer it back on course mid-run.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/trajectory_judge/)
+
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
 ## The problem
 
@@ -74,7 +81,7 @@ agent = Agent(
 
 ## Advanced: bring your own judge agent
 
-For anything beyond a model and a review focus (model settings, toolsets, fallback models, custom instructions), pass a full `Agent` instead of piling knobs onto the capability. Its `output_type` must be `[AllGood, Steer]`, so the type checker enforces the verdict contract.
+For anything beyond a model and a review focus (model settings, toolsets, fallback models, custom instructions), pass a full `Agent` instead of piling knobs onto the capability. Every evaluation runs it with `output_type=[AllGood, Steer]`, so the verdict contract is enforced at the run boundary whatever output type the agent was configured with, and an existing agent can be reused as-is. The one constraint: the judge agent must not have output validators, which are incompatible with a per-run `output_type`.
 
 ```python
 from pydantic_ai import Agent
@@ -101,9 +108,9 @@ agent = Agent(
 
 ## Cost and failure semantics
 
-- The judge's model usage is threaded onto the run's `usage` and runs under the run's `usage_limits` minus one reserved request, so judges cannot silently exceed the run's budget.
+- The judge's model usage is threaded onto the run's `usage` and runs under the run's `usage_limits`, minus the parent's pending request and one request per sibling judge evaluation in flight at launch. Judges cannot silently exceed the run's budget, and concurrent judges cannot race each other past a shared request limit: an evaluation that finds no remaining budget fails with `UsageLimitExceeded` before spending anything.
 - An evaluation failure is raised on the run at the next cadence tick or at run end; judge failures are never silently dropped. If you need a judge to degrade instead, give it a fallback model through `agent` (for example a `FallbackModel`): resilience policy belongs to the judge agent, not to fields on the capability.
-- Under [durable execution](/ai/capabilities/durable_execution/overview/) (Temporal, DBOS, Prefect) the evaluation is launched from a capability hook, so it runs in orchestration context: it is not checkpointed, and enqueued steering is not persisted across replay. Prefer plain runs for judged work, or treat steering as best-effort there.
+- A judged run inside a [durable execution](/ai/capabilities/durable_execution/overview/) workflow or flow (Temporal, DBOS, Prefect) is rejected with `UserError` before the first model request: the evaluation is launched from a capability hook in orchestration context, so its model calls would not be checkpointed and could repeat on replay. A durable-capable agent run outside its workflow or flow is unaffected. Run judged work outside durable execution.
 
 ## Observability
 

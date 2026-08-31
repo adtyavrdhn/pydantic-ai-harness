@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
@@ -25,7 +27,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.usage import RunUsage, UsageLimits
 
 from pydantic_ai_harness.trajectory_judge import AllGood, Steer, TrajectoryJudge, TrajectoryVerdict
 
@@ -83,6 +85,7 @@ def _ctx() -> Any:
     ctx.usage = RunUsage()
     ctx.usage_limits = None
     ctx.enqueue = MagicMock()
+    ctx.capabilities = {}
     return ctx
 
 
@@ -278,6 +281,41 @@ class TestSteering:
         ctx.enqueue.assert_called_once_with("Steering from trajectory judge 'trajectory-judge': back on task")
         # The judge's own model call was threaded onto the run's usage.
         assert ctx.usage.requests >= 1
+
+
+class TestVerdictEnforcement:
+    async def test_judge_agent_with_unrelated_output_type_still_delivers_verdicts(self) -> None:
+        """The verdict contract is enforced at the run boundary, not trusted from the agent's config."""
+        delivered = asyncio.Event()
+        verdicts: list[TrajectoryVerdict] = []
+
+        def on_verdict(verdict: TrajectoryVerdict) -> None:
+            verdicts.append(verdict)
+            delivered.set()
+
+        judge = Agent(_steer_model('back on task'), name='reused')  # plain text output type
+
+        main_requests: list[str] = []
+
+        def main_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            main_requests.append(_all_user_text(messages))
+            if len(main_requests) == 1:
+                return ModelResponse(parts=[ToolCallPart('work', {})])
+            return _text_response('done')
+
+        agent = Agent(
+            FunctionModel(main_fn),
+            capabilities=[TrajectoryJudge(agent=judge, every=1, on_verdict=on_verdict)],
+        )
+
+        @agent.tool_plain
+        async def work() -> str:
+            await asyncio.wait_for(delivered.wait(), timeout=_WAIT)
+            return 'worked'
+
+        await agent.run('do the thing')
+        assert verdicts == [Steer(message='back on task')]
+        assert "Steering from trajectory judge 'reused': back on task" in main_requests[1]
 
 
 class TestCadence:
@@ -525,3 +563,114 @@ class TestTranscript:
         transcript = seen[0].split('<trajectory>\n', 1)[1].rsplit('\n</trajectory>', 1)[0]
         assert 'recent-marker' in transcript
         assert len(transcript) <= 25 * 4  # window tokens * ~4 chars per token
+
+
+class TestUsageCoordination:
+    async def test_concurrent_judges_share_the_request_budget(self) -> None:
+        """Each launch reserves the in-flight siblings' requests, closing the shared-limit race.
+
+        With `request_limit=3`, one parent request already recorded, and three `every=1`
+        judges due on the same tick, only the first evaluation may spend a request; the
+        other two find no remaining budget at their own pre-request check and fail with
+        `UsageLimitExceeded` before spending anything.
+        """
+        gate = asyncio.Event()
+        judge_calls = 0
+        done = asyncio.Event()
+
+        async def slow_judge(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal judge_calls
+            judge_calls += 1
+            await gate.wait()
+            return _all_good_response()
+
+        ctx = _ctx()
+        ctx.usage = RunUsage(requests=1)
+        ctx.usage_limits = UsageLimits(request_limit=3)
+        caps = [
+            TrajectoryJudge(
+                model=FunctionModel(slow_judge), every=1, name=f'judge-{index}', on_verdict=lambda _: done.set()
+            )
+            for index in range(3)
+        ]
+        run_caps = [await cap.for_run(ctx) for cap in caps]
+        ctx.capabilities = {f'trajectory_judge_{index}': run_cap for index, run_cap in enumerate(run_caps)}
+
+        request_context = _request_context(_hi_request())
+        for run_cap in run_caps:
+            await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
+        await asyncio.sleep(0.05)  # let the losing evaluations hit their pre-request checks
+
+        assert judge_calls == 1  # the reservation stopped the others before they spent anything
+        gate.set()
+        await asyncio.wait_for(done.wait(), timeout=_WAIT)
+
+        async def passthrough() -> Any:
+            return 'run-result'
+
+        with pytest.raises(UsageLimitExceeded):
+            await run_caps[1].wrap_run(ctx, handler=passthrough)
+        with pytest.raises(UsageLimitExceeded):
+            await run_caps[2].wrap_run(ctx, handler=passthrough)
+        assert await run_caps[0].wrap_run(ctx, handler=passthrough) == 'run-result'
+        assert ctx.usage.requests == 2  # parent + the single winning evaluation, within the limit of 3
+
+
+class TestDurableExecution:
+    async def test_rejected_inside_a_durable_container(self) -> None:
+        """A judged run inside a durable workflow or flow fails fast, before any model request."""
+
+        class DBOSDurability(AbstractCapability[None]):
+            in_durable_context = True
+
+        DBOSDurability.__module__ = 'pydantic_ai.durable_exec.dbos'
+
+        def main_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:  # pragma: no cover
+            return _text_response('never reached')
+
+        capabilities: list[AbstractCapability[None]] = [
+            DBOSDurability(),
+            TrajectoryJudge(model=_steer_model(), every=1),
+        ]
+        agent = Agent(FunctionModel(main_fn), deps_type=type(None), capabilities=capabilities)
+        with pytest.raises(UserError, match='durable workflow or flow'):
+            await agent.run('do the thing')
+
+    async def test_durable_capable_agent_outside_its_container_is_judged(self) -> None:
+        """Only the durable container is rejected; the same agent run plainly keeps its judge."""
+
+        class DBOSDurability(AbstractCapability[None]):
+            in_durable_context = False
+
+        DBOSDurability.__module__ = 'pydantic_ai.durable_exec.dbos'
+
+        delivered = asyncio.Event()
+        verdicts: list[TrajectoryVerdict] = []
+
+        def on_verdict(verdict: TrajectoryVerdict) -> None:
+            verdicts.append(verdict)
+            delivered.set()
+
+        main_requests = 0
+
+        def main_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal main_requests
+            main_requests += 1
+            if main_requests == 1:
+                return ModelResponse(parts=[ToolCallPart('work', {})])
+            return _text_response('done')
+
+        capabilities: list[AbstractCapability[None]] = [
+            DBOSDurability(),
+            TrajectoryJudge(model=_all_good_model(), every=1, on_verdict=on_verdict),
+        ]
+        agent = Agent(FunctionModel(main_fn), deps_type=type(None), capabilities=capabilities)
+
+        @agent.tool_plain
+        async def work() -> str:
+            await asyncio.wait_for(delivered.wait(), timeout=_WAIT)
+            return 'worked'
+
+        result = await agent.run('do the thing')
+        assert result.output == 'done'
+        assert verdicts == [AllGood()]

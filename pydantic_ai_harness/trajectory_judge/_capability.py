@@ -6,10 +6,11 @@ import asyncio
 import contextlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, runtime_checkable
 
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelResponse,
@@ -28,6 +29,7 @@ from pydantic_ai_harness._usage import reserved_usage_limits
 if TYPE_CHECKING:
     from pydantic_ai.agent import AgentRunResult
     from pydantic_ai.models import ModelRequestContext
+    from pydantic_ai.usage import UsageLimits
 
 
 @dataclass
@@ -80,10 +82,11 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     At most one evaluation per judge is in flight at a time; a cadence tick that finds one
     still running is skipped. An evaluation still in flight when the run ends is cancelled.
     The judge's model and tool usage are threaded onto the run's `usage` and run under its
-    `usage_limits` (minus one reserved request), so a judge cannot silently exceed the
-    run's budget. An evaluation failure is raised on the run at the next cadence tick or at
-    run end; give the judge a fallback model (via `agent`) if you need it to degrade
-    instead.
+    `usage_limits`, minus the parent's pending request and one request per sibling judge
+    evaluation in flight at launch, so concurrent judges cannot race each other past a
+    shared request limit. An evaluation failure is raised on the run at the next cadence
+    tick or at run end; give the judge a fallback model (via `agent`) if you need it to
+    degrade instead.
 
     ```python
     from pydantic_ai import Agent
@@ -104,10 +107,10 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     Several judges can watch one run: add one `TrajectoryJudge` per concern to
     `capabilities`. Each schedules and evaluates independently.
 
-    Under durable execution the evaluation runs in orchestration context (it is launched
-    from a capability hook), so it is not checkpointed and enqueued steering is not
-    persisted across replay. Prefer plain runs for judged work, or treat steering as
-    best-effort there.
+    A judged run inside a durable workflow or flow (Temporal, DBOS, Prefect) is rejected
+    with `UserError` before the first model request: the evaluation is launched from a
+    capability hook in orchestration context, so its model calls would not be checkpointed
+    and could repeat on replay. Run judged work outside durable execution.
     """
 
     model: Model | KnownModelName | str | None = None
@@ -118,10 +121,12 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     """The judge's review focus, appended to the built-in judge instructions. Only valid
     together with `model`; a passed `agent` owns its own instructions."""
 
-    agent: Agent[None, TrajectoryVerdict] | None = None
+    agent: Agent[None, Any] | None = None
     """A full judge agent, for advanced customization (own instructions, model settings,
-    toolsets, fallback models). Its `output_type` must be `[AllGood, Steer]` so the judge
-    delivers exactly one final verdict. Mutually exclusive with `model`/`instructions`."""
+    toolsets, fallback models). Every evaluation runs it with `output_type=[AllGood, Steer]`
+    regardless of its own configured output type, so an existing agent can be reused as-is;
+    it must not have output validators, which are incompatible with a per-run `output_type`.
+    Mutually exclusive with `model`/`instructions`."""
 
     every: int = 10
     """Evaluate every N model requests within the run."""
@@ -138,7 +143,7 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     """Optional observability callback invoked with each verdict after it is processed
     (after any steering has been enqueued)."""
 
-    _judge: Agent[None, TrajectoryVerdict] = field(init=False, repr=False, compare=False)
+    _judge: Agent[None, Any] = field(init=False, repr=False, compare=False)
     _steps: int = field(default=0, init=False, repr=False, compare=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -153,7 +158,9 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
             instructions = _JUDGE_INSTRUCTIONS
             if self.instructions is not None:
                 instructions = f'{_JUDGE_INSTRUCTIONS}\n\nYour review focus:\n{self.instructions}'
-            self._judge = Agent(self.model, instructions=instructions, output_type=[AllGood, Steer])
+            # No `output_type` here: `_evaluate` sets it per run, the one seam that
+            # enforces the verdict contract for built-in and caller-supplied judges alike.
+            self._judge = Agent(self.model, instructions=instructions)
         else:
             if self.model is not None:
                 raise ValueError('Provide either a judge `model` or a full judge `agent`, not both.')
@@ -168,6 +175,22 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         `_steps` to `0`, `_task` to `None`, and `_judge` rebuilt from the same config.
         """
         return replace(self)
+
+    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
+        """Reject a judged run inside a durable workflow or flow, before any budget is spent.
+
+        The evaluation is launched from a capability hook, so it would run in orchestration
+        context: its model calls would not be checkpointed (and could repeat on replay,
+        billing included) and enqueued steering would not persist across replay. A
+        durable-capable agent run outside its workflow or flow is unaffected, matching how
+        core's durability capabilities scope their own `before_run` rejections.
+        """
+        if _in_durable_context(ctx):
+            raise UserError(
+                '`TrajectoryJudge` cannot be used inside a durable workflow or flow: the judge '
+                'evaluation runs in orchestration context, so its model calls are not checkpointed '
+                'and can repeat on replay. Run judged work outside durable execution.'
+            )
 
     async def after_model_request(
         self,
@@ -188,8 +211,29 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         self._steps += 1
         if self._steps % self.every == 0 and self._task is None:
             prompt = _judge_prompt([*request_context.messages, response], self.window)
-            self._task = asyncio.create_task(self._evaluate(ctx, prompt), name=f'trajectory-judge:{self._judge_name()}')
+            limits = reserved_usage_limits(ctx.usage_limits, reserve=1 + self._in_flight_siblings(ctx))
+            self._task = asyncio.create_task(
+                self._evaluate(ctx, prompt, usage_limits=limits), name=f'trajectory-judge:{self._judge_name()}'
+            )
         return response
+
+    def _in_flight_siblings(self, ctx: RunContext[AgentDepsT]) -> int:
+        """The number of other judges' evaluations currently in flight on this run.
+
+        Judges launch from `after_model_request` and the hook chain awaits capabilities one
+        at a time, so counting siblings here and setting `_task` before yielding the event
+        loop makes the launch-time budget claim atomic. Each in-flight sibling may have
+        passed its own limit check against the shared `ctx.usage` without its spend being
+        recorded yet, so the launch reserves one request per sibling on top of the parent's.
+        """
+        return sum(
+            1
+            for capability in ctx.capabilities.values()
+            if isinstance(capability, TrajectoryJudge)
+            and capability is not self
+            and capability._task is not None
+            and not capability._task.done()
+        )
 
     async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
         """Run the agent, then settle the judge: surface a finished failure, cancel the rest.
@@ -209,13 +253,16 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         await self._discard_in_flight()
         return result
 
-    async def _evaluate(self, ctx: RunContext[AgentDepsT], prompt: str) -> None:
+    async def _evaluate(self, ctx: RunContext[AgentDepsT], prompt: str, *, usage_limits: UsageLimits | None) -> None:
         """Run the judge once and enqueue attributed steering when it says to steer.
+
+        `output_type=[AllGood, Steer]` is set here, at the run boundary, so the verdict
+        contract holds at runtime whatever output type the judge agent was configured with.
 
         Provider failures propagate out of this task as-is (`ModelAPIError` subclasses from
         the model layer) and are re-raised on the run by `_collect_finished`.
         """
-        result = await self._judge.run(prompt, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
+        result = await self._judge.run(prompt, output_type=[AllGood, Steer], usage=ctx.usage, usage_limits=usage_limits)
         verdict = result.output
         if isinstance(verdict, Steer):
             ctx.enqueue(f'Steering from trajectory judge {self._judge_name()!r}: {verdict.message}')
@@ -291,6 +338,26 @@ def _render_transcript(messages: Sequence[ModelMessage]) -> str:
             elif isinstance(part, ToolCallPart):
                 lines.append(f'assistant called tool {part.tool_name} with {part.args_as_json_str()}')
     return '\n'.join(lines)
+
+
+@runtime_checkable
+class _Durability(Protocol):
+    """The part of the durable-execution capabilities' shared base this check needs."""
+
+    in_durable_context: bool
+
+
+# Mirrors `code_mode._toolset._in_temporal_workflow`, which checks Temporal alone because only
+# Temporal replays `run_code`. This one covers every engine because the judge launch is unsafe
+# under all of them; fold the two together if a shared durable-detection helper ever lands.
+def _in_durable_context(ctx: RunContext[AgentDepsT]) -> bool:
+    """Whether this run executes inside a durable workflow or flow, without importing the optional extras."""
+    return any(
+        any(base.__module__.startswith('pydantic_ai.durable_exec') for base in type(capability).__mro__)
+        and isinstance(capability, _Durability)
+        and capability.in_durable_context
+        for capability in ctx.capabilities.values()
+    )
 
 
 def _prompt_text(content: str | Sequence[object]) -> str:
