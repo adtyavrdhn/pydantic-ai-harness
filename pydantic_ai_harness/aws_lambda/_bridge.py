@@ -187,7 +187,7 @@ class _AgentLoop:
             loop.call_soon_threadsafe(arrange_shutdown)
         except RuntimeError:
             pass
-        if thread is not None:
+        if thread is not None:  # pragma: no branch - every published loop has an owning thread
             thread.join(timeout=0.1)
 
 

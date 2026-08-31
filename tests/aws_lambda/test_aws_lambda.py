@@ -517,7 +517,7 @@ def shutdown(loop: asyncio.AbstractEventLoop) -> None:
             time.sleep(0.01)
     # Unwind anything the loop was still holding, so closing it does not log a pending task.
     outstanding = asyncio.all_tasks(loop)
-    if outstanding:
+    if outstanding:  # pragma: no cover - test cleanup normally leaves no pending tasks
         for task in outstanding:
             task.cancel()
         loop.run_until_complete(asyncio.gather(*outstanding, return_exceptions=True))
@@ -661,7 +661,7 @@ class TestBridgeFailureModes:
                     try:
                         await asyncio.sleep(10)
                     except asyncio.CancelledError:
-                        continue
+                        continue  # pragma: no cover - the forced deadline closes the loop first
 
         agent = build_agent(act)
         abandoned = loops.get()
@@ -680,7 +680,7 @@ class TestBridgeFailureModes:
         started_waiting = time.monotonic()
         deadline = time.monotonic() + 5
         while not abandoned.is_closed() and time.monotonic() < deadline:
-            time.sleep(0.01)
+            time.sleep(0.01)  # pragma: no cover - the retired loop normally closes before polling
 
         assert abandoned.is_closed()
         assert not abandoned_thread.is_alive()
@@ -726,6 +726,88 @@ class TestBridgeFailureModes:
         assert cleanup_finished.wait(timeout=5)
         thread.join(timeout=5)
         assert retired.is_closed()
+        assert not thread.is_alive()
+
+    def test_retirement_cancels_and_drains_pending_tasks_without_a_main_task(self) -> None:
+        loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
+        loop = loops.get()
+        thread = loops._thread  # pyright: ignore[reportPrivateUsage]
+        assert thread is not None
+        task_started = threading.Event()
+        task_cancelled = threading.Event()
+
+        async def pending_work() -> None:
+            task_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                task_cancelled.set()
+
+        loop.call_soon_threadsafe(loop.create_task, pending_work())
+        assert task_started.wait(timeout=5)
+
+        loops.retire(loop, None)
+
+        thread.join(timeout=5)
+        assert task_cancelled.is_set()
+        assert loop.is_closed()
+        assert not thread.is_alive()
+
+    def test_retirement_closes_a_live_loop_with_no_pending_tasks(self) -> None:
+        loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
+        loop = loops.get()
+        thread = loops._thread  # pyright: ignore[reportPrivateUsage]
+        assert thread is not None
+
+        loops.retire(loop, None)
+
+        thread.join(timeout=5)
+        assert loop.is_closed()
+        assert not thread.is_alive()
+
+    def test_retirement_cancels_a_waiter_when_the_cleanup_budget_expires(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setattr(_bridge, '_RETIRED_LOOP_GRACE_SECONDS', 0)
+        loop = loops.get()
+        thread = loops._thread  # pyright: ignore[reportPrivateUsage]
+        assert thread is not None
+        task_started = threading.Event()
+        task_cancelled = threading.Event()
+        task_holder: list[asyncio.Task[None]] = []
+
+        async def pending_work() -> None:
+            task_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                task_cancelled.set()
+
+        def start_task() -> None:
+            task_holder.append(loop.create_task(pending_work()))
+
+        loop.call_soon_threadsafe(start_task)
+        assert task_started.wait(timeout=5)
+        assert task_holder
+
+        # Keep the forced-stop timer from winning the race with the cleanup coroutine. The cleanup
+        # still has a zero budget and stops the loop itself after cancelling its timed-out waiters.
+        original_stop = loop.stop
+        forced_stop_called = False
+
+        def stop_after_cleanup() -> None:
+            nonlocal forced_stop_called
+            if not forced_stop_called:
+                forced_stop_called = True
+                return
+            original_stop()
+
+        monkeypatch.setattr(loop, 'stop', stop_after_cleanup)
+
+        loops.retire(loop, task_holder[0])
+
+        thread.join(timeout=5)
+        assert task_cancelled.is_set()
+        assert loop.is_closed()
         assert not thread.is_alive()
 
     def test_a_stopped_loop_is_not_handed_to_the_next_invocation(self) -> None:
