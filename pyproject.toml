@@ -33,11 +33,13 @@ dependencies = [
     # 2.33.0 is the release whose Anthropic provider is built on HTTPX2 and raises its own
     # `anthropic` floor to 1.0.0 to match. Below it, slim hands the SDK a client of the other
     # kind, and the pair only type-checks when both halves come from the same generation.
+    # 2.36.0 adds the declarative `@durable_operation` API and the public durable-operation
+    # backends the Absurd capability is built on.
     # Earlier floors are subsumed by it: the compaction estimator and the conversation-search
     # indexer have to recognise `ToolAvailabilityDeltaPart` (2.23.0), the one `ModelRequestPart`
     # carrying no `content`, so code walking request parts raises `AttributeError` rather than
     # ignoring it (#577); `CodeMode` reads `ModelRequestParameters.revealed_tool_names` (2.22.0).
-    "pydantic-ai-slim>=2.33.0",
+    "pydantic-ai-slim>=2.36.0",
 ]
 
 [project.optional-dependencies]
@@ -172,11 +174,7 @@ bump = true
 # repeats the floor slim declares: `anthropic>=1` is the HTTPX2 generation, and the
 # `pydantic-ai-slim` floor above is the release built on it, so both halves of that pair resolve
 # together under every resolution mode. Move this floor whenever that one moves.
-override-dependencies = ['anthropic>=1.0.0', 'openai>=3.0.0']
-
-
-[tool.uv.sources]
-pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", branch = "main", subdirectory = "pydantic_ai_slim" }
+override-dependencies = ['anthropic>=1.0.0', 'openai>=2.45.0']
 
 
 [tool.hatch.build.targets.wheel]
