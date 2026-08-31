@@ -109,6 +109,10 @@ behavior they document.
 
 ::: pydantic_ai_harness.channels.ChannelAdapter
 
+::: pydantic_ai_harness.channels.ChannelError
+
+::: pydantic_ai_harness.channels.InboundMessage
+
 ::: pydantic_ai_harness.channels.ConversationStore
 
 ::: pydantic_ai_harness.channels.InMemoryConversationStore

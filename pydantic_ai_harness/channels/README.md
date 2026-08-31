@@ -102,5 +102,7 @@ behavior they document.
 
 - [`ChannelHost`][pydantic_ai_harness.channels.ChannelHost]
 - [`ChannelAdapter`][pydantic_ai_harness.channels.ChannelAdapter]
+- [`ChannelError`][pydantic_ai_harness.channels.ChannelError]
+- [`InboundMessage`][pydantic_ai_harness.channels.InboundMessage]
 - [`ConversationStore`][pydantic_ai_harness.channels.ConversationStore]
 - [`InMemoryConversationStore`][pydantic_ai_harness.channels.InMemoryConversationStore]
