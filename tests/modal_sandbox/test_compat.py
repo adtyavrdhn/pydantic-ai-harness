@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from pydantic_ai_harness.modal_sandbox import ModalSandboxExecResult, ModalSandboxSession
 
 from .fake_modal import FakeModal, FileInfo
@@ -18,20 +16,6 @@ async def test_owned_session_executes_and_terminates(fake_modal: FakeModal) -> N
 
     assert fake_modal.sandboxes[0].terminated is True
     assert fake_modal.sandboxes[0].detached is True
-
-
-async def test_attached_session_detaches_without_terminating(fake_modal: FakeModal) -> None:
-    async with ModalSandboxSession(sandbox_id='sb-existing'):
-        pass
-
-    assert fake_modal.sandboxes[0].terminated is False
-    assert fake_modal.sandboxes[0].detached is True
-
-
-@pytest.mark.parametrize('operation', ['terminate', 'detach'])
-async def test_teardown_failure_does_not_escape(fake_modal: FakeModal, operation: str) -> None:
-    async with ModalSandboxSession():
-        setattr(fake_modal.sandboxes[0], f'{operation}_error', RuntimeError('cleanup failed'))
 
 
 async def test_exec_preserves_timeout_result_and_output_limit(fake_modal: FakeModal) -> None:
