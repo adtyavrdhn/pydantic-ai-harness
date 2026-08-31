@@ -252,7 +252,7 @@ class TestEagerExecution:
             with pytest.raises(ModelRetry, match='no longer matches'):
                 await toolset.call_tool('run_code', {'code': 'z = 9\nw = 8\nprint(z)'}, exec_ctx, tools['run_code'])
             # The diverged part was consumed; nothing is left to adopt.
-            assert toolset.eager.take('cX', 'anything') is None
+            assert toolset.eager.pop_watch('cX', 'anything') is None
 
     async def test_take_tolerates_rewritten_ids_and_rejects_foreign_code(self):
         """A re-keyed execution adopts the part whose executed prefix matches its code."""
@@ -277,7 +277,7 @@ class TestEagerExecution:
             ]
             async for _ in run_capability.wrap_run_event_stream(stream_ctx, stream=_plain_stream(events)):
                 pass
-            taken = eager.take('provider-rewrote-this', 'x = 1\ny = 2\nprint(x)')
+            taken = eager.pop_watch('provider-rewrote-this', 'x = 1\ny = 2\nprint(x)')
             assert taken is not None and taken.tool_call_id == 'c1'
             await eager.drain(taken)
 
@@ -322,7 +322,7 @@ class TestEagerExecution:
         await eager.observe(
             PartStartEvent(index=7, part=ToolCallPart(tool_name='run_code', args='[', tool_call_id='c6')), ctx
         )
-        assert eager.take('c6', 'anything') is not None
+        assert eager.pop_watch('c6', 'anything') is not None
         # Completed lines that do not parse close nothing: an open bracket resolves later.
         await eager.observe(
             PartStartEvent(
@@ -331,14 +331,14 @@ class TestEagerExecution:
             ),
             ctx,
         )
-        assert eager.take('c7', 'x = (\n1,\n2)') is not None
+        assert eager.pop_watch('c7', 'x = (\n1,\n2)') is not None
         # A `None` args delta changes nothing.
         await eager.observe(PartDeltaEvent(index=2, delta=ToolCallPartDelta(args_delta=None, tool_call_id='c2')), ctx)
         # Clear the empty-prefix parts, then verify a foreign execution matches nothing
         # against a part whose executed prefix is real.
-        assert eager.take('c1', 'x = 1') is not None
-        assert eager.take('c2', 'q = 7') is not None
-        assert eager.take('c3', '') is not None
+        assert eager.pop_watch('c1', 'x = 1') is not None
+        assert eager.pop_watch('c2', 'q = 7') is not None
+        assert eager.pop_watch('c3', '') is not None
         await eager.observe(
             PartStartEvent(
                 index=5,
@@ -346,8 +346,8 @@ class TestEagerExecution:
             ),
             ctx,
         )
-        assert eager.take('cZ', 'entirely different program') is None
-        taken = eager.take('c4', 'm = 1\nn = 2\nprint(m)')
+        assert eager.pop_watch('cZ', 'entirely different program') is None
+        taken = eager.pop_watch('c4', 'm = 1\nn = 2\nprint(m)')
         assert taken is not None
         await eager.drain(taken)
         # Close skips a part that never grew a pump.

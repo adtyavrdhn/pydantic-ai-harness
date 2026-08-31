@@ -799,14 +799,14 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         restart = tool_args.get('restart', False)
         part = None
         if isinstance(code, str) and not _in_temporal_workflow(ctx):
-            part = self.eager.take(ctx.tool_call_id or 'pyd_ai_code_mode', code)
+            part = self.eager.pop_watch(ctx.tool_call_id or 'pyd_ai_code_mode', code)
         if part is not None:
             await self.eager.drain(part)
         if part is None:
             # Nothing streamed for this part (non-streaming run, Temporal, or a part the
             # watcher never saw): the normal path handles it.
             return await self._call_tool_impl(name, tool_args, ctx, tool)
-        assert isinstance(code, str), '`take` only runs for string code'
+        assert isinstance(code, str), '`pop_watch` only runs for string code'
         if restart:
             # The model asked for a fresh REPL; the reset discards the pumped prefix too.
             return await self._call_tool_impl(name, tool_args, ctx, tool)

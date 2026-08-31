@@ -13,6 +13,7 @@ assignments made before the failing line persist and the error surfaces to the m
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
     from ._toolset import CodeModeToolset
 
 
-@dataclass
+@dataclass(kw_only=True)
 class _EagerPart:
     """Accumulated state for one streamed `run_code` tool call part under eager execution."""
 
@@ -43,7 +44,11 @@ class _EagerPart:
     """Top-level statements handed to the feed pump so far."""
 
     scanned_newlines: int = -1
-    """Newline count at the last scan; statements only close on line boundaries."""
+    """Newline count at the last scan; statements only close on line boundaries.
+
+    Starts at -1 so the first scan runs even for zero-newline code: 0 completed lines is a
+    real observation, distinct from never having scanned.
+    """
 
     fed_line_count: int = 0
     """Source lines covered by pumped statements; the executed prefix ends here."""
@@ -51,7 +56,7 @@ class _EagerPart:
     fed_prefix: str = ''
     """Exact source prefix handed to the pump, for divergence detection at execution."""
 
-    queue: list[str] = field(default_factory=list[str])
+    queue: deque[str] = field(default_factory=deque[str])
     """Statement sources waiting for the pump, in program order."""
 
     pump: asyncio.Task[None] | None = None
@@ -61,9 +66,13 @@ class _EagerPart:
     """Concatenated print output from completed fragment feeds."""
 
     nested_calls: dict[str, ToolCallPart] = field(default_factory=dict[str, ToolCallPart])
+    """Tool calls the pumped statements dispatched, keyed by nested tool call id."""
+
     nested_returns: dict[str, ToolReturnPart] = field(default_factory=dict[str, ToolReturnPart])
+    """Their return parts, under the same nested tool call ids."""
 
 
+@dataclass
 class EagerState:
     """Watch streamed `run_code` parts and feed closed statements into the REPL serially.
 
@@ -73,9 +82,8 @@ class EagerState:
     and tool hooks behave exactly as a model-issued snippet would.
     """
 
-    def __init__(self) -> None:
-        self._parts: dict[str, _EagerPart] = {}
-        self._toolset: CodeModeToolset[Any] | None = None
+    _parts: dict[str, _EagerPart] = field(default_factory=dict[str, '_EagerPart'], init=False)
+    _toolset: CodeModeToolset[Any] | None = field(default=None, init=False)
 
     def bind(self, toolset: CodeModeToolset[Any]) -> None:
         """Attach the owning toolset; feeds go through its `run_code` pipeline."""
@@ -85,29 +93,32 @@ class EagerState:
 
     async def observe(self, event: AgentStreamEvent, ctx: RunContext[Any]) -> None:
         """Track one stream event, enqueueing newly closed statements for the pump."""
-        if isinstance(event, PartStartEvent) and isinstance(event.part, ToolCallPart):
-            if event.part.tool_name != 'run_code':
+        match event:
+            case PartStartEvent(part=ToolCallPart() as part):
+                if part.tool_name != 'run_code':
+                    return
+                part_id = part.tool_call_id
+                watch = self._parts.setdefault(part_id, _EagerPart(tool_call_id=part_id))
+                args = part.args
+                if isinstance(args, str):
+                    watch.args_text += args
+                elif isinstance(args, dict):
+                    watch.args_dict = args
+                self._scan(watch, ctx)
+            case PartDeltaEvent(delta=ToolCallPartDelta() as delta):
+                watch = self._find_watch(delta.tool_call_id)
+                if watch is None:
+                    return
+                args_delta = delta.args_delta
+                if isinstance(args_delta, str):
+                    watch.args_text += args_delta
+                elif isinstance(args_delta, dict):
+                    merged = dict(watch.args_dict or {})
+                    merged.update(args_delta)
+                    watch.args_dict = merged
+                self._scan(watch, ctx)
+            case _:
                 return
-            part_id = event.part.tool_call_id
-            watch = self._parts.setdefault(part_id, _EagerPart(tool_call_id=part_id))
-            args = event.part.args
-            if isinstance(args, str):
-                watch.args_text += args
-            elif isinstance(args, dict):
-                watch.args_dict = args
-            self._scan(watch, ctx)
-        elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, ToolCallPartDelta):
-            watch = self._find_watch(event.delta.tool_call_id)
-            if watch is None:
-                return
-            delta = event.delta.args_delta
-            if isinstance(delta, str):
-                watch.args_text += delta
-            elif isinstance(delta, dict):
-                merged = dict(watch.args_dict or {})
-                merged.update(delta)
-                watch.args_dict = merged
-            self._scan(watch, ctx)
 
     def _find_watch(self, tool_call_id: str | None) -> _EagerPart | None:
         if tool_call_id is not None:
@@ -123,6 +134,7 @@ class EagerState:
         return decode_partial_code(watch.args_text)
 
     def _scan(self, watch: _EagerPart, ctx: RunContext[Any]) -> None:
+        """Re-parse the streamed code and enqueue any statements that newly closed."""
         code = self._current_code(watch)
         if code is None:
             return
@@ -132,6 +144,9 @@ class EagerState:
             return
         watch.scanned_newlines = newlines
         fresh, watch.consumed = closed_statements(code, watch.consumed)
+        # Each queued source is a contiguous line slice from the end of the previous
+        # statement, so comments and blank lines between statements feed with them and the
+        # concatenation of all slices reproduces the prefix exactly.
         lines = code.split('\n')
         for statement in fresh:
             end = statement.end_lineno or statement.lineno
@@ -139,31 +154,30 @@ class EagerState:
             watch.queue.append(source)
             watch.fed_line_count = end
         watch.fed_prefix = '\n'.join(lines[: watch.fed_line_count])
-        if watch.queue:
-            self._ensure_pump(watch, ctx)
-
-    def _ensure_pump(self, watch: _EagerPart, ctx: RunContext[Any]) -> None:
-        if watch.pump is None or watch.pump.done():
-            watch.pump = asyncio.ensure_future(self._run_pump(watch, ctx))
+        # One pump per part: enqueueing happens before this check, so a finished pump
+        # always means an empty queue, and a live one will drain what was just added.
+        if watch.queue and (watch.pump is None or watch.pump.done()):
+            watch.pump = asyncio.create_task(self._run_pump(watch, ctx))
 
     async def _run_pump(self, watch: _EagerPart, ctx: RunContext[Any]) -> None:
         """Feed queued statements one at a time; an error stops the part for good."""
         toolset = self._toolset
-        assert toolset is not None, 'EagerState must be bound to its CodeModeToolset'
+        if toolset is None:  # pragma: no cover - `__aenter__` binds before any stream event
+            raise RuntimeError('`EagerState` is not bound to a `CodeModeToolset`; the toolset was never entered')
         while watch.queue and watch.error is None:
-            source = watch.queue.pop(0)
+            source = watch.queue.popleft()
             watch.feed_count += 1
             feed_ctx = replace(ctx, tool_call_id=f'{watch.tool_call_id}~e{watch.feed_count}', tool_name='run_code')
             try:
                 await toolset.feed_eager_fragment(watch, source, feed_ctx)
-            except BaseException as e:
+            except Exception as e:  # cancellation propagates; everything else is held for the dispatch
                 watch.error = e
                 watch.queue.clear()
 
     # -- execution side ---------------------------------------------------------------------
 
-    def take(self, tool_call_id: str, code: str) -> _EagerPart | None:
-        """Pop the watch for an executing part, tolerating provider-rewritten ids.
+    def pop_watch(self, tool_call_id: str, code: str) -> _EagerPart | None:
+        """Remove and return the watch for an executing part, tolerating provider-rewritten ids.
 
         Falls back to any part whose executed prefix matches the submitted code, since a
         re-keyed part is still the same program.
@@ -171,11 +185,8 @@ class EagerState:
         watch = self._parts.pop(tool_call_id, None)
         if watch is not None:
             return watch
-        for part_id, candidate in list(self._parts.items()):
-            if code.startswith(candidate.fed_prefix):
-                del self._parts[part_id]
-                return candidate
-        return None
+        rekeyed = next((pid for pid, c in self._parts.items() if code.startswith(c.fed_prefix)), None)
+        return self._parts.pop(rekeyed) if rekeyed is not None else None
 
     async def drain(self, watch: _EagerPart) -> None:
         """Wait until every enqueued statement has been fed (or the part errored).
