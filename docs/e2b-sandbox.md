@@ -22,7 +22,7 @@ export E2B_API_KEY=...
 
 ```python
 from pydantic_ai import Agent, RunContext
-from pydantic_ai_harness import E2BSandbox
+from pydantic_ai_harness.e2b_sandbox import E2BSandbox
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -47,9 +47,10 @@ For an owned sandbox, acquisition stores the logical run ID in E2B metadata. A
 retry searches for the oldest running or paused match before creating. After a
 create, it checks again and kills the new sandbox if another creator won the
 race. The serialized `SandboxRef` contains only the provider and sandbox ID;
-later workers reconnect by ID and never create from `get_sandbox`. Release also
-reconnects and kills by ID, so it works in a different worker and is safe to
-retry. An already missing sandbox counts as successfully released.
+later workers reconnect by ID and never create from `get_sandbox`. Release kills
+directly by ID without reconnecting or resuming a paused sandbox, so it works in
+a different worker and is safe to retry. An already missing sandbox counts as
+successfully released.
 
 The metadata key `pydantic-ai-run-id` is reserved for this lifecycle identity.
 Other metadata is preserved. E2B does not enforce metadata uniqueness, so the
@@ -104,11 +105,12 @@ commands that may produce very large output should bound it at the source.
 The public error surface is deliberately narrow:
 
 - `E2BSandboxError` for provider operations that fail.
+- `E2BSandboxTerminalError` as the catchable base for failures a retry cannot fix.
 - `E2BSandboxAuthError` when credentials are rejected.
 - `E2BSandboxUnavailableError` when the referenced sandbox is not running.
+- `E2BSandboxCommandTimeoutError` for command deadlines, also a built-in `TimeoutError`.
 
-Filesystem misses use the built-in `FileNotFoundError`, and command deadlines use
-the built-in `TimeoutError` contract.
+Filesystem misses use the built-in `FileNotFoundError` contract.
 
 ## Configuration
 

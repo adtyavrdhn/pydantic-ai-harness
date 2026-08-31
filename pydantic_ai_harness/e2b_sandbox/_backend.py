@@ -24,12 +24,13 @@ Re-check these sources before changing lifecycle, command, or filesystem assumpt
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import math
 import posixpath
 import shlex
 import time
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -89,6 +90,40 @@ _INTERNAL_EXEC_TIMEOUT = 10
 # switched off (0 is the SDK's "no limit") and the deadline is enforced client-side instead,
 # with a kill at expiry. See `_E2BProcess._settle`.
 _SDK_STREAM_UNBOUNDED = 0
+
+
+def _absolute_path(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not posixpath.isabs(value):
+        raise ValueError(f'{name} must be an absolute sandbox path or None, got {value!r}.')
+    return posixpath.normpath(value)
+
+
+async def _create_on_asyncio(
+    create: Callable[[], Coroutine[object, object, e2b.AsyncSandbox]],
+    cleanup: Callable[[e2b.AsyncSandbox], Awaitable[object]],
+) -> e2b.AsyncSandbox:
+    started = time.monotonic()
+    task = asyncio.create_task(create())
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), _CREATE_TIMEOUT)
+    except (TimeoutError, asyncio.TimeoutError):
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    except asyncio.CancelledError:
+        try:
+            remaining = max(0.0, _CREATE_TIMEOUT - (time.monotonic() - started))
+            created = await asyncio.wait_for(task, remaining)
+        except (Exception, asyncio.CancelledError):
+            pass
+        else:
+            try:
+                await cleanup(created)
+            except Exception:
+                pass
+        raise
 
 
 class E2BSandboxError(RuntimeError):
@@ -394,6 +429,7 @@ class E2BSandboxBackend:
         working_dir: str | None = None,
         sandbox_timeout: int | None = None,
     ) -> None:
+        working_dir = _absolute_path('working_dir', working_dir)
         self.sandbox = sandbox
         """The underlying `e2b.AsyncSandbox`, for provider-specific functionality."""
         self.fs = _E2BFilesystem(self)
@@ -430,46 +466,56 @@ class E2BSandboxBackend:
         except ImportError as e:
             raise E2BSandboxError(_MISSING_E2B) from e
 
+        working_dir = _absolute_path('working_dir', working_dir)
+
+        async def create_sandbox() -> e2b.AsyncSandbox:
+            return await e2b.AsyncSandbox.create(
+                template=template,
+                timeout=sandbox_timeout,
+                metadata=dict(metadata) if metadata is not None else None,
+                envs=dict(env) if env is not None else None,
+                secure=True,
+                allow_internet_access=allow_internet_access,
+            )
+
+        async def cleanup_created(created: e2b.AsyncSandbox) -> None:
+            await cls(created, working_dir=working_dir, sandbox_timeout=sandbox_timeout).close(terminate=True)
+
         sandbox: e2b.AsyncSandbox | None = None
         try:
-            # Shield creation so a cancellation arriving mid-create cannot drop the sandbox
-            # handle before we return it. Without this, a sandbox created server-side would be
-            # orphaned (reaped only by its own `sandbox_timeout`) because the caller would have
-            # no handle to kill. The inner deadline bounds the shielded request so a wedged
-            # control plane cannot make this uncancellable. The shield holds for anyio-scope
-            # cancellation; a raw `asyncio.Task.cancel()` can still interrupt it, in which case
-            # the server-side `sandbox_timeout` is the backstop.
             with anyio.CancelScope(shield=True):
-                with anyio.move_on_after(_CREATE_TIMEOUT):
-                    sandbox = await e2b.AsyncSandbox.create(
-                        template=template,
-                        timeout=sandbox_timeout,
-                        metadata=dict(metadata) if metadata is not None else None,
-                        envs=dict(env) if env is not None else None,
-                        # Passed explicitly rather than left to the SDK default: this decides
-                        # whether the sandbox is reachable without its access token.
-                        secure=True,
-                        allow_internet_access=allow_internet_access,
-                    )
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    with anyio.move_on_after(_CREATE_TIMEOUT):
+                        sandbox = await create_sandbox()
+                else:
+                    try:
+                        sandbox = await _create_on_asyncio(create_sandbox, cleanup_created)
+                    except (TimeoutError, asyncio.TimeoutError) as error:
+                        raise E2BSandboxError(
+                            f'E2B sandbox creation did not complete within {_CREATE_TIMEOUT}s; '
+                            'the E2B control plane may be unreachable.'
+                        ) from error
         except e2b.AuthenticationException as e:
             raise E2BSandboxAuthError(_AUTH_MESSAGE) from e
+        except E2BSandboxError:
+            raise
         except Exception as e:
             raise E2BSandboxError(f'Could not start E2B sandbox: {type(e).__name__}: {e}') from e
         if sandbox is None:
-            # The deadline fired: the create request never returned. Fail here rather than hand
-            # back no sandbox. Anything E2B provisioned before the hang is reaped by its own
-            # `sandbox_timeout`, the same backstop as a create leak.
             raise E2BSandboxError(
                 f'E2B sandbox creation did not complete within {_CREATE_TIMEOUT}s; '
                 'the E2B control plane may be unreachable.'
             )
         backend = cls(sandbox, working_dir=working_dir, sandbox_timeout=sandbox_timeout)
         try:
-            # If the caller was cancelled during the shielded create, this raises; tear the
-            # just-created sandbox down here rather than leaving it for `sandbox_timeout`.
             await anyio.lowlevel.checkpoint()
         except BaseException:
-            await backend.close(terminate=True)
+            try:
+                await backend.close(terminate=True)
+            except Exception:
+                pass
             raise
         return backend
 
@@ -491,9 +537,9 @@ class E2BSandboxBackend:
         keep the oldest matching sandbox, killing this attempt if a concurrent
         creator won the race.
         """
-        existing = await cls._find(identity, working_dir=working_dir)
-        if existing is not None:
-            return existing
+        existing_id = await cls._find_id(identity)
+        if existing_id is not None:
+            return await cls.connect(existing_id, working_dir=working_dir)
         created = await cls.create(
             template=template,
             sandbox_timeout=sandbox_timeout,
@@ -502,15 +548,15 @@ class E2BSandboxBackend:
             metadata=metadata,
             allow_internet_access=allow_internet_access,
         )
-        canonical = await cls._find(identity, working_dir=working_dir)
-        if canonical is None or canonical.sandbox_id == created.sandbox_id:
+        canonical_id = await cls._find_id(identity)
+        if canonical_id is None or canonical_id == created.sandbox_id:
             return created
         await created.close(terminate=True)
-        return canonical
+        return await cls.connect(canonical_id, working_dir=working_dir)
 
     @classmethod
-    async def _find(cls, metadata: Mapping[str, str], *, working_dir: str | None = None) -> Self | None:
-        """Connect to the oldest running or paused sandbox matching metadata."""
+    async def _find_id(cls, metadata: Mapping[str, str]) -> str | None:
+        """Return the oldest running or paused sandbox ID matching metadata."""
         try:
             import e2b
         except ImportError as error:
@@ -528,7 +574,7 @@ class E2BSandboxBackend:
             raise E2BSandboxError(f'Could not list E2B sandboxes: {type(error).__name__}: {error}') from error
         if not matches:
             return None
-        return await cls.connect(matches[0].sandbox_id, working_dir=working_dir)
+        return matches[0].sandbox_id
 
     @classmethod
     async def connect(cls, sandbox_id: str, *, timeout: int | None = None, working_dir: str | None = None) -> Self:
@@ -657,6 +703,7 @@ class E2BSandboxBackend:
     ) -> _E2BProcess:
         """Start a command without waiting, returning a handle to the running process."""
         line = _command_line(command, shell)
+        cwd = _absolute_path('cwd', cwd)
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         # Stamped before the call, so the deadline the protocol promises is measured from

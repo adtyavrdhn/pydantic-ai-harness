@@ -15,6 +15,7 @@ exception. Flattering the code under test here would hide production failures.
 
 from __future__ import annotations
 
+import asyncio
 import posixpath
 import types
 from collections.abc import Callable
@@ -342,6 +343,9 @@ class FakeAsyncSandboxFactory:
         self._control.create_calls.append(
             FakeCreateCall(template, timeout, metadata, envs, secure, allow_internet_access)
         )
+        self._control.create_started.set()
+        if self._control.create_gate is not None:
+            await self._control.create_gate.wait()
         if self._control.create_hangs:
             await anyio.sleep_forever()
         await anyio.lowlevel.checkpoint()
@@ -356,6 +360,16 @@ class FakeAsyncSandboxFactory:
             raise self._control.connect_error
         return self._control.new_sandbox(sandbox_id)
 
+    async def kill(self, sandbox_id: str) -> bool:
+        self._control.kill_ids.append(sandbox_id)
+        if self._control.kill_error is not None:
+            raise self._control.kill_error
+        for sandbox in self._control.sandboxes:
+            if sandbox.sandbox_id == sandbox_id and not sandbox.killed:
+                sandbox.killed = True
+                return True
+        return False
+
     def list(
         self,
         query: FakeSandboxQuery | None = None,
@@ -366,6 +380,10 @@ class FakeAsyncSandboxFactory:
         del next_token
         metadata = query.metadata if query is not None else None
         self._control.list_calls.append((metadata, limit, order))
+        if self._control.list_error is not None:
+            raise self._control.list_error
+        if self._control.list_batches:
+            return FakeSandboxPaginator(self._control.list_batches.pop(0))
         matches = [
             sandbox
             for sandbox in self._control.sandboxes
@@ -399,11 +417,16 @@ class FakeE2B:
     sandboxes: list[FakeSandbox] = field(default_factory=list[FakeSandbox])
     create_calls: list[FakeCreateCall] = field(default_factory=list[FakeCreateCall])
     connect_calls: list[tuple[str, int | None]] = field(default_factory=list[tuple[str, 'int | None']])
+    kill_ids: list[str] = field(default_factory=list[str])
     list_calls: list[tuple[dict[str, str] | None, int | None, str | None]] = field(
         default_factory=list[tuple[dict[str, str] | None, int | None, str | None]]
     )
+    list_batches: list[list[FakeSandbox]] = field(default_factory=list[list[FakeSandbox]])
+    list_error: Exception | None = None
     create_error: Exception | None = None
     create_hangs: bool = False
+    create_gate: asyncio.Event | None = None
+    create_started: asyncio.Event = field(default_factory=asyncio.Event)
     connect_error: Exception | None = None
     kill_error: Exception | None = None
     kill_hangs: bool = False

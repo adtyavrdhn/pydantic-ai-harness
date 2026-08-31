@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 import sys
 
 import anyio
 import pytest
+import sniffio
 from pydantic_ai.sandboxes import Sandbox, SandboxBackend, SupportsFilesystem, SupportsStart, SupportsStream
 
 from pydantic_ai_harness.e2b_sandbox import (
     E2BSandboxBackend,
+    E2BSandboxCommandTimeoutError,
     E2BSandboxError,
+    E2BSandboxTerminalError,
     E2BSandboxUnavailableError,
 )
-from pydantic_ai_harness.e2b_sandbox._backend import E2BSandboxCommandTimeoutError, E2BSandboxTerminalError
 
 from .fake_e2b import FakeE2B
 
@@ -111,6 +114,55 @@ class TestCreate:
             await E2BSandboxBackend.create()
         assert fake_e2b.sandboxes[0].killed is True
 
+    async def test_task_cancellation_during_create_kills_the_new_sandbox(self, fake_e2b: FakeE2B) -> None:
+        if sniffio.current_async_library() != 'asyncio':
+            pytest.skip('raw asyncio task cancellation requires asyncio')
+        fake_e2b.create_gate = asyncio.Event()
+        creating = asyncio.create_task(E2BSandboxBackend.create())
+        await fake_e2b.create_started.wait()
+
+        creating.cancel()
+        fake_e2b.create_gate.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await creating
+        assert fake_e2b.sandboxes[0].killed is True
+
+    async def test_task_cancellation_during_hung_create_is_bounded(
+        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        if sniffio.current_async_library() != 'asyncio':
+            pytest.skip('raw asyncio task cancellation requires asyncio')
+        monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend._CREATE_TIMEOUT', 0.05)
+        fake_e2b.create_gate = asyncio.Event()
+        creating = asyncio.create_task(E2BSandboxBackend.create())
+        await fake_e2b.create_started.wait()
+
+        creating.cancel()
+
+        with anyio.fail_after(1):
+            with pytest.raises(asyncio.CancelledError):
+                await creating
+        assert fake_e2b.sandboxes == []
+
+    async def test_task_cancellation_is_not_masked_by_cleanup_failure(self, fake_e2b: FakeE2B) -> None:
+        if sniffio.current_async_library() != 'asyncio':
+            pytest.skip('raw asyncio task cancellation requires asyncio')
+        fake_e2b.create_gate = asyncio.Event()
+        fake_e2b.kill_error = RuntimeError('cleanup failed')
+        creating = asyncio.create_task(E2BSandboxBackend.create())
+        await fake_e2b.create_started.wait()
+
+        creating.cancel()
+        fake_e2b.create_gate.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await creating
+
+    async def test_rejects_relative_working_dir(self, fake_e2b: FakeE2B) -> None:
+        with pytest.raises(ValueError, match='working_dir must be an absolute sandbox path'):
+            await E2BSandboxBackend.create(working_dir='repo')
+
 
 class TestConnect:
     async def test_connects_to_an_existing_sandbox(self, fake_e2b: FakeE2B) -> None:
@@ -144,37 +196,6 @@ class TestConnect:
         _hide_e2b(monkeypatch)
         with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
             await E2BSandboxBackend.connect('sbx-keep')
-
-
-class TestFind:
-    async def test_missing_e2b_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _hide_e2b(monkeypatch)
-
-        with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
-            await E2BSandboxBackend._find({'run': 'one'})
-
-    async def test_auth_error_is_terminal(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
-        def fail_list(**kwargs: object) -> object:
-            del kwargs
-            raise fake_e2b.auth_type('bad key')
-
-        monkeypatch.setattr(fake_e2b.module.AsyncSandbox, 'list', fail_list)
-
-        with pytest.raises(E2BSandboxTerminalError, match='E2B rejected the credentials'):
-            await E2BSandboxBackend._find({'run': 'one'})
-
-    async def test_other_list_failures_are_recoverable(
-        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        def fail_list(**kwargs: object) -> object:
-            del kwargs
-            raise RuntimeError('control plane unavailable')
-
-        monkeypatch.setattr(fake_e2b.module.AsyncSandbox, 'list', fail_list)
-
-        with pytest.raises(E2BSandboxError, match='Could not list E2B sandboxes') as exc:
-            await E2BSandboxBackend._find({'run': 'one'})
-        assert not isinstance(exc.value, E2BSandboxTerminalError)
 
 
 class TestClose:
@@ -245,6 +266,12 @@ class TestRun:
         await backend.run(['env'], cwd='/srv', env={'FOO': 'bar'})
         call = fake_e2b.sandboxes[0].commands.calls[-1]
         assert (call.cwd, call.envs) == ('/srv', {'FOO': 'bar'})
+
+    async def test_rejects_relative_cwd(self, fake_e2b: FakeE2B) -> None:
+        backend = await E2BSandboxBackend.create()
+
+        with pytest.raises(ValueError, match='cwd must be an absolute sandbox path'):
+            await backend.run(['pwd'], cwd='repo')
 
     async def test_configured_working_dir_is_the_default_cwd(self, fake_e2b: FakeE2B) -> None:
         # E2B has no create-time working directory, so the backend applies it per command.

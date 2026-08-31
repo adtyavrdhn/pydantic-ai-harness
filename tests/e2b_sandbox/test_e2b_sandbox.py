@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-from unittest.mock import AsyncMock
 
 import pytest
 from pydantic_ai.models.test import TestModel
@@ -60,18 +59,28 @@ class TestLifecycle:
         assert ref.sandbox_id == 'oldest'
         assert fake_e2b.list_calls == [(metadata, 1, 'asc')]
 
-    async def test_concurrent_creator_loses_to_oldest_sandbox(
-        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        created = await E2BSandboxBackend.create()
-        canonical = await E2BSandboxBackend.create()
-        monkeypatch.setattr(E2BSandboxBackend, '_find', AsyncMock(side_effect=[None, canonical]))
-        monkeypatch.setattr(E2BSandboxBackend, 'create', AsyncMock(return_value=created))
+    async def test_concurrent_creator_loses_to_oldest_sandbox(self, fake_e2b: FakeE2B) -> None:
+        canonical = fake_e2b.new_sandbox('canonical', {'pydantic-ai-run-id': 'run-1'})
+        fake_e2b.list_batches = [[], [canonical]]
 
-        selected = await E2BSandboxBackend._create_or_connect(identity={'run': 'one'})
+        ref = await E2BSandbox[None]().acquire_sandbox(_ctx())
 
-        assert selected is canonical
-        assert created.sandbox.killed is True  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        assert ref.sandbox_id == canonical.sandbox_id
+        assert fake_e2b.sandboxes[1].killed is True
+
+    async def test_fresh_create_keeps_its_original_handle(self, fake_e2b: FakeE2B) -> None:
+        ref = await E2BSandbox[None]().acquire_sandbox(_ctx())
+
+        assert ref.sandbox_id == fake_e2b.sandboxes[0].sandbox_id
+        assert fake_e2b.connect_calls == []
+
+    @pytest.mark.parametrize('terminal', [True, False])
+    async def test_list_failure_uses_public_error_surface(self, fake_e2b: FakeE2B, terminal: bool) -> None:
+        fake_e2b.list_error = fake_e2b.auth_type('bad key') if terminal else RuntimeError('offline')
+
+        error_type = e2b_sandbox.E2BSandboxTerminalError if terminal else e2b_sandbox.E2BSandboxError
+        with pytest.raises(error_type):
+            await E2BSandbox[None]().acquire_sandbox(_ctx())
 
     async def test_fake_list_supports_descending_order(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.new_sandbox('oldest')
@@ -93,19 +102,20 @@ class TestLifecycle:
         assert backend is None
         assert fake_e2b.sandboxes == []
 
-    async def test_release_reconnects_and_kills(self, fake_e2b: FakeE2B) -> None:
+    async def test_release_kills_without_reconnecting(self, fake_e2b: FakeE2B) -> None:
         capability = E2BSandbox[None]()
         ref = await capability.acquire_sandbox(_ctx())
 
         await capability.release_sandbox(_ctx(), ref)
 
-        assert fake_e2b.connect_calls[-1] == (ref.sandbox_id, None)
-        assert fake_e2b.sandboxes[-1].killed is True
+        assert fake_e2b.kill_ids == [ref.sandbox_id]
+        assert fake_e2b.connect_calls == []
+        assert fake_e2b.sandboxes[0].killed is True
 
     async def test_release_is_idempotent_when_sandbox_is_gone(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.connect_error = fake_e2b.sandbox_gone_type('gone')
-
         await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='gone'))
+
+        assert fake_e2b.kill_ids == ['gone']
 
     async def test_attached_sandbox_is_not_owned(self, fake_e2b: FakeE2B) -> None:
         capability = E2BSandbox[None](sandbox_id='sbx-existing')
@@ -173,12 +183,14 @@ class TestConfiguration:
         assert capability.metadata == {'owner': 'one'}
 
     def test_public_exports_are_narrow(self) -> None:
-        assert pydantic_ai_harness.E2BSandbox is E2BSandbox
+        assert not hasattr(pydantic_ai_harness, 'E2BSandbox')
         assert set(e2b_sandbox.__all__) == {
             'E2BSandbox',
             'E2BSandboxAuthError',
             'E2BSandboxBackend',
+            'E2BSandboxCommandTimeoutError',
             'E2BSandboxError',
+            'E2BSandboxTerminalError',
             'E2BSandboxUnavailableError',
         }
 

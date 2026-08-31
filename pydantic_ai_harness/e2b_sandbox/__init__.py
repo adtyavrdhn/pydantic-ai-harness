@@ -10,7 +10,9 @@ a run as `sandbox=`.
 from pydantic_ai_harness.e2b_sandbox._backend import (
     E2BSandboxAuthError,
     E2BSandboxBackend,
+    E2BSandboxCommandTimeoutError,
     E2BSandboxError,
+    E2BSandboxTerminalError,
     E2BSandboxUnavailableError,
 )
 from pydantic_ai_harness.e2b_sandbox._capability import E2BSandbox
@@ -19,6 +21,8 @@ __all__ = [
     'E2BSandbox',
     'E2BSandboxAuthError',
     'E2BSandboxBackend',
+    'E2BSandboxCommandTimeoutError',
     'E2BSandboxError',
+    'E2BSandboxTerminalError',
     'E2BSandboxUnavailableError',
 ]
