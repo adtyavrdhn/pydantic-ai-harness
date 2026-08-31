@@ -65,7 +65,7 @@ async def _respond(messages: list[ModelMessage], info: AgentInfo) -> ModelRespon
 
 
 _compaction: SummarizingCompaction[None] = SummarizingCompaction(
-    id='summarizing_compaction', max_messages=1, keep_messages=1, preserve_first_user_message=False
+    max_messages=1, keep_messages=1, preserve_first_user_message=False
 )
 _agent: Agent[None, str] = Agent(
     FunctionModel(_respond),
@@ -85,6 +85,26 @@ async def _workflow() -> tuple[str, int]:
     return summary_part.content, result.usage.requests
 
 
+_custom_compaction: SummarizingCompaction[None] = SummarizingCompaction(
+    id='custom_summary', max_messages=1, keep_messages=1, preserve_first_user_message=False
+)
+_custom_agent: Agent[None, str] = Agent(
+    FunctionModel(_respond),
+    name='durable_custom_summary',
+    deps_type=type(None),
+    capabilities=[_custom_compaction, DBOSDurability[None]()],
+)
+
+
+@DBOS.workflow(name='durable_custom_summary')
+async def _custom_workflow() -> str:
+    return (await _custom_agent.run('continue', message_history=_history())).output
+
+
+def test_default_id_is_stable() -> None:
+    assert _compaction.id == 'summarizing_compaction'
+
+
 @pytest.mark.anyio
 async def test_dbos_replays_the_recorded_summary(dbos: DBOS) -> None:
     global _summary_calls
@@ -99,3 +119,17 @@ async def test_dbos_replays_the_recorded_summary(dbos: DBOS) -> None:
     assert _summary_calls == 1
     steps = await dbos.list_workflow_steps_async(workflow_id)
     assert 'durable_summary__capability__summarizing_compaction.summarize' in {step['function_name'] for step in steps}
+
+
+@pytest.mark.anyio
+async def test_dbos_uses_custom_id_for_durable_summary(dbos: DBOS) -> None:
+    global _summary_calls
+    _summary_calls = 0
+    workflow_id = str(uuid.uuid4())
+
+    with SetWorkflowID(workflow_id):
+        assert await _custom_workflow() == 'done'
+
+    assert _summary_calls == 1
+    steps = await dbos.list_workflow_steps_async(workflow_id)
+    assert 'durable_custom_summary__capability__custom_summary.summarize' in {step['function_name'] for step in steps}

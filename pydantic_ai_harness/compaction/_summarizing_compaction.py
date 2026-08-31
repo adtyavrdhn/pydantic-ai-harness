@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic_ai._run_context import AgentDepsT
@@ -377,6 +377,10 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     Opt-in for now: the receipt text is content, so defaulting it on is deferred to the
     benchmark eval-rig pass.  The mechanism itself is structural.
     """
+
+    # Override the inherited default ID because durable-operation recovery needs a stable identity.
+    _: KW_ONLY
+    id: str | None = 'summarizing_compaction'
 
     def __post_init__(self) -> None:
         if self.max_messages is None and self.max_tokens is None and self.max_fraction is None:

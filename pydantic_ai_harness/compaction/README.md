@@ -404,9 +404,9 @@ A run-request / iteration limiter will therefore see compaction calls among its 
 
 With a durable-execution capability attached, the summary call runs as a contributed durable
 operation, so replay uses the recorded summary instead of calling the model again. When `model` is
-not set, the operation uses the run's model. Durable execution requires an explicit, stable `id`
-so workers recover the operation by the same identity. Changing it orphans recorded operations for
-in-flight workflows; omitting it raises `UserError` during agent construction.
+not set, the operation uses the run's model. The capability carries a stable default `id`, which
+durable execution uses to recover the operation by the same identity. Overriding it with a custom
+value orphans recorded operations for in-flight workflows, so keep it fixed once a workflow is live.
 
 ## `DeduplicateFileReads.file_key`
 
