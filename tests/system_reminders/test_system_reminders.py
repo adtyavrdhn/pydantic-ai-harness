@@ -621,6 +621,20 @@ class TestLLMReminder:
 
         assert _fired_text(seen) == 'generated from snapshot'
 
+    async def test_generation_operation_failure_falls_back_to_goal_reanchor(self) -> None:
+        capability = SystemReminders(dynamic_reminders=[LLMReminder(model=_capture_model({}, output='unreachable'))])
+        messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart('ship the durable fix')])]
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+
+            async def fail_generation(_ctx: RunContext[None], _index: int) -> str | None:
+                raise RuntimeError('durability backend unavailable')
+
+            monkeypatch.setattr(capability, '_generate_reminder', fail_generation)
+            seen = await _run_wrap(capability, messages, ctx=_ctx(messages=messages))
+
+        assert 'ship the durable fix' in (_fired_text(seen) or '')
+
     async def test_generates_from_transcript(self) -> None:
         store: dict[str, str] = {}
         messages: list[ModelMessage] = [

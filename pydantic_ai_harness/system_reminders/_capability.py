@@ -125,8 +125,8 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
     # Keyed by `id(reminder)`, not list index: a user callback that inserts or removes a
     # reminder mid-run must not shift another reminder onto a stale budget.
     _fire_counts: dict[int, int] = field(default_factory=dict[int, int], init=False, repr=False, compare=False)
-    _dynamic_snapshot: tuple[DynamicReminder[AgentDepsT] | AsyncDynamicReminder[AgentDepsT], ...] | None = field(
-        default=None, init=False, repr=False, compare=False
+    _dynamic_snapshot: tuple[DynamicReminder[AgentDepsT] | AsyncDynamicReminder[AgentDepsT], ...] = field(
+        default=(), init=False, repr=False, compare=False
     )
 
     def __post_init__(self) -> None:
@@ -225,10 +225,7 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
         texts: list[str] = []
         # Keep one stable snapshot for both iteration and durable index lookup. A callback may
         # mutate the public sequence while this request is in progress.
-        snapshot = self._dynamic_snapshot
-        if snapshot is None:
-            snapshot = self._dynamic_snapshot = tuple(self.dynamic_reminders)
-        for index, dynamic in enumerate(snapshot):
+        for index, dynamic in enumerate(self._dynamic_snapshot):
             if isinstance(dynamic, LLMReminder):
                 try:
                     result = await self._generate_reminder(ctx, index)
@@ -244,10 +241,7 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
 
     @durable_operation('generate_reminder')
     async def _generate_reminder(self, ctx: RunContext[AgentDepsT], index: int) -> str | None:
-        snapshot = self._dynamic_snapshot
-        if snapshot is None:  # pragma: no cover - operation is invoked from `_collect_dynamic`
-            raise RuntimeError('Dynamic reminder snapshot is not initialized.')
-        reminder = snapshot[index]
+        reminder = self._dynamic_snapshot[index]
         if not _is_llm_reminder(reminder):  # pragma: no cover - operation inputs originate above
             raise RuntimeError(f'Dynamic reminder {index} is no longer an LLMReminder.')
         return await reminder(ctx)
