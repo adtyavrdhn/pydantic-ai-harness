@@ -164,6 +164,33 @@ class TestCapabilityOperation:
         assert resumed.invoked == []
         assert contributor.calls == 1
 
+    def test_operation_receives_base_step_config(self) -> None:
+        class Contributor(AbstractCapability[Any]):
+            id = 'contributor'
+
+            async def before_run(self, ctx: RunContext[Any]) -> None:
+                await self.record(ctx)
+
+            @durable_operation('record')
+            async def record(self, ctx: RunContext[Any]) -> None:
+                pass
+
+        agent = Agent(
+            TestModel(custom_output_text='done'),
+            name='a',
+            capabilities=[
+                Contributor(),
+                AWSLambdaDurability(step_config={'step_semantics': StepSemantics.AT_MOST_ONCE_PER_RETRY}),
+            ],
+        )
+        ctx = FakeDurableContext()
+
+        run_durable(lambda: agent.run('go'), context=ctx)
+
+        operation = next(op for op in ctx.operations if op.name == 'a__capability__contributor.record')
+        assert operation.config is not None
+        assert operation.config.step_semantics is StepSemantics.AT_MOST_ONCE_PER_RETRY
+
 
 class TestControlFlowSignals:
     """Control-flow signals must cross a step as values, not as step failures.
@@ -240,6 +267,15 @@ class TestToolResultSerialization:
             run_durable(lambda: agent.run('go'), context=ctx)
 
         assert len(ctx.failed) == 1
+
+    def test_fake_records_result_serialization_failure(self) -> None:
+        ctx = FakeDurableContext()
+
+        with pytest.raises(ExecutionError, match='Serialization failed for id: operation'):
+            ctx.step(lambda _: object(), name='non-serializable')
+
+        assert len(ctx.failed) == 1
+        assert ctx.failed[0].name == 'non-serializable'
 
 
 class TestCrashMidRunRetry:

@@ -83,10 +83,10 @@ class FakeDurableContext:
         self.invoked.append(name)
         try:
             value = func(StepContext())
+            payload = self._dump(value)
         except BaseException as exc:
             self.operations.append(Operation(name=name, status='failed', error=exc, config=config))
             raise
-        payload = self._dump(value)
         self.operations.append(
             Operation(
                 name=name,

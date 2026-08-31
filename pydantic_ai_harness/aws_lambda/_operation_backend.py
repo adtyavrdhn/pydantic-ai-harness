@@ -46,7 +46,7 @@ class AWSLambdaOperationConfig(RoleBasedOperationConfig[StepConfig | None]):
             return _parse_step_config(config)
 
         super().__init__(
-            model=base_config, event=base_config, capability=None, tool=base_config, resolve_tool=resolve_tool
+            model=base_config, event=base_config, capability=base_config, tool=base_config, resolve_tool=resolve_tool
         )
 
 
