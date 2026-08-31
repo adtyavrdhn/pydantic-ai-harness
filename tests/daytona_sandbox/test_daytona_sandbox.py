@@ -158,6 +158,10 @@ class TestConfiguration:
         with pytest.raises(ValueError, match='absolute'):
             DaytonaSandbox(workdir='repo')
 
+    def test_rejects_non_boolean_network_setting(self) -> None:
+        with pytest.raises(ValueError, match='network_block_all'):
+            DaytonaSandbox(network_block_all=1)  # type: ignore[arg-type]
+
     @pytest.mark.parametrize(
         'settings',
         [

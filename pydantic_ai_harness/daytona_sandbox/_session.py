@@ -105,9 +105,11 @@ class DaytonaSandboxProcess:
                 ),
                 timeout=self._io_timeout,
             )
-        except BaseException:
+        except BaseException as error:
             if created:
                 await _finish_cleanup(self._process.delete_session(self._process_id, request_timeout=self._io_timeout))
+            if isinstance(error, Exception):
+                raise _translate_error(error, unavailable=True) from error
             raise
         self._command_id = response.cmd_id
         self._logs = asyncio.create_task(
@@ -262,8 +264,6 @@ class DaytonaSandboxSession:
                     on_cancel=lambda created: client.delete(created, timeout=60, wait=True),
                 )
         except asyncio.CancelledError:
-            if self._sandbox is not None:
-                await _finish_cleanup(client.delete(self._sandbox, timeout=60, wait=True))
             await _finish_cleanup(client.close(), then=self._clear)
             raise
         except Exception as error:
@@ -329,7 +329,7 @@ class DaytonaSandboxSession:
     def _path(self, path: str) -> str:
         if self._workdir is None or posixpath.isabs(path):
             return path
-        return posixpath.join(self._workdir, path)
+        return posixpath.normpath(posixpath.join(self._workdir, path))
 
     def _command(self, command: str) -> str:
         if self._env:

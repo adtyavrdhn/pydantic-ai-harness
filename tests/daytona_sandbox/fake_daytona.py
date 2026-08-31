@@ -43,10 +43,8 @@ class FakeProcess:
         self.owner.exec_calls.append(ExecCall(command, cwd, env, timeout))
         if self.owner.exec_error is not None:
             raise self.owner.exec_error
-        if command.startswith('mkdir -p -- '):
-            return SimpleNamespace(result='', exit_code=self.owner.mkdir_exit_code)
-        output, exit_code = self.owner.responder(command, timeout)
-        return SimpleNamespace(result=output, exit_code=exit_code)
+        assert command.startswith('mkdir -p -- ')
+        return SimpleNamespace(result='', exit_code=self.owner.mkdir_exit_code)
 
     async def create_session(self, session_id: str, request_timeout: float | None = None) -> None:
         self.owner.process_calls.append(('create', session_id, request_timeout))
@@ -107,6 +105,8 @@ class FakeProcess:
         request_timeout: float | None = None,
     ) -> None:
         self.owner.process_calls.append(('input', session_id, command_id, data, request_timeout))
+        if self.owner.process_input_error is not None:
+            raise self.owner.process_input_error
         self.owner.process_input_event.set()
 
     async def get_session_command(
@@ -116,6 +116,8 @@ class FakeProcess:
         request_timeout: float | None = None,
     ) -> SimpleNamespace:
         self.owner.process_calls.append(('status', session_id, command_id, request_timeout))
+        if self.owner.process_status_error is not None:
+            raise self.owner.process_status_error
         return SimpleNamespace(exit_code=self.owner.process_exit_code)
 
     async def delete_session(self, session_id: str, request_timeout: float | None = None) -> None:
@@ -187,7 +189,7 @@ class FakeFileSystem:
         self._raise_if_needed()
         self.owner.files.pop(path, None)
         self.owner.directories.discard(path)
-        if recursive:
+        if recursive:  # pragma: no branch - the sandbox protocol always requests recursive removal
             prefix = path.rstrip('/') + '/'
             self.owner.files = {key: value for key, value in self.owner.files.items() if not key.startswith(prefix)}
             self.owner.directories = {key for key in self.owner.directories if not key.startswith(prefix)}
@@ -223,6 +225,8 @@ class FakeSandbox:
         self.process_input_event = asyncio.Event()
         self.process_exit_code: int | None = 0
         self.process_delete_error: Exception | None = None
+        self.process_input_error: Exception | None = None
+        self.process_status_error: Exception | None = None
         self.process_create_gate: asyncio.Event | None = None
         self.process_create_started = asyncio.Event()
         self.process = FakeProcess(self)
@@ -260,6 +264,8 @@ class FakeClient:
         sandbox.deleted = True
 
     async def close(self) -> None:
+        if self.owner.close_error is not None:
+            raise self.owner.close_error
         self.closed = True
         self.owner.closed_clients += 1
 
@@ -273,6 +279,7 @@ class FakeDaytona:
         self.create_error: Exception | None = None
         self.get_error: Exception | None = None
         self.delete_error: Exception | None = None
+        self.close_error: Exception | None = None
         self.create_gate: asyncio.Event | None = None
         self.create_started = asyncio.Event()
 
