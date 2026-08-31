@@ -9,8 +9,7 @@ import posixpath
 import shlex
 import time
 import uuid
-from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -23,6 +22,7 @@ from pydantic_ai_harness.daytona_sandbox._session import (
     DaytonaSandboxProcess,
     DaytonaSandboxSession,
     DaytonaSandboxUnavailableError,
+    _delete_sandbox,  # pyright: ignore[reportPrivateUsage]
 )
 
 if TYPE_CHECKING:
@@ -36,7 +36,6 @@ if TYPE_CHECKING:
     )
 
 PROVIDER = 'daytona'
-_INTERNAL_EXEC_TIMEOUT = 10.0
 _PROCESS_IO_TIMEOUT = 30
 
 
@@ -118,16 +117,14 @@ class _DaytonaProcess:
     async def _settle(self) -> _DaytonaResult:
         remaining = None if self._deadline is None else self._deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
-            with suppress(Exception):
-                await self.kill()
+            await self.kill()
             raise DaytonaSandboxCommandTimeoutError('Daytona command timed out and cleanup was requested.')
         try:
             exit_code = await self._process.wait(timeout=remaining)
         except TimeoutError as error:
-            with suppress(Exception):
-                await self.kill()
+            await self.kill()
             raise DaytonaSandboxCommandTimeoutError('Daytona command timed out and cleanup was requested.') from error
-        await self._process.close()
+        await self.kill()
         return _DaytonaResult(exit_code=exit_code, stdout=''.join(self._stdout), stderr=''.join(self._stderr))
 
     async def kill(self) -> None:
@@ -135,29 +132,30 @@ class _DaytonaProcess:
 
 
 class _DaytonaFilesystem:
-    def __init__(self, session: DaytonaSandboxSession) -> None:
+    def __init__(self, session: DaytonaSandboxSession, resolve_path: Callable[[str], Awaitable[str]]) -> None:
         self._session = session
+        self._resolve_path = resolve_path
 
     async def read_bytes(self, path: str) -> bytes:
-        return await self._session.read_bytes(path)
+        return await self._session.read_bytes(await self._resolve_path(path))
 
     async def write_bytes(self, path: str, data: bytes) -> None:
-        await self._session.write_bytes(path, data)
+        await self._session.write_bytes(await self._resolve_path(path), data)
 
     async def stat(self, path: str) -> _DaytonaFileEntry:
-        return _DaytonaFileEntry(*await self._session.file_info(path))
+        return _DaytonaFileEntry(*await self._session.file_info(await self._resolve_path(path)))
 
     async def list_dir(self, path: str) -> Sequence[_DaytonaFileEntry]:
-        return [_DaytonaFileEntry(*entry) for entry in await self._session.list_entries(path)]
+        return [_DaytonaFileEntry(*entry) for entry in await self._session.list_entries(await self._resolve_path(path))]
 
     async def make_dir(self, path: str) -> None:
-        await self._session.make_dir(path)
+        await self._session.make_dir(await self._resolve_path(path))
 
     async def remove(self, path: str) -> None:
-        await self._session.remove(path)
+        await self._session.remove(await self._resolve_path(path))
 
     async def exists(self, path: str) -> bool:
-        return await self._session.exists(path)
+        return await self._session.exists(await self._resolve_path(path))
 
 
 class DaytonaSandboxBackend:
@@ -178,7 +176,8 @@ class DaytonaSandboxBackend:
         self._session = session
         self._sandbox_id = sandbox_id
         self._working_dir = _absolute_path('working_dir', working_dir)
-        self.fs = _DaytonaFilesystem(session)
+        self._created_here = False
+        self.fs = _DaytonaFilesystem(session, self._resolve_path)
 
     @property
     def sandbox_id(self) -> str:
@@ -204,7 +203,9 @@ class DaytonaSandboxBackend:
             network_block_all=network_block_all,
         )
         await session.__aenter__()
-        return cls(session, working_dir=working_dir)
+        backend = cls(session, working_dir=working_dir)
+        backend._created_here = True
+        return backend
 
     @classmethod
     async def _create_or_connect(
@@ -245,6 +246,14 @@ class DaytonaSandboxBackend:
     async def close(self, *, terminate: bool) -> None:
         await self._session.close(terminate=terminate)
 
+    async def _cleanup_failed_acquisition(self) -> None:
+        if not self._created_here:
+            await self.close(terminate=False)
+        elif self._session.sandbox_id is not None:
+            await self.close(terminate=True)
+        else:
+            await _delete_sandbox(self.sandbox_id)
+
     @functools.cached_property
     def _working_dir_lock(self) -> asyncio.Lock:
         return asyncio.Lock()
@@ -253,14 +262,18 @@ class DaytonaSandboxBackend:
         if self._working_dir is None:
             async with self._working_dir_lock:
                 if self._working_dir is None:
-                    result = await self.run(['pwd'], timeout=_INTERNAL_EXEC_TIMEOUT)
-                    printed = result.stdout.strip()
-                    if result.exit_code != 0 or not posixpath.isabs(printed):
+                    discovered = await self._session.get_work_dir()
+                    if not posixpath.isabs(discovered):
                         raise DaytonaSandboxError(
                             f'Could not determine the working directory of Daytona sandbox {self.sandbox_id!r}.'
                         )
-                    self._working_dir = printed
+                    self._working_dir = posixpath.normpath(discovered)
         return self._working_dir
+
+    async def _resolve_path(self, path: str) -> str:
+        if posixpath.isabs(path):
+            return posixpath.normpath(path)
+        return posixpath.normpath(posixpath.join(await self.working_dir(), path))
 
     async def run(
         self,
@@ -274,9 +287,13 @@ class DaytonaSandboxBackend:
         process = await self.start(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
         try:
             return await process.wait()
-        except BaseException:
-            with suppress(Exception):
+        except BaseException as error:
+            try:
                 await process.kill()
+            except Exception as cleanup_error:
+                if isinstance(error, asyncio.CancelledError):
+                    raise error
+                raise cleanup_error from error
             raise
 
     async def start(
@@ -308,16 +325,22 @@ class DaytonaSandboxBackend:
             else:
                 await asyncio.wait_for(inner.__aenter__(), timeout)
         except DaytonaSandboxCommandTimeoutError:
-            with suppress(Exception):
+            try:
                 await inner.close()
+            except Exception:
+                pass
             raise
         except (TimeoutError, asyncio.TimeoutError) as error:
-            with suppress(Exception):
+            try:
                 await inner.close()
+            except Exception:
+                pass
             raise DaytonaSandboxCommandTimeoutError('Daytona command setup timed out.') from error
         except BaseException:
-            with suppress(Exception):
+            try:
                 await inner.close()
+            except Exception:
+                pass
             raise
         deadline = None if timeout is None else started + timeout
         return _DaytonaProcess(inner, stdout=stdout, stderr=stderr, deadline=deadline)

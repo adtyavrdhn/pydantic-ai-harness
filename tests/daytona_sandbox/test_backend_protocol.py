@@ -23,7 +23,7 @@ from pydantic_ai_harness.daytona_sandbox import (
     DaytonaSandboxError,
     DaytonaSandboxUnavailableError,
 )
-from pydantic_ai_harness.daytona_sandbox._backend import _command_context, _command_line, _DaytonaResult
+from pydantic_ai_harness.daytona_sandbox._backend import _command_context, _command_line
 from pydantic_ai_harness.daytona_sandbox._session import DaytonaSandboxSession, _finish_cleanup
 
 from .fake_daytona import FakeDaytona
@@ -101,46 +101,37 @@ class TestBackendLifecycle:
 
     async def test_working_directory_is_discovered_once(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
-        fake_daytona.sandboxes[0].responder = lambda command, timeout: ('/srv/repo\n', 0)
 
         assert await backend.working_dir() == '/srv/repo'
         assert await backend.working_dir() == '/srv/repo'
-        assert len(fake_daytona.sandboxes[0].process_calls) == 5
+        assert fake_daytona.sandboxes[0].workdir_calls == 1
 
-    async def test_concurrent_working_directory_discovery_runs_one_probe(
-        self, fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_concurrent_working_directory_discovery_runs_one_probe(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
-        started = asyncio.Event()
-        release = asyncio.Event()
-        calls = 0
-
-        async def probe(*args: object, **kwargs: object) -> _DaytonaResult:
-            nonlocal calls
-            del args, kwargs
-            calls += 1
-            started.set()
-            await release.wait()
-            return _DaytonaResult(exit_code=0, stdout='/work\n', stderr='')
-
-        monkeypatch.setattr(backend, 'run', probe)
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.workdir = '/work'
+        sandbox.workdir_gate = asyncio.Event()
         first = asyncio.create_task(backend.working_dir())
-        await started.wait()
+        await sandbox.workdir_started.wait()
         second = asyncio.create_task(backend.working_dir())
         await asyncio.sleep(0)
-        release.set()
+        sandbox.workdir_gate.set()
 
         assert await asyncio.gather(first, second) == ['/work', '/work']
-        assert calls == 1
+        assert sandbox.workdir_calls == 1
 
-    @pytest.mark.parametrize(('output', 'exit_code'), [('relative\n', 0), ('/srv\n', 1)])
-    async def test_invalid_working_directory_probe(
-        self, fake_daytona: FakeDaytona, output: str, exit_code: int
-    ) -> None:
+    async def test_invalid_working_directory_probe(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
-        fake_daytona.sandboxes[0].responder = lambda command, timeout: (output, exit_code)
+        fake_daytona.sandboxes[0].workdir = 'relative'
 
         with pytest.raises(DaytonaSandboxError, match='determine the working directory'):
+            await backend.working_dir()
+
+    async def test_working_directory_error_is_translated(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        fake_daytona.sandboxes[0].workdir_error = DaytonaConnectionError('offline')
+
+        with pytest.raises(DaytonaSandboxError, match='offline'):
             await backend.working_dir()
 
     @pytest.mark.parametrize('timeout', [0, -1.0, float('inf'), float('nan')])
@@ -156,6 +147,20 @@ class TestBackendLifecycle:
         with pytest.raises(DaytonaSandboxError, match='offline'):
             await backend.start(['x'])
         assert fake_daytona.sandboxes[0].process_sessions == set()
+
+    async def test_start_failure_retains_session_when_cleanup_fails(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.exec_error = DaytonaConnectionError('offline')
+        sandbox.process_delete_error = RuntimeError('delete failed')
+
+        with pytest.raises(DaytonaSandboxError, match='offline'):
+            await backend.start(['x'])
+        assert sandbox.process_sessions
+
+        sandbox.process_delete_error = None
+        await backend.close(terminate=False)
+        assert sandbox.process_sessions == set()
 
     async def test_wait_result_is_cached(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
@@ -634,6 +639,28 @@ class TestManagedProcess:
                 await process.close()
             sandbox.process_delete_error = None
             await process.close()
+
+    async def test_missing_process_is_cleanup_success(self, fake_daytona: FakeDaytona) -> None:
+        async with DaytonaSandboxSession() as session:
+            sandbox = fake_daytona.sandboxes[0]
+            process = session.process('id', 'x', on_stdout=lambda _: None, on_stderr=lambda _: None, max_input_bytes=1)
+            await process.__aenter__()
+            sandbox.process_delete_error = DaytonaNotFoundError('gone')
+            await process.close()
+
+    async def test_close_treats_missing_tracked_process_as_cleaned(self, fake_daytona: FakeDaytona) -> None:
+        session = DaytonaSandboxSession()
+        await session.__aenter__()
+        sandbox = fake_daytona.sandboxes[0]
+        process = session.process('id', 'x', on_stdout=lambda _: None, on_stderr=lambda _: None, max_input_bytes=1)
+        await process.__aenter__()
+        sandbox.process_delete_error = DaytonaConnectionError('offline')
+        with pytest.raises(DaytonaSandboxError, match='offline'):
+            await process.close()
+        sandbox.process_delete_error = DaytonaNotFoundError('gone')
+
+        await session.close(terminate=False)
+        assert fake_daytona.closed_clients == 1
 
     async def test_input_and_status_errors_are_translated(self, fake_daytona: FakeDaytona) -> None:
         async with DaytonaSandboxSession() as session:

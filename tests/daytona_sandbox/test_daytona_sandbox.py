@@ -37,6 +37,7 @@ class TestLifecycle:
         assert first == second
         assert len(fake_daytona.sandboxes) == 1
         assert fake_daytona.create_params[0].name is not None
+        assert fake_daytona.create_timeouts == [60]
         assert fake_daytona.closed_clients == 3
 
     async def test_different_runs_use_different_names(self, fake_daytona: FakeDaytona) -> None:
@@ -69,6 +70,56 @@ class TestLifecycle:
         assert fake_daytona.get_calls[-1] == ref.sandbox_id
         assert sandbox.start_calls == []
         assert fake_daytona.delete_calls == [(ref.sandbox_id, 60, True)]
+        assert fake_daytona.get_request_timeouts[-1] == 30
+
+    async def test_cancelled_release_finishes_deletion(self, fake_daytona: FakeDaytona) -> None:
+        sandbox = fake_daytona.sandbox()
+        fake_daytona.delete_gate = asyncio.Event()
+        fake_daytona.close_error = RuntimeError('close failed')
+        releasing = asyncio.create_task(
+            DaytonaSandbox[None]().release_sandbox(_ctx(), SandboxRef(provider='daytona', sandbox_id=sandbox.id))
+        )
+        await fake_daytona.delete_started.wait()
+        releasing.cancel()
+        fake_daytona.delete_gate.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await releasing
+        assert sandbox.deleted is True
+        assert fake_daytona.closed_clients == 0
+
+    async def test_created_sandbox_is_deleted_when_acquisition_detach_fails(self, fake_daytona: FakeDaytona) -> None:
+        fake_daytona.close_error = RuntimeError('close failed')
+
+        with pytest.raises(DaytonaSandboxError, match='close failed'):
+            await DaytonaSandbox[None]().acquire_sandbox(_ctx())
+
+        assert fake_daytona.sandboxes[0].deleted is True
+
+    async def test_cancelled_acquisition_deletes_created_sandbox_after_detach(self, fake_daytona: FakeDaytona) -> None:
+        fake_daytona.close_gate = asyncio.Event()
+        fake_daytona.close_gate_after = 2
+        acquiring = asyncio.create_task(DaytonaSandbox[None]().acquire_sandbox(_ctx()))
+        await fake_daytona.close_blocked.wait()
+        acquiring.cancel()
+        fake_daytona.close_gate.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await acquiring
+        assert fake_daytona.sandboxes[0].deleted is True
+
+    async def test_reconnected_sandbox_is_not_deleted_when_acquisition_detach_fails(
+        self, fake_daytona: FakeDaytona
+    ) -> None:
+        capability = DaytonaSandbox[None]()
+        await capability.acquire_sandbox(_ctx())
+        sandbox = fake_daytona.sandboxes[0]
+        fake_daytona.close_error = RuntimeError('close failed')
+
+        with pytest.raises(DaytonaSandboxError, match='close failed'):
+            await capability.acquire_sandbox(_ctx())
+
+        assert sandbox.deleted is False
 
     async def test_release_is_idempotent_when_sandbox_is_gone(self, fake_daytona: FakeDaytona) -> None:
         await DaytonaSandbox[None]().release_sandbox(_ctx(), SandboxRef(provider='daytona', sandbox_id='gone'))
@@ -115,6 +166,15 @@ class TestBackend:
         with pytest.raises(DaytonaSandboxCommandTimeoutError, match='process setup timed out'):
             await backend.start(['true'])
 
+    async def test_process_setup_timeout_preserves_cleanup_failure(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.exec_error = asyncio.TimeoutError()
+        sandbox.process_delete_error = RuntimeError('delete failed')
+
+        with pytest.raises(DaytonaSandboxCommandTimeoutError, match='process setup timed out'):
+            await backend.start(['true'])
+
     async def test_process_setup_deadline_is_typed(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
         sandbox = fake_daytona.sandboxes[0]
@@ -127,6 +187,22 @@ class TestBackend:
 
         finishing = asyncio.create_task(finish_remote_setup())
 
+        with pytest.raises(DaytonaSandboxCommandTimeoutError, match='command setup timed out'):
+            await backend.start(['true'], timeout=0.01)
+        await finishing
+
+    async def test_process_setup_deadline_preserves_cleanup_failure(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_create_gate = asyncio.Event()
+        sandbox.process_delete_error = RuntimeError('delete failed')
+
+        async def finish_remote_setup() -> None:
+            await asyncio.sleep(0.02)
+            assert sandbox.process_create_gate is not None
+            sandbox.process_create_gate.set()
+
+        finishing = asyncio.create_task(finish_remote_setup())
         with pytest.raises(DaytonaSandboxCommandTimeoutError, match='command setup timed out'):
             await backend.start(['true'], timeout=0.01)
         await finishing
@@ -150,16 +226,49 @@ class TestBackend:
             await backend.run(['sleep', '30'], timeout=0.01)
         assert sandbox.process_sessions == set()
 
+    async def test_failed_timeout_cleanup_is_visible_and_retried_on_close(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_waits_for_input = True
+        sandbox.process_delete_error = RuntimeError('delete failed')
+
+        with pytest.raises(DaytonaSandboxError, match='delete failed'):
+            await backend.run(['sleep', '30'], timeout=0.01)
+        assert sandbox.process_sessions
+
+        with pytest.raises(DaytonaSandboxError, match='delete failed'):
+            await backend.close(terminate=False)
+
+        sandbox.process_delete_error = None
+        await backend.close(terminate=False)
+        assert sandbox.process_sessions == set()
+
     async def test_cancellation_kills_process(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
         sandbox = fake_daytona.sandboxes[0]
         sandbox.process_waits_for_input = True
         task = asyncio.create_task(backend.run(['sleep', '30']))
-        await sandbox.process_create_started.wait()
-        await asyncio.sleep(0)
+        await sandbox.process_logs_started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+        assert sandbox.process_sessions == set()
+
+    async def test_cancellation_preserves_process_identity_when_cleanup_fails(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_waits_for_input = True
+        sandbox.process_delete_error = RuntimeError('delete failed')
+        task = asyncio.create_task(backend.run(['sleep', '30']))
+        await sandbox.process_logs_started.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert sandbox.process_sessions
+
+        sandbox.process_delete_error = None
+        await backend.close(terminate=False)
         assert sandbox.process_sessions == set()
 
     async def test_filesystem_roundtrip_and_metadata(self, fake_daytona: FakeDaytona) -> None:
@@ -174,6 +283,31 @@ class TestBackend:
             5,
             False,
         )
+
+    async def test_relative_filesystem_paths_use_discovered_absolute_workdir(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        sandbox = fake_daytona.sandboxes[0]
+        await backend.fs.make_dir('notes')
+        await backend.fs.write_bytes('notes/a.txt', b'hello')
+
+        assert await backend.fs.read_bytes('notes/a.txt') == b'hello'
+        entry = await backend.fs.stat('notes/a.txt')
+        listed = await backend.fs.list_dir('notes')
+        assert await backend.fs.exists('notes/a.txt') is True
+        await backend.fs.remove('notes/a.txt')
+
+        assert entry.path == '/srv/repo/notes/a.txt'
+        assert listed[0].path == '/srv/repo/notes/a.txt'
+        assert sandbox.fs_calls == [
+            ('mkdir', '/srv/repo/notes', 30),
+            ('upload', '/srv/repo/notes/a.txt', 30),
+            ('download', '/srv/repo/notes/a.txt', 30),
+            ('stat', '/srv/repo/notes/a.txt', 30),
+            ('list', '/srv/repo/notes', None, 30),
+            ('stat', '/srv/repo/notes/a.txt', 30),
+            ('delete', '/srv/repo/notes/a.txt', True, 30),
+        ]
+        assert sandbox.workdir_calls == 1
 
     async def test_missing_file_uses_builtin_error(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create(working_dir='/workspace')

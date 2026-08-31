@@ -34,6 +34,8 @@ if TYPE_CHECKING:
 
 DEFAULT_AUTO_STOP_MINUTES = 60
 _DEFAULT_PROCESS_IO_TIMEOUT = 30
+_DEFAULT_REQUEST_TIMEOUT = 30.0
+_DEFAULT_LIFECYCLE_TIMEOUT = 60.0
 
 ProcessOutputHandler: TypeAlias = Callable[[str], None] | Callable[[str], Awaitable[None]]
 _T = TypeVar('_T')
@@ -72,6 +74,8 @@ class DaytonaSandboxProcess:
         on_stderr: ProcessOutputHandler,
         max_input_bytes: int,
         io_timeout: int,
+        on_created: Callable[[str], None],
+        on_closed: Callable[[str], None],
     ) -> None:
         if not process_id:
             raise ValueError('process_id must not be empty.')
@@ -84,6 +88,8 @@ class DaytonaSandboxProcess:
         self._on_stderr = on_stderr
         self._max_input_bytes = max_input_bytes
         self._io_timeout = io_timeout
+        self._on_created = on_created
+        self._on_closed = on_closed
         self._created = False
         self._command_id: str | None = None
         self._logs: asyncio.Task[None] | None = None
@@ -102,6 +108,7 @@ class DaytonaSandboxProcess:
                 await self._process.delete_session(self._process_id, request_timeout=self._io_timeout)
             except Exception:
                 self._created = True
+                self._on_created(self._process_id)
                 raise
 
         try:
@@ -110,6 +117,7 @@ class DaytonaSandboxProcess:
                 on_cancel=delete_cancelled_session,
             )
             self._created = True
+            self._on_created(self._process_id)
             from daytona import SessionExecuteRequest
 
             response = await self._process.execute_session_command(
@@ -201,6 +209,13 @@ class DaytonaSandboxProcess:
                 then=self._clear,
             )
         except Exception as error:
+            try:
+                from daytona import DaytonaNotFoundError
+            except ImportError:  # pragma: no cover - an open process already imported Daytona
+                raise _translate_error(error, unavailable=True) from error
+            if isinstance(error, DaytonaNotFoundError):
+                self._clear()
+                return
             raise _translate_error(error, unavailable=True) from error
 
     def _clear(self) -> None:
@@ -210,6 +225,7 @@ class DaytonaSandboxProcess:
         self._created = False
         self._command_id = None
         self._logs = None
+        self._on_closed(self._process_id)
 
     def _require_command_id(self) -> str:
         if self._command_id is None:
@@ -257,6 +273,7 @@ class DaytonaSandboxSession:
         self._client: AsyncDaytona | None = None
         self._sandbox: AsyncSandbox | None = None
         self._owned_sandbox_deleted = False
+        self._process_ids: set[str] = set()
 
     @property
     def sandbox_id(self) -> str | None:
@@ -289,8 +306,10 @@ class DaytonaSandboxSession:
 
         try:
             if self._requested_id is not None:
-                sandbox = await _finish_on_cancellation(client.get(self._requested_id))
-                await _finish_on_cancellation(sandbox.start(timeout=60))
+                sandbox = await _finish_on_cancellation(
+                    client.get(self._requested_id, request_timeout=_DEFAULT_REQUEST_TIMEOUT)
+                )
+                await _finish_on_cancellation(sandbox.start(timeout=_DEFAULT_LIFECYCLE_TIMEOUT))
             else:
                 params = CreateSandboxFromSnapshotParams(
                     name=self._sandbox_name,
@@ -301,19 +320,19 @@ class DaytonaSandboxSession:
                     network_block_all=self._network_block_all,
                 )
                 sandbox = await _finish_on_cancellation(
-                    client.create(params),
+                    client.create(params, timeout=_DEFAULT_LIFECYCLE_TIMEOUT),
                     on_cancel=delete_cancelled_sandbox,
                 )
         except asyncio.CancelledError:
             if self._sandbox is None:
                 try:
-                    await _finish_cleanup(client.close(), then=self._clear)
+                    await _finish_cleanup(asyncio.wait_for(client.close(), _DEFAULT_REQUEST_TIMEOUT), then=self._clear)
                 except Exception:
                     pass
             raise
         except (TimeoutError, asyncio.TimeoutError) as error:
             try:
-                await client.close()
+                await _finish_cleanup(asyncio.wait_for(client.close(), _DEFAULT_REQUEST_TIMEOUT))
             except Exception:
                 pass
             else:
@@ -321,7 +340,7 @@ class DaytonaSandboxSession:
             raise DaytonaSandboxCommandTimeoutError('Daytona sandbox setup timed out.') from error
         except Exception as error:
             try:
-                await client.close()
+                await _finish_cleanup(asyncio.wait_for(client.close(), _DEFAULT_REQUEST_TIMEOUT))
             except Exception:
                 pass
             else:
@@ -343,7 +362,7 @@ class DaytonaSandboxSession:
             return
         if sandbox is None:
             try:
-                await _finish_cleanup(client.close(), then=self._clear)
+                await _finish_cleanup(asyncio.wait_for(client.close(), _DEFAULT_REQUEST_TIMEOUT), then=self._clear)
             except Exception as error:
                 raise _translate_error(error, unavailable=False) from error
             return
@@ -351,7 +370,7 @@ class DaytonaSandboxSession:
         if terminate and not self._owned_sandbox_deleted:
             try:
                 await _finish_cleanup(
-                    client.delete(sandbox, timeout=60, wait=True),
+                    client.delete(sandbox, timeout=_DEFAULT_LIFECYCLE_TIMEOUT, wait=True),
                     then=self._mark_owned_sandbox_deleted,
                 )
             except Exception as error:
@@ -362,23 +381,46 @@ class DaytonaSandboxSession:
                 else:
                     # Keep the live client and sandbox handle so the caller can retry deletion.
                     raise _translate_error(error, unavailable=False) from error
+        if not terminate:
+            for process_id in tuple(self._process_ids):
+                try:
+                    await _finish_cleanup(
+                        sandbox.process.delete_session(process_id, request_timeout=_DEFAULT_PROCESS_IO_TIMEOUT),
+                        then=lambda process_id=process_id: self._process_ids.discard(process_id),
+                    )
+                except Exception as error:
+                    from daytona import DaytonaNotFoundError
+
+                    if isinstance(error, DaytonaNotFoundError):
+                        self._process_ids.discard(process_id)
+                    else:
+                        raise _translate_error(error, unavailable=True) from error
         try:
-            await _finish_cleanup(client.close(), then=self._clear)
+            await _finish_cleanup(asyncio.wait_for(client.close(), _DEFAULT_REQUEST_TIMEOUT), then=self._clear)
         except Exception as error:
             raise _translate_error(error, unavailable=False) from error
 
     def _mark_owned_sandbox_deleted(self) -> None:
         self._owned_sandbox_deleted = True
+        self._process_ids.clear()
 
     def _clear(self) -> None:
         self._client = None
         self._sandbox = None
         self._owned_sandbox_deleted = False
+        self._process_ids.clear()
 
     def _require_sandbox(self) -> AsyncSandbox:
         if self._sandbox is None:
             raise DaytonaSandboxError('The Daytona sandbox session is not open.')
         return self._sandbox
+
+    async def get_work_dir(self) -> str:
+        """Return the sandbox image's configured working directory."""
+        try:
+            return await asyncio.wait_for(self._require_sandbox().get_work_dir(), _DEFAULT_REQUEST_TIMEOUT)
+        except Exception as error:
+            raise _translate_error(error, unavailable=False) from error
 
     def _path(self, path: str) -> str:
         if self._workdir is None or posixpath.isabs(path):
@@ -413,20 +455,22 @@ class DaytonaSandboxSession:
             on_stderr=on_stderr,
             max_input_bytes=max_input_bytes,
             io_timeout=io_timeout,
+            on_created=self._process_ids.add,
+            on_closed=self._process_ids.discard,
         )
 
     async def file_info(self, path: str) -> tuple[str, str, bool, int | None]:
         """Return the protocol-facing metadata for one path."""
         resolved = self._path(path)
         try:
-            entry = await self._require_sandbox().fs.get_file_info(resolved)
+            entry = await self._require_sandbox().fs.get_file_info(resolved, request_timeout=_DEFAULT_REQUEST_TIMEOUT)
         except Exception as error:
             raise _translate_file_error(error, path) from error
         return posixpath.basename(resolved.rstrip('/')), resolved, entry.is_dir, None if entry.is_dir else entry.size
 
     async def read_bytes(self, path: str) -> bytes:
         try:
-            data = await self._require_sandbox().fs.download_file(self._path(path))
+            data = await self._require_sandbox().fs.download_file(self._path(path), int(_DEFAULT_REQUEST_TIMEOUT))
         except Exception as error:
             raise _translate_file_error(error, path) from error
         return data
@@ -440,7 +484,7 @@ class DaytonaSandboxSession:
                 mkdir = await sandbox.process.exec(f'mkdir -p -- {shlex.quote(parent)}', timeout=30)
                 if mkdir.exit_code != 0:
                     raise DaytonaSandboxError(mkdir.result or f'Could not create {parent!r}.')
-            await sandbox.fs.upload_file(data, resolved)
+            await sandbox.fs.upload_file(data, resolved, timeout=int(_DEFAULT_REQUEST_TIMEOUT))
         except DaytonaSandboxError:
             raise
         except Exception as error:
@@ -450,7 +494,7 @@ class DaytonaSandboxSession:
         """Return direct children with their protocol-facing metadata."""
         resolved = self._path(path)
         try:
-            entries = await self._require_sandbox().fs.list_files(resolved)
+            entries = await self._require_sandbox().fs.list_files(resolved, request_timeout=_DEFAULT_REQUEST_TIMEOUT)
         except Exception as error:
             raise _translate_file_error(error, path) from error
         return [
@@ -465,19 +509,23 @@ class DaytonaSandboxSession:
 
     async def make_dir(self, path: str) -> None:
         try:
-            await self._require_sandbox().fs.create_folder(self._path(path), '755')
+            await self._require_sandbox().fs.create_folder(
+                self._path(path), '755', request_timeout=_DEFAULT_REQUEST_TIMEOUT
+            )
         except Exception as error:
             raise _translate_error(error, unavailable=False) from error
 
     async def remove(self, path: str) -> None:
         try:
-            await self._require_sandbox().fs.delete_file(self._path(path), recursive=True)
+            await self._require_sandbox().fs.delete_file(
+                self._path(path), recursive=True, request_timeout=_DEFAULT_REQUEST_TIMEOUT
+            )
         except Exception as error:
             raise _translate_file_error(error, path) from error
 
     async def exists(self, path: str) -> bool:
         try:
-            await self._require_sandbox().fs.get_file_info(self._path(path))
+            await self._require_sandbox().fs.get_file_info(self._path(path), request_timeout=_DEFAULT_REQUEST_TIMEOUT)
         except Exception as error:
             try:
                 from daytona import DaytonaNotFoundError
@@ -554,6 +602,46 @@ async def _finish_cleanup(operation: Awaitable[object], *, then: Callable[[], No
         raise
     if then is not None:
         then()
+
+
+async def _delete_sandbox(sandbox_id: str) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Delete one sandbox by identity without starting it."""
+    try:
+        from daytona import AsyncDaytona, DaytonaNotFoundError
+    except ImportError as error:
+        raise DaytonaSandboxError(
+            'The `daytona` package is required. Install it with `uv add "pydantic-ai-harness[daytona]"`.'
+        ) from error
+
+    client = AsyncDaytona()
+
+    async def delete(sandbox: AsyncSandbox) -> None:
+        await client.delete(sandbox, timeout=_DEFAULT_LIFECYCLE_TIMEOUT, wait=True)
+
+    try:
+        sandbox = await _finish_on_cancellation(
+            client.get(sandbox_id, request_timeout=_DEFAULT_REQUEST_TIMEOUT), on_cancel=delete
+        )
+        await _finish_on_cancellation(delete(sandbox))
+    except asyncio.CancelledError:
+        try:
+            await _finish_cleanup(asyncio.wait_for(client.close(), _DEFAULT_REQUEST_TIMEOUT))
+        except Exception:
+            pass
+        raise
+    except DaytonaNotFoundError:
+        pass
+    except Exception as error:
+        try:
+            await _finish_cleanup(asyncio.wait_for(client.close(), _DEFAULT_REQUEST_TIMEOUT))
+        except Exception:
+            pass
+        raise _translate_error(error, unavailable=False) from error
+
+    try:
+        await _finish_cleanup(asyncio.wait_for(client.close(), _DEFAULT_REQUEST_TIMEOUT))
+    except Exception as error:
+        raise _translate_error(error, unavailable=False) from error
 
 
 def _positive_int(name: str, value: int) -> None:

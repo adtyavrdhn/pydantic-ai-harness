@@ -14,8 +14,7 @@ from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai_harness.daytona_sandbox._backend import PROVIDER, DaytonaSandboxBackend
 from pydantic_ai_harness.daytona_sandbox._session import (
     DEFAULT_AUTO_STOP_MINUTES,
-    DaytonaSandboxAuthError,
-    DaytonaSandboxError,
+    _delete_sandbox,  # pyright: ignore[reportPrivateUsage]
 )
 
 
@@ -93,7 +92,14 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
             network_block_all=self.network_block_all,
         )
         ref = SandboxRef(provider=PROVIDER, sandbox_id=backend.sandbox_id)
-        await backend.close(terminate=False)
+        try:
+            await backend.close(terminate=False)
+        except BaseException:
+            try:
+                await backend._cleanup_failed_acquisition()  # pyright: ignore[reportPrivateUsage]
+            except Exception:
+                pass
+            raise
         return ref
 
     async def get_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef | None) -> SandboxBackend | None:
@@ -104,39 +110,4 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
     async def release_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> None:
         if self.sandbox_id is not None or ref.provider != PROVIDER:
             return
-        try:
-            from daytona import (
-                AsyncDaytona,
-                DaytonaAuthenticationError,
-                DaytonaAuthorizationError,
-                DaytonaNotFoundError,
-            )
-        except ImportError as error:
-            raise DaytonaSandboxError(
-                'The `daytona` package is required. Install it with `uv add "pydantic-ai-harness[daytona]"`.'
-            ) from error
-
-        client = AsyncDaytona()
-        try:
-            sandbox = await client.get(ref.sandbox_id)
-            await client.delete(sandbox, timeout=60, wait=True)
-        except DaytonaNotFoundError:
-            pass
-        except (DaytonaAuthenticationError, DaytonaAuthorizationError) as error:
-            try:
-                await client.close()
-            except Exception:
-                pass
-            raise DaytonaSandboxAuthError(
-                'Daytona rejected the credentials. Set DAYTONA_API_KEY and try again.'
-            ) from error
-        except Exception as error:
-            try:
-                await client.close()
-            except Exception:
-                pass
-            raise DaytonaSandboxError(str(error)) from error
-        try:
-            await client.close()
-        except Exception as error:
-            raise DaytonaSandboxError(str(error)) from error
+        await _delete_sandbox(ref.sandbox_id)
