@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable
 from copy import copy
-from dataclasses import KW_ONLY, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from pydantic_ai.agent.abstract import AgentInstructions
@@ -98,9 +98,6 @@ class Memory(AbstractCapability[AgentDepsT]):
 
     injection_errors: Literal['ignore', 'raise'] = 'ignore'
     """Whether store failures during automatic injection are ignored or raised."""
-
-    _: KW_ONLY
-    id: str | None = 'memory'
 
     _resolved_scope: tuple[MemoryStore, str] | None = field(default=None, init=False, repr=False, compare=False)
 

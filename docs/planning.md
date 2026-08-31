@@ -160,6 +160,10 @@ Addressing steps by mutable integer index (insert/remove/reorder) is error-prone
 
 The plan is never injected into the system prompt or instructions. Static usage guidance goes there (cache-stable); only the mutable plan rides the ephemeral tail reminder, which lives solely in the per-request copy and is never persisted. Set `inject=False` to disable it. Pydantic AI maps `CachePoint` for models whose profiles support prompt caching; on other models it is ignored.
 
+With a durable-execution capability attached, the plan read used to build that reminder is a
+journaled capability operation. Replay reuses the recorded plan instead of reading the store again.
+Set an explicit, stable `id` on `Planning` so workers recover the operation under the same identity.
+
 ## Configuration
 
 ```python

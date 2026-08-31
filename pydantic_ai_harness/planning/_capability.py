@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from copy import copy
-from dataclasses import KW_ONLY, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
@@ -69,9 +69,6 @@ class Planning(AbstractCapability[AgentDepsT]):
     agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[Planning()])
     ```
     """
-
-    _: KW_ONLY
-    id: str | None = 'planning'
 
     guidance: str | None = None
     """Static planning guidance for the system prompt. Cache-stable.

@@ -6,7 +6,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
 from pydantic_ai.messages import (
     BinaryContent,
     CachePoint,
@@ -28,6 +28,7 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.system_reminders import (
+    AsyncDynamicReminder,
     DynamicReminder,
     GoalReanchor,
     LLMReminder,
@@ -591,9 +592,10 @@ class TestLLMReminder:
     async def test_generation_dispatches_as_durable_operation(self) -> None:
         durability = RecordingDurability()
         capability = SystemReminders(
+            id='system_reminders',
             dynamic_reminders=[
                 LLMReminder(model=FunctionModel(lambda _messages, _info: ModelResponse(parts=[TextPart('refocus')])))
-            ]
+            ],
         )
         agent = Agent(TestModel(call_tools=[]), name='system_reminders', capabilities=[capability, durability])
 
@@ -601,7 +603,23 @@ class TestLLMReminder:
 
         bound = RecordingDurability.from_agent(agent)
         assert bound is not None
-        assert any('__capability__' in name and 'generate_reminder' in name for name, _ in bound.calls), bound.calls
+        assert 'system_reminders__capability__system_reminders.generate_reminder' in {name for name, _ in bound.calls}
+
+    async def test_generation_uses_stable_snapshot_when_an_earlier_callback_mutates_configuration(self) -> None:
+        dynamic: list[DynamicReminder[None] | AsyncDynamicReminder[None]] = []
+
+        def remove_self(ctx: RunContext[None]) -> None:
+            del ctx
+            dynamic.pop(0)
+            return None
+
+        dynamic.extend([remove_self, LLMReminder(model=_capture_model({}, output='generated from snapshot'))])
+        capability = SystemReminders(dynamic_reminders=dynamic)
+        messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart('keep going')])]
+
+        seen = await _run_wrap(capability, messages, ctx=_ctx(messages=messages))
+
+        assert _fired_text(seen) == 'generated from snapshot'
 
     async def test_generates_from_transcript(self) -> None:
         store: dict[str, str] = {}

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from copy import copy
-from dataclasses import KW_ONLY, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Generic, Literal, TypeGuard
 
 from pydantic_ai import Agent
@@ -121,17 +121,21 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
     on_fire: Callable[[str], None] | None = None
     """Optional observability callback invoked with each rendered reminder as it fires."""
 
-    _: KW_ONLY
-    id: str | None = 'system_reminders'
-
     _request_count: int = field(default=0, init=False, repr=False, compare=False)
     # Keyed by `id(reminder)`, not list index: a user callback that inserts or removes a
     # reminder mid-run must not shift another reminder onto a stale budget.
     _fire_counts: dict[int, int] = field(default_factory=dict[int, int], init=False, repr=False, compare=False)
+    _dynamic_snapshot: tuple[DynamicReminder[AgentDepsT] | AsyncDynamicReminder[AgentDepsT], ...] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if not self.reminders and not self.dynamic_reminders:
             raise ValueError('At least one static or dynamic reminder must be provided.')
+        # Dynamic configuration is a sequence, not a live queue. Freeze caller-owned lists so
+        # callbacks cannot change the operation index used to recover an LLM reminder.
+        self.dynamic_reminders = tuple(self.dynamic_reminders)
+        self._dynamic_snapshot = self.dynamic_reminders
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> SystemReminders[AgentDepsT]:
         """Return a fresh per-run instance with reset counters (config preserved).
@@ -142,6 +146,7 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
         clone = copy(self)
         clone._request_count = 0
         clone._fire_counts = {}
+        clone._dynamic_snapshot = tuple(self.dynamic_reminders)
         return clone
 
     async def wrap_model_request(
@@ -218,10 +223,17 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
 
     async def _collect_dynamic(self, ctx: RunContext[AgentDepsT]) -> list[str]:
         texts: list[str] = []
-        # Snapshot so a callback that appends to `dynamic_reminders` cannot extend the loop.
-        for index, dynamic in enumerate(tuple(self.dynamic_reminders)):
+        # Keep one stable snapshot for both iteration and durable index lookup. A callback may
+        # mutate the public sequence while this request is in progress.
+        snapshot = self._dynamic_snapshot
+        if snapshot is None:
+            snapshot = self._dynamic_snapshot = tuple(self.dynamic_reminders)
+        for index, dynamic in enumerate(snapshot):
             if isinstance(dynamic, LLMReminder):
-                result = dynamic(ctx, operation=lambda transcript: self._generate_reminder(ctx, index, transcript))
+                try:
+                    result = await self._generate_reminder(ctx, index)
+                except Exception:
+                    result = GoalReanchor[AgentDepsT]()(ctx)
             else:
                 result = dynamic(ctx)
             if isinstance(result, Awaitable):
@@ -231,11 +243,14 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
         return texts
 
     @durable_operation('generate_reminder')
-    async def _generate_reminder(self, ctx: RunContext[AgentDepsT], index: int, transcript: str) -> str | None:
-        reminder = self.dynamic_reminders[index]
+    async def _generate_reminder(self, ctx: RunContext[AgentDepsT], index: int) -> str | None:
+        snapshot = self._dynamic_snapshot
+        if snapshot is None:  # pragma: no cover - operation is invoked from `_collect_dynamic`
+            raise RuntimeError('Dynamic reminder snapshot is not initialized.')
+        reminder = snapshot[index]
         if not _is_llm_reminder(reminder):  # pragma: no cover - operation inputs originate above
             raise RuntimeError(f'Dynamic reminder {index} is no longer an LLMReminder.')
-        return await reminder.generate(ctx, transcript)
+        return await reminder(ctx)
 
     @classmethod
     def get_serialization_name(cls) -> str | None:
@@ -299,27 +314,13 @@ class LLMReminder(Generic[AgentDepsT]):
         if self.max_context_messages < 1:
             raise ValueError(f'max_context_messages must be >= 1, got {self.max_context_messages}')
 
-    async def __call__(
-        self,
-        ctx: RunContext[AgentDepsT],
-        *,
-        operation: Callable[[str], Awaitable[str | None]] | None = None,
-    ) -> str | None:
-        try:
-            transcript = _build_compact_transcript(ctx.messages, self.max_context_messages)
-            if operation is not None:
-                return await operation(transcript)
-            return await self.generate(ctx, transcript)
-        except Exception:
-            return GoalReanchor[AgentDepsT]()(ctx)
-
-    async def generate(self, ctx: RunContext[AgentDepsT], transcript: str) -> str | None:
-        """Generate reminder text from an already-bounded transcript."""
+    async def __call__(self, ctx: RunContext[AgentDepsT]) -> str | None:
         try:
             agent = self._agent
             if agent is None:
                 agent = Agent(self.model, instructions=self.instructions, output_type=str)
                 self._agent = agent
+            transcript = _build_compact_transcript(ctx.messages, self.max_context_messages)
             result = await agent.run(transcript, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
             text = result.output.strip()
             return text or None

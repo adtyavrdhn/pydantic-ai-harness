@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any
+from uuid import uuid4
 
 from pydantic_ai import CallToolsNode, ModelRequestNode
-from pydantic_ai.capabilities import AbstractCapability, durable_operation
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.capabilities.abstract import AgentNode, NodeResult, WrapRunHandler
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
@@ -79,9 +80,6 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     to load a prior snapshot, then pass the result to
     `Agent.run(..., message_history=...)`.
     """
-
-    _: KW_ONLY
-    id: str | None = 'step_persistence'
 
     store: StepStore = field(default_factory=InMemoryStepStore)
     """Backend that records events, snapshots, and tool effects."""
@@ -189,60 +187,14 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         return replace(self, run_id=resolved_run_id, parent_run_id=inferred_parent)
 
     def _derive_run_id(self, ctx: RunContext[AgentDepsT]) -> str:
-        if ctx.run_id is None:  # pragma: no cover - the agent graph assigns run ids before `for_run`
-            raise RuntimeError('StepPersistence needs the agent graph to assign `RunContext.run_id`.')
         if self.agent_name is not None:
-            return f'{self.agent_name}-{ctx.run_id[-8:]}'
-        return ctx.run_id
+            return f'{self.agent_name}-{uuid4().hex[:8]}'
+        return ctx.run_id or str(uuid4())
 
     def _effective_run_id(self, ctx: RunContext[AgentDepsT]) -> str:
         if self.run_id is not None:
             return self.run_id
-        if ctx.run_id is not None:
-            return ctx.run_id
-        raise RuntimeError('StepPersistence run id was not materialized by `for_run`.')
-
-    @durable_operation('register_run')
-    async def _register_run(self, record: RunRecord) -> None:
-        await self.store.register_run(record)
-
-    @durable_operation('append_event')
-    async def _append_event(self, event: StepEvent) -> None:
-        await self.store.append_event(event)
-
-    @durable_operation('save_snapshot')
-    async def _save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
-        await self.store.save_snapshot(snapshot)
-
-    @durable_operation('record_tool_effect')
-    async def _record_tool_effect(self, effect: ToolEffectRecord) -> None:
-        await self.store.record_tool_effect(effect)
-
-    @durable_operation('finish_tool_effect')
-    async def _finish_tool_effect(
-        self,
-        run_id: str,
-        tool_call_id: str,
-        tool_name: str,
-        status: Literal['completed', 'failed'],
-        error: str | None = None,
-    ) -> None:
-        prior = await self.store.get_tool_effect(run_id=run_id, tool_call_id=tool_call_id)
-        now = datetime.now(timezone.utc)
-        await self.store.record_tool_effect(
-            ToolEffectRecord(
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                run_id=run_id,
-                status=status,
-                started_at=prior.started_at if prior is not None else now,
-                ended_at=now,
-                idempotency_key=prior.idempotency_key if prior is not None else None,
-                effect_summary=(
-                    prior.effect_summary if prior is not None and prior.effect_summary is not None else error
-                ),
-            )
-        )
+        return ctx.run_id or str(uuid4())
 
     def _make_event(
         self,
@@ -300,7 +252,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
                 'Explicit `run_id` is single-shot; pass `conversation_id=` to '
                 '`Agent.run` for multi-turn grouping instead.'
             )
-        await self._register_run(
+        await self.store.register_run(
             RunRecord(
                 run_id=run_id,
                 conversation_id=ctx.conversation_id,
@@ -309,7 +261,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
                 metadata=dict(self.metadata),
             )
         )
-        await self._append_event(self._make_event(ctx, kind='run_started'))
+        await self.store.append_event(self._make_event(ctx, kind='run_started'))
 
     async def after_run(
         self,
@@ -333,7 +285,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         messages = result.all_messages()
         if len(messages) > snapshot_saved.get():
             if is_provider_valid(messages):
-                await self._save_snapshot(
+                await self.store.save_snapshot(
                     ContinuableSnapshot(
                         run_id=self._effective_run_id(ctx),
                         step_index=ctx.run_step,
@@ -343,7 +295,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
                         agent_name=self.agent_name,
                     )
                 )
-        await self._append_event(self._make_event(ctx, kind='run_completed'))
+        await self.store.append_event(self._make_event(ctx, kind='run_completed'))
         return result
 
     def _stash_live_history(self, ctx: RunContext[AgentDepsT]) -> None:
@@ -376,7 +328,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         step_index: int,
         state: SnapshotState = 'complete',
     ) -> None:
-        await self._save_snapshot(
+        await self.store.save_snapshot(
             ContinuableSnapshot(
                 run_id=self._effective_run_id(ctx),
                 step_index=step_index,
@@ -418,7 +370,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
             if _has_model_response(captured):
                 state: SnapshotState = 'complete' if is_provider_valid(captured) else 'interrupted'
                 await self._save_continuable_snapshot(ctx, captured, step_index, state)
-        await self._append_event(self._make_event(ctx, kind='run_failed', error=repr(error)))
+        await self.store.append_event(self._make_event(ctx, kind='run_failed', error=repr(error)))
         raise error
 
     async def before_model_request(
@@ -426,7 +378,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
-        await self._append_event(self._make_event(ctx, kind='model_request_started'))
+        await self.store.append_event(self._make_event(ctx, kind='model_request_started'))
         return request_context
 
     async def after_model_request(
@@ -436,7 +388,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
         response: ModelResponse,
     ) -> ModelResponse:
-        await self._append_event(self._make_event(ctx, kind='model_request_completed'))
+        await self.store.append_event(self._make_event(ctx, kind='model_request_completed'))
         return response
 
     async def on_model_request_error(
@@ -453,7 +405,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         `on_run_error`'s save covers it. A failure the model layer recovers
         from (retry, fallback) needs no rescue at all.
         """
-        await self._append_event(self._make_event(ctx, kind='model_request_failed', error=repr(error)))
+        await self.store.append_event(self._make_event(ctx, kind='model_request_failed', error=repr(error)))
         raise error
 
     async def before_tool_execute(
@@ -465,7 +417,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         args: dict[str, Any],
     ) -> dict[str, Any]:
         run_id = self._effective_run_id(ctx)
-        await self._record_tool_effect(
+        await self.store.record_tool_effect(
             ToolEffectRecord(
                 tool_call_id=call.tool_call_id,
                 tool_name=tool_def.name,
@@ -473,7 +425,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
                 status='started',
             )
         )
-        await self._append_event(
+        await self.store.append_event(
             self._make_event(
                 ctx,
                 kind='tool_call_started',
@@ -493,8 +445,20 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         result: Any,
     ) -> Any:
         run_id = self._effective_run_id(ctx)
-        await self._finish_tool_effect(run_id, call.tool_call_id, tool_def.name, 'completed')
-        await self._append_event(
+        prior = await self.store.get_tool_effect(run_id=run_id, tool_call_id=call.tool_call_id)
+        await self.store.record_tool_effect(
+            ToolEffectRecord(
+                tool_call_id=call.tool_call_id,
+                tool_name=tool_def.name,
+                run_id=run_id,
+                status='completed',
+                started_at=prior.started_at if prior is not None else datetime.now(timezone.utc),
+                ended_at=datetime.now(timezone.utc),
+                idempotency_key=prior.idempotency_key if prior is not None else None,
+                effect_summary=prior.effect_summary if prior is not None else None,
+            )
+        )
+        await self.store.append_event(
             self._make_event(
                 ctx,
                 kind='tool_call_completed',
@@ -514,8 +478,21 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         error: Exception,
     ) -> Any:
         run_id = self._effective_run_id(ctx)
-        await self._finish_tool_effect(run_id, call.tool_call_id, tool_def.name, 'failed', repr(error))
-        await self._append_event(
+        prior = await self.store.get_tool_effect(run_id=run_id, tool_call_id=call.tool_call_id)
+        prior_summary = prior.effect_summary if prior is not None else None
+        await self.store.record_tool_effect(
+            ToolEffectRecord(
+                tool_call_id=call.tool_call_id,
+                tool_name=tool_def.name,
+                run_id=run_id,
+                status='failed',
+                started_at=prior.started_at if prior is not None else datetime.now(timezone.utc),
+                ended_at=datetime.now(timezone.utc),
+                idempotency_key=prior.idempotency_key if prior is not None else None,
+                effect_summary=prior_summary if prior_summary is not None else repr(error),
+            )
+        )
+        await self.store.append_event(
             self._make_event(
                 ctx,
                 kind='tool_call_failed',
@@ -564,7 +541,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
             if isinstance(result, ModelRequestNode):
                 messages = [*messages, result.request]
             if is_provider_valid(messages):
-                await self._save_snapshot(
+                await self.store.save_snapshot(
                     ContinuableSnapshot(
                         run_id=self._effective_run_id(ctx),
                         step_index=ctx.run_step,

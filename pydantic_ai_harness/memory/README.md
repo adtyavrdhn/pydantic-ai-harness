@@ -53,7 +53,7 @@ memory = Memory(
 
 Only the current request retains the injected user-role part, so copies do not accumulate in message history. Each model request receives the latest bounded snapshot, including after `write_memory` or an external update changes `MEMORY.md`.
 
-Set `inject_memory=False` for cache-stable prompts or durable workflows. The tools remain available, and the model can fetch memory only when it needs it:
+Set `inject_memory=False` for cache-stable prompts. The tools remain available, and the model can fetch memory only when it needs it:
 
 ```python
 from pydantic_ai_harness import Memory
@@ -224,10 +224,10 @@ The serializable backends are `memory`, `file`, and `sqlite`. A namespace callab
 | Execution mode | Support |
 | --- | --- |
 | Normal `Agent.run` calls | Supported with automatic injection or on-demand tools. |
-| Temporal and Prefect | Use `inject_memory=False` with a statically configured store and on-demand tools. Automatic injection performs backend I/O in a model-request hook and is not workflow-safe. |
-| DBOS | Normal execution works, but ordinary `FunctionToolset` calls are not DBOS-durable. Wrap memory operations in application-provided DBOS steps when durability is required. |
+| Temporal and Prefect | Automatic snapshot loading is a journaled capability operation. On replay, the recorded snapshot is reused. |
+| DBOS | Automatic snapshot loading is a DBOS step. Ordinary `FunctionToolset` calls are not DBOS-durable; wrap memory tool operations in application-provided DBOS steps when required. |
 
-The memory backend and the workflow state backend are independent. Durable execution does not make an in-memory notebook persistent.
+Set an explicit, stable `id` on `Memory` when using durable execution so workers recover the snapshot operation under the same identity. The memory backend and workflow state backend remain independent. Durable execution does not make an in-memory notebook persistent.
 
 ## Security and provenance
 

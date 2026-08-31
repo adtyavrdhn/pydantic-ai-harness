@@ -240,6 +240,11 @@ instance to `Summarize(model=...)` to override, or a `summarize` callable to byp
 built-in prompt entirely. The `summary_prompt` template on the capability must contain both
 `{tool_name}` and `{output}` placeholders.
 
+With a durable-execution capability attached, built-in model summarization is a journaled
+capability operation. Set an explicit, stable `id` on `ToolOutputLimits` so workers recover it
+under the same identity. A custom `summarize` callable runs directly and may be called again on
+replay because arbitrary callables cannot be reconstructed as durable operations.
+
 ## Edge cases
 
 - Binary returns spill verbatim and are never stringify-truncated; `Truncate` / `Summarize`

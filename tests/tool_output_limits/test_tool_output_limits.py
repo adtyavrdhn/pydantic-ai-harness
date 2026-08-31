@@ -636,7 +636,7 @@ class TestSummarize:
 
         durability = RecordingDurability()
         cap: ToolOutputLimits[Any] = ToolOutputLimits(
-            bands=[Band(over=5, action=Summarize(model=_fixed_model('THE SUMMARY')))]
+            id='tool_output_limits', bands=[Band(over=5, action=Summarize(model=_fixed_model('THE SUMMARY')))]
         )
 
         agent = Agent(
@@ -649,9 +649,7 @@ class TestSummarize:
 
         bound = RecordingDurability.from_agent(agent)
         assert bound is not None
-        assert any('__capability__tool_output_limits' in name and 'summarize' in name for name, _ in bound.calls), (
-            bound.calls
-        )
+        assert 'tool_output_limits__capability__tool_output_limits.summarize' in {name for name, _ in bound.calls}
 
     async def test_custom_summarizer_bypasses_durable_operation(self):
         def large_output() -> str:
@@ -659,7 +657,7 @@ class TestSummarize:
 
         durability = RecordingDurability()
         cap: ToolOutputLimits[Any] = ToolOutputLimits(
-            bands=[Band(over=5, action=Summarize(summarize=lambda _name, _text: 'summary'))]
+            id='tool_output_limits', bands=[Band(over=5, action=Summarize(summarize=lambda _name, _text: 'summary'))]
         )
 
         agent = Agent(
@@ -672,7 +670,9 @@ class TestSummarize:
 
         bound = RecordingDurability.from_agent(agent)
         assert bound is not None
-        assert not any('__capability__tool_output_limits.summarize' in name for name, _ in bound.calls)
+        assert 'custom_tool_output_limits__capability__tool_output_limits.summarize' not in {
+            name for name, _ in bound.calls
+        }
 
     async def test_custom_sync_summarizer(self):
         cap: ToolOutputLimits[object] = ToolOutputLimits(

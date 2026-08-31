@@ -47,7 +47,6 @@ from pydantic_ai_harness.spend import (
     UnpricedModelError,
     UnpricedModelWarning,
 )
-from tests._recording_durability import RecordingDurability  # pyright: ignore[reportMissingTypeStubs]
 
 pytestmark = pytest.mark.anyio
 
@@ -801,23 +800,20 @@ class TestCompositionWarning:
 
         Core also requires its dispatch to be the innermost wrapper, so listing `SpendLimits`
         after it is the one correction a reader must not make. What `SpendLimits` does not
-        Counter and clock operations are journaled separately from the model request.
+        support under a durable engine is reported separately, by refusing the workflow clock.
         """
-        durability = RecordingDurability()
+        pytest.importorskip('temporalio')
+        from pydantic_ai.durable_exec.temporal import TemporalDurability  # noqa: PLC0415  # needs the temporal extra
+
         guard = SpendLimits[None](budgets=[Budget(window='total')])
         agent = Agent(
             _scripted_usage(),
             name='durable',
             deps_type=type(None),
-            capabilities=[guard, durability],
+            capabilities=[guard, TemporalDurability[None]()],
         )
 
         await agent.run('hi')
-        bound = RecordingDurability.from_agent(agent)
-        assert bound is not None
-        names = [name for name, _ in bound.calls if '__capability__' in name]
-        for operation in ('now', 'read', 'accrue'):
-            assert any(operation in name for name in names), names
 
     async def test_a_capability_that_only_looks_durable_is_still_reported(self):
         """The exclusion matches the durability base type, not attributes anything could carry."""
@@ -2541,9 +2537,16 @@ class TestSpec:
 
 
 class TestDurableClock:
-    """Clock failures pass through when no durability engine handles the operation."""
+    """Temporal's workflow sandbox restricts `datetime.now`, which these hooks read."""
 
-    async def test_a_restricted_clock_error_is_left_alone_without_durability(self):
+    async def test_a_restricted_clock_is_re_raised_naming_the_replay_problem(self):
+        """The sandbox refuses a symptom; the message names the replay behind it.
+
+        A caller told only to pass the module through would silence the error and get a counter
+        Temporal replays. Matched by class name so the translation costs no `temporalio` import;
+        the fake stands in for the real exception, which `tests/spend/test_temporal.py`
+        exercises end to end.
+        """
 
         class RestrictedWorkflowAccessError(Exception):
             pass
@@ -2553,9 +2556,9 @@ class TestDurableClock:
 
         guard = SpendLimits[None](budgets=[Budget(usd=Decimal('5'))], clock=restricted)
 
-        with pytest.raises(RestrictedWorkflowAccessError, match='datetime.datetime.now'):
+        with pytest.raises(UserError, match='not safe to run inside a Temporal workflow'):
             await _gate(guard)
-        with pytest.raises(RestrictedWorkflowAccessError, match='datetime.datetime.now'):
+        with pytest.raises(UserError, match='exhausted'):
             await guard.status()
 
     async def test_any_other_clock_failure_is_left_alone(self):

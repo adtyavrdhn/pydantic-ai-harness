@@ -37,7 +37,7 @@ dependencies = [
     # indexer have to recognise `ToolAvailabilityDeltaPart` (2.23.0), the one `ModelRequestPart`
     # carrying no `content`, so code walking request parts raises `AttributeError` rather than
     # ignoring it (#577); `CodeMode` reads `ModelRequestParameters.revealed_tool_names` (2.22.0).
-    "pydantic-ai-slim>=2.33.0",
+    "pydantic-ai-slim>=2.36.0",
 ]
 
 [project.optional-dependencies]
@@ -168,9 +168,6 @@ bump = true
 # `pydantic-ai-slim` floor above is the release built on it, so both halves of that pair resolve
 # together under every resolution mode. Move this floor whenever that one moves.
 override-dependencies = ['anthropic>=1.0.0', 'openai>=2.45.0']
-
-[tool.uv.sources]
-pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", branch = "main", subdirectory = "pydantic_ai_slim" }
 
 
 [tool.hatch.build.targets.wheel]

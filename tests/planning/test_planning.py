@@ -72,14 +72,14 @@ async def test_plan_read_dispatches_as_durable_operation() -> None:
     agent = Agent(
         TestModel(),
         name='planning',
-        capabilities=[Planning(store=store), durability],
+        capabilities=[Planning(store=store, id='planning'), durability],
     )
 
     await agent.run('continue')
 
     bound = RecordingDurability.from_agent(agent)
     assert bound is not None
-    assert any('__capability__' in name and 'read_plan' in name for name, _ in bound.calls), bound.calls
+    assert 'planning__capability__planning.read_plan' in {name for name, _ in bound.calls}
 
 
 # --- Types ------------------------------------------------------------------

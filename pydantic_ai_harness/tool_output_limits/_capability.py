@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, TypeGuard, cast
 
 from pydantic_ai import FunctionToolset
@@ -121,9 +121,6 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         )
         ```
     """
-
-    _: KW_ONLY
-    id: str | None = 'tool_output_limits'
 
     bands: Sequence[Band] = field(default_factory=_default_bands)
     """Ordered size bands. The first band whose `over` threshold is met wins."""
