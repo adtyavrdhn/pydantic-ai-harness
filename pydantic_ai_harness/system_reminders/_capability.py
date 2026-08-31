@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
+from copy import copy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Generic, Literal
+from typing import TYPE_CHECKING, Generic, Literal, TypeGuard
 
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, durable_operation
 from pydantic_ai.messages import (
     CachePoint,
     ModelMessage,
@@ -23,10 +24,11 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.tools import AgentDepsT, RunContext
 
+from pydantic_ai_harness._usage import reserved_usage_limits
+
 if TYPE_CHECKING:
     from pydantic_ai.capabilities.abstract import WrapModelRequestHandler
     from pydantic_ai.models import ModelRequestContext
-    from pydantic_ai.usage import UsageLimits
 
 
 @dataclass
@@ -123,19 +125,29 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
     # Keyed by `id(reminder)`, not list index: a user callback that inserts or removes a
     # reminder mid-run must not shift another reminder onto a stale budget.
     _fire_counts: dict[int, int] = field(default_factory=dict[int, int], init=False, repr=False, compare=False)
+    _dynamic_snapshot: tuple[DynamicReminder[AgentDepsT] | AsyncDynamicReminder[AgentDepsT], ...] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if not self.reminders and not self.dynamic_reminders:
             raise ValueError('At least one static or dynamic reminder must be provided.')
+        # Dynamic configuration is a sequence, not a live queue. Freeze caller-owned lists so
+        # callbacks cannot change the operation index used to recover an LLM reminder.
+        self.dynamic_reminders = tuple(self.dynamic_reminders)
+        self._dynamic_snapshot = self.dynamic_reminders
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> SystemReminders[AgentDepsT]:
         """Return a fresh per-run instance with reset counters (config preserved).
 
-        `replace` builds a new instance whose generated `__init__` re-initializes the
-        `init=False` fields -- `_request_count` back to `0` and `_fire_counts` to an empty
-        dict -- so concurrent runs on the same agent never share fire state.
+        The clone resets `_request_count` and `_fire_counts`, so concurrent runs on the
+        same agent do not share fire state.
         """
-        return replace(self)
+        clone = copy(self)
+        clone._request_count = 0
+        clone._fire_counts = {}
+        clone._dynamic_snapshot = tuple(self.dynamic_reminders)
+        return clone
 
     async def wrap_model_request(
         self,
@@ -211,14 +223,34 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
 
     async def _collect_dynamic(self, ctx: RunContext[AgentDepsT]) -> list[str]:
         texts: list[str] = []
-        # Snapshot so a callback that appends to `dynamic_reminders` cannot extend the loop.
-        for dynamic in tuple(self.dynamic_reminders):
-            result = dynamic(ctx)
+        # Keep one stable snapshot for both iteration and durable index lookup. A callback may
+        # mutate the public sequence while this request is in progress.
+        snapshot = self._dynamic_snapshot
+        if snapshot is None:
+            snapshot = self._dynamic_snapshot = tuple(self.dynamic_reminders)
+        for index, dynamic in enumerate(snapshot):
+            if isinstance(dynamic, LLMReminder):
+                try:
+                    result = await self._generate_reminder(ctx, index)
+                except Exception:
+                    result = GoalReanchor[AgentDepsT]()(ctx)
+            else:
+                result = dynamic(ctx)
             if isinstance(result, Awaitable):
                 result = await result
             if result is not None:
                 texts.append(result)
         return texts
+
+    @durable_operation('generate_reminder')
+    async def _generate_reminder(self, ctx: RunContext[AgentDepsT], index: int) -> str | None:
+        snapshot = self._dynamic_snapshot
+        if snapshot is None:  # pragma: no cover - operation is invoked from `_collect_dynamic`
+            raise RuntimeError('Dynamic reminder snapshot is not initialized.')
+        reminder = snapshot[index]
+        if not _is_llm_reminder(reminder):  # pragma: no cover - operation inputs originate above
+            raise RuntimeError(f'Dynamic reminder {index} is no longer an LLMReminder.')
+        return await reminder(ctx)
 
     @classmethod
     def get_serialization_name(cls) -> str | None:
@@ -269,11 +301,8 @@ class LLMReminder(Generic[AgentDepsT]):
     `GoalReanchor` text is used instead. Gate it on a cadence (see the docs) if per-turn
     generation is too costly.
 
-    The generation runs inside `wrap_model_request`, so under durable execution (Temporal,
-    DBOS, Prefect) it executes in orchestration context rather than a durable step: the model
-    call is non-deterministic on replay and is not checkpointed, and its errors fall back
-    silently to `GoalReanchor`. For durable runs prefer `GoalReanchor`, which makes no model
-    call, or gate `LLMReminder` off.
+    When owned by `SystemReminders`, generation is a journaled capability operation under a
+    durability engine. Replay restores the generated text instead of repeating the model call.
     """
 
     model: Model | KnownModelName | str
@@ -292,24 +321,15 @@ class LLMReminder(Generic[AgentDepsT]):
                 agent = Agent(self.model, instructions=self.instructions, output_type=str)
                 self._agent = agent
             transcript = _build_compact_transcript(ctx.messages, self.max_context_messages)
-            result = await agent.run(transcript, usage=ctx.usage, usage_limits=_reserved_limits(ctx.usage_limits))
+            result = await agent.run(transcript, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
             text = result.output.strip()
             return text or None
         except Exception:
             return GoalReanchor[AgentDepsT]()(ctx)
 
 
-def _reserved_limits(limits: UsageLimits | None) -> UsageLimits | None:
-    """The parent run's limits with one request held back for the model call this reminder precedes.
-
-    `wrap_model_request` runs after the parent request already cleared `check_before_request`, so
-    a nested run spending the last slot would let that approved request push the run one past
-    `request_limit`. Holding the slot back makes the nested run raise `UsageLimitExceeded` first;
-    the caller falls back to `GoalReanchor`, which costs no request, and the budget holds.
-    """
-    if limits is None or limits.request_limit is None:
-        return limits
-    return replace(limits, request_limit=max(0, limits.request_limit - 1))
+def _is_llm_reminder(value: object) -> TypeGuard[LLMReminder[AgentDepsT]]:
+    return isinstance(value, LLMReminder)
 
 
 def _should_fire(reminder: Reminder[AgentDepsT], count: int) -> bool:

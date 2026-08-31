@@ -46,6 +46,7 @@ from pydantic_ai_harness.memory import (
     MemoryToolset,
     SqliteMemoryStore,
 )
+from tests._recording_durability import RecordingDurability  # pyright: ignore[reportMissingTypeStubs]
 
 pytestmark = pytest.mark.anyio
 
@@ -128,6 +129,19 @@ async def _seed(store: MemoryStore, path: str, content: str) -> MemoryMutation:
         content,
         expected_version=None if current is None else current.version,
     )
+
+
+async def test_snapshot_load_dispatches_as_durable_operation() -> None:
+    store = InMemoryStore()
+    await _seed(store, 'main/MEMORY.md', '- durable fact')
+    durability = RecordingDurability()
+    agent = Agent(TestModel(call_tools=[]), name='memory', capabilities=[Memory(store=store, id='memory'), durability])
+
+    await agent.run('continue')
+
+    bound = RecordingDurability.from_agent(agent)
+    assert bound is not None
+    assert 'memory__capability__memory.load_snapshot' in {name for name, _ in bound.calls}
 
 
 @dataclass
@@ -1381,7 +1395,7 @@ class TestTelemetryAndComposition:
 
     def test_temporal_durability_accepts_static_memory_toolset(self) -> None:
         pytest.importorskip('temporalio')
-        from pydantic_ai.durable_exec.temporal import TemporalDurability
+        from pydantic_ai.durable_exec.temporal import TemporalDurability  # noqa: PLC0415  # needs the temporal extra
 
         Agent(
             TestModel(),
