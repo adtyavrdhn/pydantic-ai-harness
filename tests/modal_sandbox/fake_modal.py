@@ -356,6 +356,7 @@ class FakeModal:
         self.name_lookups: list[tuple[str, str]] = []
         self.named_sandboxes: dict[tuple[str, str], FakeSandbox] = {}
         self.name_lookup_misses = 0
+        self.owned_creates = 0
         self.create_error: Exception | None = None
         self.attach_error: Exception | None = None
         self.attach_poll_result: int | None = None
@@ -435,7 +436,9 @@ class FakeModal:
             control.create_kwargs.append(
                 {'app': app, 'image': image, 'timeout': timeout, 'workdir': workdir, 'env': env, 'name': name}
             )
-            sandbox = FakeSandbox(control, 'sb-owned')
+            control.owned_creates += 1
+            suffix = '' if control.owned_creates == 1 else f'-{control.owned_creates}'
+            sandbox = FakeSandbox(control, f'sb-owned{suffix}')
             control.sandboxes.append(sandbox)
             if name is not None:
                 app_name = str(control.app_lookups[-1]['name'])

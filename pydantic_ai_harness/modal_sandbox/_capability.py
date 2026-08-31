@@ -149,9 +149,19 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
                 if value != default
             ]
             if conflicts:
-                raise ValueError(f'{", ".join(conflicts)} cannot be combined with `session`.')
+                raise ValueError(
+                    f'{", ".join(conflicts)} cannot be combined with `session`, which already owns '
+                    'the sandbox and its configuration.' + self._command_ceiling_hint(conflicts)
+                )
             return
         if self.sandbox_id is None:
+            ceiling = self.max_command_timeout
+            if ceiling is not None and ceiling > self.sandbox_timeout:
+                raise ValueError(
+                    f'max_command_timeout ({ceiling}) cannot exceed sandbox_timeout '
+                    f'({self.sandbox_timeout}) for an owned sandbox: the sandbox is reaped '
+                    'before such a command could finish. Raise sandbox_timeout instead.'
+                )
             return
         conflicts = [
             name
@@ -168,8 +178,15 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
         if conflicts:
             raise ValueError(
                 f'{", ".join(conflicts)} only apply when creating a sandbox, but `sandbox_id` '
-                'attaches to an existing one.'
+                'attaches to an existing one. Remove them, or drop `sandbox_id` to create a sandbox.'
+                + self._command_ceiling_hint(conflicts)
             )
+
+    @staticmethod
+    def _command_ceiling_hint(rejected: list[str]) -> str:
+        if 'sandbox_timeout' not in rejected:
+            return ''
+        return ' To raise the per-command timeout ceiling on a reused sandbox, set `max_command_timeout`.'
 
     async def acquire_sandbox(self, ctx: RunContext[AgentDepsT]) -> SandboxRef:
         """Create or reuse the sandbox for this logical run."""

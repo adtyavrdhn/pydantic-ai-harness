@@ -128,6 +128,10 @@ class TestOwnedLifecycle:
                 await session.__aenter__()
         assert len(fake_modal.sandboxes) == 1
 
+    def test_rejects_relative_workdir(self) -> None:
+        with pytest.raises(ValueError, match='workdir must be an absolute sandbox path'):
+            ModalSandboxSession(workdir='repo')
+
     async def test_cancel_during_enter_terminates_created_sandbox(self, fake_modal: FakeModal) -> None:
         # A run cancelled while the sandbox is being created must not orphan it: creation is
         # shielded so the handle survives, then the cancellation tears the sandbox down here

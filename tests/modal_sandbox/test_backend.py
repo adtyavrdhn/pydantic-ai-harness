@@ -142,6 +142,20 @@ class TestCreate:
         assert fake_modal.sandboxes[0].terminated is True
         assert fake_modal.sandboxes[0].detached is True
 
+    async def test_cancel_during_create_preserves_cancellation_when_cleanup_fails(
+        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _skip_without_asyncio()
+        create = _GatedCall(fake_modal.module.Sandbox.create, RuntimeError('cleanup failed'))
+        create.release.set()
+        monkeypatch.setattr(fake_modal.module.Sandbox, 'create', create)
+
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            await ModalSandboxBackend.create()
+
+        assert fake_modal.sandboxes[0].detached is True
+
     async def test_task_cancellation_during_create_terminates_the_new_sandbox(
         self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
     ) -> None:
