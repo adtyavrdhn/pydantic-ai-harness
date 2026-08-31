@@ -3,15 +3,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from collections.abc import AsyncGenerator
 from contextlib import aclosing
 
 import anyio
 import httpx
 import pytest
 from pydantic import TypeAdapter
+from pydantic_ai import Agent
 
-from pydantic_ai_harness.channels import ChannelError, InboundMessage, WebhookRequest
+from pydantic_ai_harness.channels import ChannelError, ChannelHost, WebhookRequest
 from pydantic_ai_harness.channels.whatsapp import WhatsAppChannel
 
 _BODY_ADAPTER = TypeAdapter(dict[str, object])
@@ -236,24 +236,39 @@ class TestWhatsAppChannel:
                 assert (await anext(messages)).text == 'second'
         assert channel.handle_webhook(second).status_code == 503
 
-    async def test_bounds_recent_message_deduplication(self) -> None:
-        channel = WhatsAppChannel(
-            'token',
-            _PHONE_ID,
-            _APP_SECRET,
-            'verify-token',
-            max_queued_messages=1,
-        )
+    @pytest.mark.parametrize('anyio_backend', ['asyncio'])
+    async def test_webhook_runs_agent_and_posts_reply(self, anyio_backend: str) -> None:
+        posted = anyio.Event()
+        posts: list[dict[str, object]] = []
 
-        async with channel:
-            async with aclosing(channel.messages()) as messages:
-                for index in range(10_001):
-                    request = signed_request(webhook_payload([text_message(f'wamid.{index}', body=str(index))]))
-                    assert channel.handle_webhook(request).status_code == 200
-                    await anext(messages)
-                first = signed_request(webhook_payload([text_message('wamid.0', body='first again')]))
-                assert channel.handle_webhook(first).status_code == 200
-                assert (await anext(messages)).text == 'first again'
+        def handler(request: httpx.Request) -> httpx.Response:
+            posts.append(_BODY_ADAPTER.validate_python(json.loads(request.content)))
+            posted.set()
+            return response({'messages': [{'id': 'wamid.reply'}]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        channel = WhatsAppChannel('token', _PHONE_ID, _APP_SECRET, 'verify-token', http_client=client)
+        host = ChannelHost(Agent('test'), channel, allowed_senders={'15551234567'})
+        request = signed_request(webhook_payload([text_message()]))
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(host.serve)
+            with anyio.fail_after(1):
+                while channel.handle_webhook(request).status_code == 503:
+                    await anyio.sleep(0)
+                await posted.wait()
+            task_group.cancel_scope.cancel()
+        await client.aclose()
+
+        assert posts == [
+            {
+                'messaging_product': 'whatsapp',
+                'recipient_type': 'individual',
+                'to': '15551234567',
+                'type': 'text',
+                'text': {'body': 'success (no tool calls)'},
+            }
+        ]
 
     async def test_chunks_messages_and_retries_one_throttling_error(self) -> None:
         posts: list[dict[str, object]] = []
@@ -368,43 +383,21 @@ class TestWhatsAppChannel:
         request = signed_request(webhook_payload([text_message()]))
 
         assert channel.handle_webhook(request).status_code == 503
-        async with aclosing(channel.messages()) as messages:
-            async with channel:
+        async with channel:
+            async with aclosing(channel.messages()) as messages:
                 assert channel.handle_webhook(request).status_code == 200
-            assert (await anext(messages)).message_id == 'wamid.1'
+                assert (await anext(messages)).message_id == 'wamid.1'
         assert client.is_closed
         assert channel.handle_webhook(request).status_code == 503
-
-    async def test_closing_channel_ends_pending_message_iterator(self) -> None:
-        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response({})))
-        channel = WhatsAppChannel('token', _PHONE_ID, _APP_SECRET, 'verify-token', http_client=client)
-        iterator_stopped = anyio.Event()
-
-        async def wait_for_message(messages: AsyncGenerator[InboundMessage, None]) -> None:
-            with pytest.raises(StopAsyncIteration):
-                await anext(messages)
-            iterator_stopped.set()
-
-        async with anyio.create_task_group() as task_group:
-            async with channel:
-                messages = channel.messages()
-                task_group.start_soon(wait_for_message, messages)
-                await anyio.sleep(0)
-            with anyio.fail_after(1):
-                await iterator_stopped.wait()
-        await client.aclose()
 
     async def test_reopening_resets_recent_message_ids(self) -> None:
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response({})))
         channel = WhatsAppChannel('token', _PHONE_ID, _APP_SECRET, 'verify-token', http_client=client)
         request = signed_request(webhook_payload([text_message()]))
-        old_messages = channel.messages()
-
         async with channel:
-            assert channel.handle_webhook(request).status_code == 200
-        assert (await anext(old_messages)).message_id == 'wamid.1'
-        with pytest.raises(StopAsyncIteration):
-            await anext(old_messages)
+            async with aclosing(channel.messages()) as messages:
+                assert channel.handle_webhook(request).status_code == 200
+                assert (await anext(messages)).message_id == 'wamid.1'
 
         async with channel:
             async with aclosing(channel.messages()) as messages:

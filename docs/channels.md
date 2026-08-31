@@ -107,8 +107,12 @@ from contextlib import asynccontextmanager
 
 import anyio
 from pydantic_ai import Agent
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
-from pydantic_ai_harness.channels import ChannelHost, WebhookRequest, WebhookResponse
+from pydantic_ai_harness.channels import ChannelHost, WebhookRequest
 from pydantic_ai_harness.channels.whatsapp import WhatsAppChannel
 
 agent = Agent('anthropic:claude-fable-5')
@@ -121,33 +125,31 @@ whatsapp = WhatsAppChannel(
 whatsapp_host = ChannelHost(agent, whatsapp, allowed_senders={'15551234567'})
 
 
-async def receive_whatsapp(
-    method: str,
-    headers: dict[str, str],
-    query: dict[str, str],
-    body: bytes,
-) -> WebhookResponse:
-    request = WebhookRequest(method=method, headers=headers, query=query, body=body)
-    return whatsapp.handle_webhook(request)
+async def receive_whatsapp(request: Request) -> PlainTextResponse:
+    result = whatsapp.handle_webhook(
+        WebhookRequest(request.method, request.headers, request.query_params, await request.body())
+    )
+    return PlainTextResponse(result.body, status_code=result.status_code)
 
 
 @asynccontextmanager
-async def whatsapp_lifespan() -> AsyncIterator[None]:
+async def whatsapp_lifespan(_app: Starlette) -> AsyncIterator[None]:
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(whatsapp_host.serve)
         yield
         tasks.cancel_scope.cancel()
+
+
+app = Starlette(
+    routes=[Route('/whatsapp/webhook', receive_whatsapp, methods=['GET', 'POST'])],
+    lifespan=whatsapp_lifespan,
+)
 ```
 
-Connect the lifespan and route to your web app:
+Save this as `app.py`, run `uvicorn app:app`, and register `/whatsapp/webhook`
+and the verification token in Meta. Subscribe the route to `messages`.
 
-1. Enter `whatsapp_lifespan()` for the app's lifespan.
-2. Forward both GET and POST webhook requests to `receive_whatsapp()` and
-   return its status code and body.
-3. Register that public route and the verification token in Meta, then subscribe
-   it to `messages`.
-
-The task group owns the channel service and waits for its turns during shutdown.
+The task group owns the channel service and waits for cancellation and cleanup during shutdown.
 The lifespan and route must use the same process and async event-loop thread.
 The default Graph API version is `v26.0`; pass `api_version` for another
 supported version.

@@ -22,8 +22,8 @@ import hashlib
 import hmac
 import math
 from collections.abc import AsyncGenerator, Iterator, Mapping
-from contextlib import aclosing
 from types import TracebackType
+from typing import NoReturn
 
 import anyio
 import httpx
@@ -100,8 +100,6 @@ class WhatsAppChannel:
         self._verify_token = verify_token
         self._provided_client = http_client
         self._client: httpx.AsyncClient | None = None
-        self._owns_client = False
-        self._ready = False
         self._api_version = api_version
         self._inbox = WebhookInbox(max_queued_messages)
         self._seen_messages = RecentMessageIds(_MAX_SEEN_MESSAGES)
@@ -113,8 +111,6 @@ class WhatsAppChannel:
             raise RuntimeError('WhatsAppChannel is already open')
         self._inbox.open()
         self._client = self._provided_client or httpx.AsyncClient()
-        self._owns_client = self._provided_client is None
-        self._ready = True
         return self
 
     async def __aexit__(
@@ -122,21 +118,18 @@ class WhatsAppChannel:
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         traceback: TracebackType | None,
-    ) -> bool | None:
+    ) -> None:
         """Close the internally created HTTP client, if any."""
-        self._ready = False
         self._inbox.close()
         # A failed batch can cache IDs for messages left in the old inbox.
         self._seen_messages.clear()
         await self._close_owned_client()
         self._client = None
-        return None
 
     async def _close_owned_client(self) -> None:
-        if self._owns_client and self._client is not None:
+        if self._provided_client is None and self._client is not None:
             with anyio.CancelScope(shield=True):
                 await self._client.aclose()
-        self._owns_client = False
 
     def handle_webhook(self, request: WebhookRequest) -> WebhookResponse:
         """Verify and enqueue messages on the async thread that runs `messages()`."""
@@ -156,8 +149,6 @@ class WhatsAppChannel:
             return WebhookResponse(200)
 
         for message in self._parse_messages(payload):
-            if not self._ready:
-                return WebhookResponse(503)
             if message.message_id in self._seen_messages:
                 continue
             if not self._inbox.put(message):
@@ -219,11 +210,9 @@ class WhatsAppChannel:
         metadata = _mapping(value.get('metadata'))
         return metadata is not None and metadata.get('phone_number_id') == self._phone_number_id
 
-    async def messages(self) -> AsyncGenerator[InboundMessage, None]:
+    def messages(self) -> AsyncGenerator[InboundMessage, None]:
         """Yield verified text messages until the channel closes or the task is cancelled."""
-        async with aclosing(self._inbox.messages()) as messages:
-            async for message in messages:
-                yield message
+        return self._inbox.messages()
 
     async def send_text(self, conversation_id: str, text: str) -> None:
         """Send free-form text in ordered chunks within the Cloud API limit."""
@@ -263,10 +252,7 @@ class WhatsAppChannel:
         messages = _list(envelope.get('messages'))
         if messages is not None:
             return
-        code, message = _api_error(envelope)
-        if code in _THROTTLING_ERROR_CODES:
-            raise _Throttled(message or 'unknown WhatsApp Cloud API error')
-        raise ChannelError(message or 'unknown WhatsApp Cloud API error')
+        _raise_api_error(envelope)
 
 
 class _Throttled(ChannelError):
@@ -312,17 +298,19 @@ def _parse_text_message(value: object) -> InboundMessage | None:
     )
 
 
-def _api_error(envelope: Mapping[str, object]) -> tuple[int | None, str | None]:
+def _raise_api_error(envelope: Mapping[str, object]) -> NoReturn:
     error = _mapping(envelope.get('error'))
     if error is None:
-        return None, None
+        raise ChannelError('unknown WhatsApp Cloud API error')
     code = error.get('code')
     message = error.get('message')
     normalized_code = code if isinstance(code, int) else None
     normalized_message = message if isinstance(message, str) else 'unknown WhatsApp Cloud API error'
-    return (
-        normalized_code,
+    detail = (
         f'WhatsApp Cloud API error {normalized_code}: {normalized_message}'
         if normalized_code is not None
-        else normalized_message,
+        else normalized_message
     )
+    if normalized_code in _THROTTLING_ERROR_CODES:
+        raise _Throttled(detail)
+    raise ChannelError(detail)
