@@ -236,6 +236,30 @@ class TestWhatsAppChannel:
                 assert (await anext(messages)).text == 'second'
         assert await webhook_status(channel, second) == 503
 
+    async def test_queue_full_mid_batch_resumes_on_redelivery(self) -> None:
+        channel = WhatsAppChannel(
+            'token',
+            _PHONE_ID,
+            _APP_SECRET,
+            'verify-token',
+            max_queued_messages=1,
+        )
+        request = signed_request(
+            webhook_payload(
+                [
+                    text_message('wamid.1', body='first'),
+                    text_message('wamid.2', body='second'),
+                ]
+            )
+        )
+
+        async with channel:
+            async with aclosing(channel.messages()) as messages:
+                assert await webhook_status(channel, request) == 503
+                assert (await anext(messages)).text == 'first'
+                assert await webhook_status(channel, request) == 200
+                assert (await anext(messages)).text == 'second'
+
     @pytest.mark.parametrize('anyio_backend', ['asyncio'])
     async def test_webhook_runs_agent_and_posts_reply(self, anyio_backend: str) -> None:
         posted = anyio.Event()

@@ -151,7 +151,7 @@ and the verification token in Meta. Subscribe the route to `messages`.
 
 The task group owns the channel service and waits for cancellation and cleanup during shutdown.
 The lifespan and route must use the same process and async event-loop thread.
-Run one host process for each WhatsApp phone number. Terminate TLS and limit
+Route each WhatsApp phone number to exactly one live host process. Terminate TLS and limit
 request body size in the ASGI server or reverse proxy.
 The default Graph API version is `v26.0`; pass `api_version` for another
 supported version.
@@ -211,7 +211,7 @@ delivery instead of holding that conversation's turn slot. It does not retry
 timeouts or other ambiguous failures because Slack may already have accepted
 the message. If a later text chunk fails, earlier chunks remain visible.
 
-The WhatsApp adapter limits outbound free-form text to the 24-hour customer
+WhatsApp Cloud API limits outbound free-form text to the 24-hour customer
 service window. It surfaces error 131047 when that window is closed; it does not
 substitute an approved template. It retries one response carrying an explicit
 Cloud API throttling code after `retry_delay`, but does not retry network
