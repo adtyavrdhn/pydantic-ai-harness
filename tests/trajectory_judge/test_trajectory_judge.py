@@ -595,12 +595,14 @@ class TestUsageCoordination:
         `UsageLimitExceeded` before spending anything.
         """
         gate = asyncio.Event()
+        entered = asyncio.Event()
         judge_calls = 0
         done = asyncio.Event()
 
         async def slow_judge(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             nonlocal judge_calls
             judge_calls += 1
+            entered.set()
             await gate.wait()
             return _all_good_response()
 
@@ -619,19 +621,22 @@ class TestUsageCoordination:
         request_context = _request_context(_hi_request())
         for run_cap in run_caps:
             await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
-        await asyncio.sleep(0.05)  # let the losing evaluations hit their pre-request checks
-
-        assert judge_calls == 1  # the reservation stopped the others before they spent anything
+        await asyncio.wait_for(entered.wait(), timeout=_WAIT)  # the winning evaluation is inside its model call
         gate.set()
         await asyncio.wait_for(done.wait(), timeout=_WAIT)
 
         async def passthrough() -> Any:
             return 'run-result'
 
+        # Surfacing each loser's recorded failure also awaits its task, so by the final
+        # assertion every evaluation has fully resolved: the count is complete, not a
+        # sleep-length snapshot of a race.
         with pytest.raises(UsageLimitExceeded):
             await run_caps[1].wrap_run(ctx, handler=passthrough)
         with pytest.raises(UsageLimitExceeded):
             await run_caps[2].wrap_run(ctx, handler=passthrough)
+
+        assert judge_calls == 1  # the reservation stopped the losers before they spent anything
         assert await run_caps[0].wrap_run(ctx, handler=passthrough) == 'run-result'
         assert ctx.usage.requests == 2  # parent + the single winning evaluation, within the limit of 3
 
