@@ -267,14 +267,18 @@ class TestSlackChannel:
             continued = {**mention, 'thread_ts': '100.00'}
             assert channel.handle_webhook(event_request('Ev2', continued)).status_code == 200
             continued_message = await anext(channel.messages())
+            empty_thread = {**mention, 'thread_ts': ''}
+            assert channel.handle_webhook(event_request('Ev3', empty_thread)).status_code == 200
+            empty_thread_message = await anext(channel.messages())
             threaded_dm = {**direct_message(), 'thread_ts': '110.00'}
-            assert channel.handle_webhook(event_request('Ev3', threaded_dm)).status_code == 200
+            assert channel.handle_webhook(event_request('Ev4', threaded_dm)).status_code == 200
             dm_message = await anext(channel.messages())
             await channel.send_text(dm_message.conversation_id, 'dm reply')
 
         assert message.conversation_id == 'thread:C1:123.45'
         assert message.text == 'explain this'
         assert continued_message.conversation_id == 'thread:C1:100.00'
+        assert empty_thread_message.conversation_id == 'thread:C1:123.45'
         assert dm_message.conversation_id == 'thread:D1:110.00'
         assert posts == [
             {

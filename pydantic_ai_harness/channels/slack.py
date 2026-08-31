@@ -216,7 +216,7 @@ class SlackChannel:
             )
         elif event_type == 'app_mention':
             thread_timestamp = event.get('thread_ts')
-            if not isinstance(thread_timestamp, str):
+            if not isinstance(thread_timestamp, str) or not thread_timestamp:
                 thread_timestamp = timestamp
             conversation_id = f'thread:{channel_id}:{thread_timestamp}'
             text = text.replace(f'<@{bot_user_id}>', '').strip()
