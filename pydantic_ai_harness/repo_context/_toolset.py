@@ -29,6 +29,6 @@ class RepoContextToolset(FunctionToolset[AgentDepsT]):
         `settings.json` (hooks) it contains. This locates assets so you can read
         and translate them; it does not parse their contents.
         """
-        sandbox = sandbox_or_local(ctx.sandbox, preserve_host_behavior=True)
+        sandbox = sandbox_or_local(ctx.sandbox)
         workspace = Path(sandbox_path(self._workspace_dir, sandbox=sandbox, original=ctx.sandbox))
         return await scan_assets(sandbox, workspace, self._asset_roots)

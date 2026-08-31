@@ -70,7 +70,7 @@ class PydanticAIDocsToolset(FunctionToolset[AgentDepsT]):
         if self._cache is not None and topic in self._cache:
             return self._cache[topic]
 
-        sandbox = sandbox_or_local(ctx.sandbox, preserve_host_behavior=True)
+        sandbox = sandbox_or_local(ctx.sandbox)
         markdown = await self._read_local(sandbox, ctx.sandbox, topic)
         if markdown is None:
             markdown = await self._fetch_remote(topic)

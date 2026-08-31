@@ -130,7 +130,7 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         """Load walk-up instruction files through `ctx.sandbox` so `get_instructions` is sync."""
         if not self.autoload_instructions:
             return
-        sandbox = sandbox_or_local(ctx.sandbox, preserve_host_behavior=True)
+        sandbox = sandbox_or_local(ctx.sandbox)
         workspace = await self._workspace(
             sandbox, path=sandbox_path(self.workspace_dir, sandbox=sandbox, original=ctx.sandbox)
         )
@@ -184,7 +184,7 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         raw_path = args.get(self.traversal_path_arg)
         if not isinstance(raw_path, str) or not isinstance(result, str):
             return result
-        sandbox = sandbox_or_local(ctx.sandbox, preserve_host_behavior=True)
+        sandbox = sandbox_or_local(ctx.sandbox)
         directory = await self._resolve_directory(sandbox, raw_path)
         key = str(directory)
         if key in self._seen_dirs or key in self._pending_dirs:

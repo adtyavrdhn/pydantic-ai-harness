@@ -12,14 +12,14 @@ def is_framework_unavailable(sandbox: Sandbox) -> bool:
     return sandbox._is_framework_default()  # pyright: ignore[reportPrivateUsage]
 
 
-def sandbox_or_local(sandbox: Sandbox, *, preserve_host_behavior: bool) -> Sandbox:
+def sandbox_or_local(sandbox: Sandbox) -> Sandbox:
     """Use an explicit local fallback only for Pydantic AI's implicit unavailable sandbox.
 
     An application-supplied `UnavailableSandbox` is policy, not absence, so its
     configured error must survive. The fallback is POSIX-only because
     `LocalSandbox` deliberately cannot promise process-tree cancellation on Windows.
     """
-    if preserve_host_behavior and os.name == 'posix' and is_framework_unavailable(sandbox):
+    if os.name == 'posix' and is_framework_unavailable(sandbox):
         return Sandbox.wrap(LocalSandbox(root=Path.cwd()))
     return sandbox
 

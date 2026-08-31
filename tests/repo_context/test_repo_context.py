@@ -232,7 +232,7 @@ class TestInstructions:
         assert isinstance(default, UnavailableSandbox)
         policy = Sandbox(UnavailableSandbox(default.reason))
 
-        assert sandbox_or_local(policy, preserve_host_behavior=True) is policy
+        assert sandbox_or_local(policy) is policy
 
     @pytest.mark.skipif(sys.platform == 'win32', reason='host fallback is POSIX-only')
     async def test_framework_default_sandbox_preserves_host_fallback(self, tmp_path: Path) -> None:
