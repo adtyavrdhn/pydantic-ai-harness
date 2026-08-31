@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import AsyncGenerator, Collection
-from contextlib import aclosing, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Generic
 
@@ -28,7 +29,7 @@ _DEFAULT_RESET_REPLY = 'Started a new conversation.'
 @dataclass(slots=True)
 class _ConversationLane:
     lock: anyio.Lock = field(default_factory=anyio.Lock)
-    users: int = 0
+    pending_turns: int = 0
 
 
 class ChannelHost(Generic[AgentDepsT]):
@@ -96,15 +97,16 @@ class ChannelHost(Generic[AgentDepsT]):
         try:
             async with _open_adapter(self._adapter):
                 async with anyio.create_task_group() as task_group:
-                    async with aclosing(self._adapter.messages()) as inbound:  # pragma: no branch
-                        async for message in inbound:
-                            if message.sender_id not in self._allowed_senders:
-                                logger.warning('Ignoring channel message from sender %s', message.sender_id)
-                                continue
-                            await turn_slots.acquire()
-                            lane = lanes.setdefault(message.conversation_id, _ConversationLane())
-                            lane.users += 1
-                            task_group.start_soon(self._handle_serialized, message, lane, lanes, turn_slots)
+                    async for message in self._adapter.messages():
+                        if message.sender_id not in self._allowed_senders:
+                            logger.warning('Ignoring channel message from sender %s', message.sender_id)
+                            continue
+                        await turn_slots.acquire()
+                        lane = lanes.setdefault(message.conversation_id, _ConversationLane())
+                        # Count waiters before starting them so the lane cannot be replaced
+                        # while another turn is waiting for the same lock.
+                        lane.pending_turns += 1
+                        task_group.start_soon(self._handle_serialized, message, lane, lanes, turn_slots)
         finally:
             self._serving = False
 
@@ -119,8 +121,8 @@ class ChannelHost(Generic[AgentDepsT]):
             async with lane.lock:
                 await self._handle(message)
         finally:
-            lane.users -= 1
-            if lane.users == 0:
+            lane.pending_turns -= 1
+            if lane.pending_turns == 0:
                 del lanes[message.conversation_id]
             turn_slots.release()
 
@@ -169,12 +171,9 @@ async def _open_adapter(adapter: ChannelAdapter) -> AsyncGenerator[None, None]:
     await adapter.__aenter__()
     try:
         yield
-    except BaseException as exc:
-        suppress = False
+    finally:
+        # Cancellation remains active after the message loop exits. Shield only
+        # teardown so adapters can finish closing resources.
+        exc_type, exc, traceback = sys.exc_info()
         with anyio.CancelScope(shield=True):
-            suppress = await adapter.__aexit__(type(exc), exc, exc.__traceback__)
-        if not suppress:
-            raise
-    else:
-        with anyio.CancelScope(shield=True):
-            await adapter.__aexit__(None, None, None)
+            await adapter.__aexit__(exc_type, exc, traceback)

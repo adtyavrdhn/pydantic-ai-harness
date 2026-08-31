@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Protocol
@@ -41,11 +41,11 @@ class ChannelAdapter(Protocol):
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         traceback: TracebackType | None,
-    ) -> bool | None:
+    ) -> None:
         """Close resources owned by the adapter."""
         ...  # pragma: no cover
 
-    def messages(self) -> AsyncGenerator[InboundMessage, None]:
+    def messages(self) -> AsyncIterator[InboundMessage]:
         """Yield inbound messages until the adapter closes or the task is cancelled."""
         ...  # pragma: no cover
 
