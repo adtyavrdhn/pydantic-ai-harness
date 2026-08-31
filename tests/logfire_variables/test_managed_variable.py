@@ -11,6 +11,7 @@ prefix, value type, and default into this base correctly, plus its capability-sp
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import logfire
@@ -141,15 +142,14 @@ def test_ensure_variable_returns_variable_built_while_awaiting_lock() -> None:
         """Stands in for the build lock, simulating the concurrent build completing on acquire."""
 
         def __enter__(self) -> _RaceLock:
-            capability._variable = built
+            capability._variables_by_agent['racer'] = built
             return self
 
         def __exit__(self, *exc: object) -> bool:
             return False
 
     capability._build_lock = cast(Any, _RaceLock())
-    # `agent` is only touched after the second check builds a new variable; here it returns first.
-    assert capability._ensure_variable_for_agent(cast(Any, None)) is built
+    assert capability._ensure_variable_for_agent(cast(Any, SimpleNamespace(name='racer'))) is built
 
 
 def test_auto_create_marking_rechecks_guard_under_lock(monkeypatch: pytest.MonkeyPatch) -> None:

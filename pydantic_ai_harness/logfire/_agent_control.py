@@ -54,6 +54,24 @@ _AGENT_VARIABLE_PREFIX = 'agent__'
 # instructions while preventing one managed entry from adding megabytes to every model request.
 _MAX_MODEL_FACING_TEXT_LENGTH = 65_536
 
+# Settings kept out of the published baseline. `AgentConfigSettings` allows extra keys deliberately --
+# a provider-specific setting like `openai_reasoning_effort` has to survive -- and these two come
+# through that same door. Pydantic AI forwards them to the provider request, which is exactly where
+# authorization headers and signed bodies live, and a baseline is published to a Logfire variable
+# every project member can read. They still apply to the run; they just don't describe the agent to
+# anyone else. This is a denylist rather than an allowlist because the extras that are *not*
+# credentials are the whole point of `extra='allow'`.
+_SETTINGS_WITHHELD_FROM_BASELINE = frozenset({'extra_headers', 'extra_body'})
+
+# Where a renamed tool records the code-side name it routes back to, on its own definition's
+# `metadata`, so `call_tool` reads it off the very tool the model was handed. Recomputing the mapping
+# from a fresh listing instead answers about whatever occupies that advertised name *now*: a dynamic
+# toolset that put a different tool behind it in between supplies its code-side name, and the call
+# then runs the tool the model chose while a name-based policy -- `ApprovalRequiredToolset` above all
+# -- is handed the other one's name and authorizes that instead. The key is removed again on the way
+# through, so nothing downstream sees it.
+_ROUTES_TO_METADATA_KEY = '__agent_control_routes_to__'
+
 _EntryT = TypeVar('_EntryT')
 
 # Drop warnings already emitted in this process, keyed by the message itself. See `_warn_dropped`.
@@ -805,13 +823,13 @@ class _ToolDefinitionOverridesToolset(WrapperToolset[AgentDepsT]):
     observe_code_tools: ToolsObserver = field(repr=False, compare=False)
 
     def _effective_tools(
-        self, tools: dict[str, ToolsetTool[AgentDepsT]], *, warn: bool
+        self, tools: dict[str, ToolsetTool[AgentDepsT]]
     ) -> dict[str, tuple[str, ToolsetTool[AgentDepsT]]]:
-        """Build the deterministic advertised-name to original-tool mapping.
+        """Build the advertised-name to (code-side name, tool) mapping.
 
-        Listing and routing both use this method so collision handling cannot disagree between the
-        schema the model saw and the call path. A colliding rename is dropped while its other
-        patches remain, preserving every tool under a callable name.
+        A renamed tool carries the name it routes back to in its definition's metadata, so `call_tool`
+        can read it off the very tool the model was handed. A colliding rename is dropped while its
+        other patches remain, preserving every tool under a callable name.
         """
         overrides = self.get_overrides()
         result: dict[str, tuple[str, ToolsetTool[AgentDepsT]]] = {}
@@ -820,14 +838,17 @@ class _ToolDefinitionOverridesToolset(WrapperToolset[AgentDepsT]):
             new_tool_def = tool.tool_def if override is None else _apply_override(tool.tool_def, override)
             new_name = new_tool_def.name
             if new_name != original_name and (new_name in tools or new_name in result):
-                if warn:
-                    warnings.warn(
-                        f'Managed tool definition override renames {original_name!r} to {new_name!r}, '
-                        f'which is already advertised by another tool; keeping the original name {original_name!r}.',
-                        stacklevel=2,
-                    )
+                warnings.warn(
+                    f'Managed tool definition override renames {original_name!r} to {new_name!r}, '
+                    f'which is already advertised by another tool; keeping the original name {original_name!r}.',
+                    stacklevel=2,
+                )
                 new_tool_def = replace(new_tool_def, name=original_name)
                 new_name = original_name
+            if new_name != original_name:
+                new_tool_def = replace(
+                    new_tool_def, metadata={**(new_tool_def.metadata or {}), _ROUTES_TO_METADATA_KEY: original_name}
+                )
             result[new_name] = (
                 original_name,
                 tool if new_tool_def is tool.tool_def else replace(tool, toolset=self, tool_def=new_tool_def),
@@ -840,22 +861,18 @@ class _ToolDefinitionOverridesToolset(WrapperToolset[AgentDepsT]):
         self.observe_code_tools([tool.tool_def for tool in tools.values()])
         if not self.get_overrides():
             return tools
-        return {name: tool for name, (_, tool) in self._effective_tools(tools, warn=True).items()}
+        return {name: tool for name, (_, tool) in self._effective_tools(tools).items()}
 
     async def call_tool(
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentDepsT], tool: ToolsetTool[AgentDepsT]
     ) -> Any:
         """Translate a renamed model call back to its original implementation and context name."""
-        overrides = self.get_overrides()
-        if not overrides or not any(o.new_name for o in overrides.values()):
-            return await super().call_tool(name, tool_args, ctx, tool)
-        # Recompute from live tools for correctness if a dynamic toolset changes between listing and calling;
-        # this path runs only when at least one rename exists, so the micro-optimization is not worthwhile.
-        entry = self._effective_tools(await super().get_tools(ctx), warn=False).get(name)
-        if entry is not None and entry[0] != name:
-            original_name = entry[0]
+        metadata = tool.tool_def.metadata or {}
+        original_name = metadata.get(_ROUTES_TO_METADATA_KEY)
+        if isinstance(original_name, str) and original_name != name:
             ctx = replace(ctx, tool_name=original_name)
-            tool = replace(tool, tool_def=replace(tool.tool_def, name=original_name))
+            routed_metadata = {key: value for key, value in metadata.items() if key != _ROUTES_TO_METADATA_KEY}
+            tool = replace(tool, tool_def=replace(tool.tool_def, name=original_name, metadata=routed_metadata or None))
             return await super().call_tool(original_name, tool_args, ctx, tool)
         return await super().call_tool(name, tool_args, ctx, tool)
 
@@ -1106,7 +1123,6 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
                 code_model = ctx.model
                 self._code_model.set(f'{code_model.system}:{code_model.model_name}' if code_model is not None else None)
                 resolved = self._resolve_for_selection(self._ensure_variable_for_agent(ctx.agent), ctx)
-                self._selection_resolved.set(resolved)
                 model = resolved.value.model
                 if model is not None:
                     try:
@@ -1126,6 +1142,10 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
                         'defines no model and none is published in Logfire yet. Give the agent a model, '
                         'pass one to `run(model=...)`, or publish a `model` in the managed config.'
                     )
+                # Handed off only once selection has succeeded. `wrap_run` is what clears this, and a
+                # selection that raises never reaches it -- so setting it earlier would leave this run's
+                # instructions, settings and tool overrides in the context for whatever runs next.
+                self._selection_resolved.set(resolved)
             return selected[0]
 
         return select
@@ -1239,8 +1259,11 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
         resolved = self.resolved
         if resolved is None or not self.publish_baseline:
             return
+        # The agent's own variable, not a shared attribute: a nameless capability backs one variable
+        # per agent, so publishing has to name the one this run resolved.
+        variable = self._ensure_variable(ctx)
         if _in_durable_context(ctx):
-            _warn_durable_write_skipped(self._variable)
+            _warn_durable_write_skipped(variable)
             return
         # Built inside the `try`, alongside the serialization it feeds. `AgentConfig` says what to
         # *apply* as well as what exists, so its validation -- the length bound in particular -- also
@@ -1252,18 +1275,18 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
             serialized = json.dumps(example.model_dump(exclude_none=True), indent=2)
         except Exception as error:
             warnings.warn(
-                f'Failed to publish the code baseline for Logfire managed variable {self._variable.name!r}: {error}'
+                f'Failed to publish the code baseline for Logfire managed variable {variable.name!r}: {error}'
             )
             return
-        key = (self._variable.logfire_instance, self._variable.name)
+        key = (variable.logfire_instance, variable.name)
         with _baseline_publish_lock:
             if key in _baseline_publish_attempted:
                 return
             _baseline_publish_attempted.add(key)
-        if self._should_auto_create_for(resolved):
-            self._maybe_auto_create(self._variable, example=serialized, ctx=ctx)
+        if self._should_auto_create_for(variable, resolved):
+            self._maybe_auto_create(variable, example=serialized, ctx=ctx)
             return
-        _spawn_baseline_publish(self._variable, serialized)
+        _spawn_baseline_publish(variable, serialized)
 
     def _code_baseline(self, request_context: ModelRequestContext) -> AgentConfig:
         """The agent as written: what it would do with `AgentControl` removed.
@@ -1298,12 +1321,15 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
                     name=tool.name, description=tool.description or None, parameter_descriptions=descriptions or None
                 )
             )
+        settings = {
+            name: value
+            for name, value in (self._code_settings.get() or {}).items()
+            if name not in _SETTINGS_WITHHELD_FROM_BASELINE
+        }
         return AgentConfig(
             instructions=instructions or None,
             model=self._code_model.get(),
-            settings=AgentConfigSettings.model_validate(self._code_settings.get())
-            if self._code_settings.get()
-            else None,
+            settings=AgentConfigSettings.model_validate(settings) if settings else None,
             tool_definitions=tool_definitions or None,
         )
 

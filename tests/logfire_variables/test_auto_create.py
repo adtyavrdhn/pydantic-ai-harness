@@ -296,3 +296,26 @@ async def test_no_provider_makes_no_attempt(spawned: list[str]) -> None:
 
     assert spawned == []
     assert instructions_seen(result.all_messages()) == [DEFAULT]
+
+
+async def test_unreachable_provider_probe_does_not_fail_the_run(
+    capfire: CaptureLogfire, spawned: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Auto-create is best-effort, and the provider probe is its one remote call on the run thread.
+
+    A remote provider that is unreachable -- or that raises for any other reason -- must leave the run
+    with the code default rather than take it down, which is what the capability documents.
+    """
+    with variables_provider(capfire, VariablesConfig(variables={})):
+        provider = logfire.DEFAULT_LOGFIRE_INSTANCE.config.get_variable_provider()
+
+        def unreachable(name: str) -> Any:
+            raise ConnectionError('provider unreachable')
+
+        monkeypatch.setattr(provider, 'get_variable_config', unreachable)
+        result = await Agent(TestModel(), capabilities=[ManagedPrompt('auto_unreachable', default=DEFAULT)]).run(
+            'hello'
+        )
+
+    assert result.output.startswith('success')
+    assert spawned == []

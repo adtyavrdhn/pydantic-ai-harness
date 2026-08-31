@@ -232,6 +232,15 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
     _deferred: _DeferredVariable[ValueT] | None = field(init=False, default=None, repr=False, compare=False)
     """The inputs to build `_variable` lazily, set only when `name` was omitted; `None` otherwise."""
 
+    _variables_by_agent: dict[str, Variable[ValueT]] = field(
+        init=False, default_factory=dict[str, 'Variable[ValueT]'], repr=False, compare=False
+    )
+    """Variables derived from an agent's `name`, keyed by the normalized name they were derived from.
+
+    Only used in the deferred (nameless) case. Keyed rather than singular because one capability
+    instance can back more than one agent -- `SubAgents.shared_capabilities` passes the same object
+    to every sub-agent -- and each of them must read its own `<prefix><agent name>`."""
+
     _json_schema: dict[str, Any] | None = field(init=False, default=None, repr=False, compare=False)
     """The JSON schema auto-create stores on the variable, when the capability maintains its own.
 
@@ -305,38 +314,53 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
         """Return the backing variable, building it from the agent's `name` on first use.
 
         For an eagerly-built variable (an explicit `name` or `Variable` was given) this just returns
-        it. For a nameless capability it derives `<prefix><agent name>` from `agent.name` once,
-        caching the result on the capability so later runs and the other run-time surfaces reuse it.
-        Takes the agent directly (rather than a `RunContext`) so both the run-time hooks and model
-        selection -- which sees a narrower `ModelSelectionContext` before any `RunContext` exists --
-        derive the same variable. Raises [`UserError`][pydantic_ai.exceptions.UserError] when there
-        is no agent name to derive from -- a nameless managed capability requires the agent to have a
-        `name`.
+        it. For a nameless capability it derives `<prefix><agent name>` from `agent.name` and caches
+        the result *per normalized agent name*: one capability instance can serve more than one agent
+        -- `SubAgents.shared_capabilities` hands the same object to every sub-agent -- and a single
+        cache would make every later agent read whichever agent happened to run first. Takes the agent
+        directly (rather than a `RunContext`) so both the run-time hooks and model selection -- which
+        sees a narrower `ModelSelectionContext` before any `RunContext` exists -- derive the same
+        variable. Raises [`UserError`][pydantic_ai.exceptions.UserError] when there is no agent name
+        to derive from, and when the name has nothing an identifier can be made of.
         """
         variable = self._built_variable
         if variable is not None:
             return variable
         deferred = self._deferred
         assert deferred is not None  # `_variable` is unset only in the nameless (deferred) case.
+        agent_name = agent.name if agent is not None else None
+        if not agent_name:
+            raise UserError(
+                'A managed capability without an explicit `name` derives its backing variable from '
+                "the agent's `name`, but this agent has none. Give the agent a `name=...`, or pass an "
+                'explicit `name` to the capability.'
+            )
+        normalized_name = _normalize_agent_name(agent_name)
+        if not normalized_name:
+            # `_normalize_agent_name` is lossy by design, but an empty result is not a collision
+            # between two agents that read alike -- it is every such agent landing on the bare prefix,
+            # which names no agent at all. Refuse it the way a missing name is refused.
+            raise UserError(
+                'A managed capability without an explicit `name` derives its backing variable from '
+                f"the agent's `name`, but {agent_name!r} has no letters, digits, or underscores to "
+                'derive one from. Give the agent a `name=...` that has some, or pass an explicit '
+                '`name` to the capability.'
+            )
+        variable = self._variables_by_agent.get(normalized_name)
+        if variable is not None:
+            return variable
         with self._build_lock:
-            # A concurrent first run may have built the variable while we waited for the lock.
-            variable = self._built_variable
+            # A concurrent first run may have built this agent's variable while we waited for the lock.
+            variable = self._variables_by_agent.get(normalized_name)
             if variable is not None:
                 return variable
-            agent_name = agent.name if agent is not None else None
-            if not agent_name:
-                raise UserError(
-                    'A managed capability without an explicit `name` derives its backing variable from '
-                    "the agent's `name`, but this agent has none. Give the agent a `name=...`, or pass an "
-                    'explicit `name` to the capability.'
-                )
             variable = self._build_managed_variable(
-                _normalize_agent_name(agent_name),
+                normalized_name,
                 prefix=deferred.prefix,
                 value_type=deferred.value_type,
                 default=deferred.default,
             )
-            self._variable = variable
+            self._variables_by_agent[normalized_name] = variable
             return variable
 
     def _warn_logfire_instance_ignored(self, field_name: str) -> None:
@@ -420,7 +444,7 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
             _auto_create_attempted.add(key)
         _spawn_create(variable, self._auto_create_config(variable, example=example))
 
-    def _should_auto_create_for(self, resolved: ResolvedVariable[ValueT]) -> bool:
+    def _should_auto_create_for(self, variable: Variable[ValueT], resolved: ResolvedVariable[ValueT]) -> bool:
         """Whether a configured provider does not recognize this variable and creation is still eligible.
 
         Auto-create is for exactly one case: a provider is configured but has no entry for this name,
@@ -429,19 +453,30 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
         configured" and "known variable with no targeted value" -- neither of which should create
         anything. The once-per-process guard is only peeked at here; `_maybe_auto_create` re-checks
         and marks it under the same lock, making concurrent callers race-safe.
+
+        Takes the variable the caller resolved rather than reading it off the capability: a nameless
+        capability backs one variable per agent, so there is no single `_variable` to read.
+
+        The provider probe is the one remote call on the run thread. Auto-create is documented as
+        best-effort -- an unreachable provider degrades to the code default and never fails a run --
+        so any error it raises means "cannot tell whether this exists", which is answered `False`.
         """
         if not self.auto_create or resolution_reason(resolved) not in _CODE_DEFAULT_REASONS:
             return False
-        variable = self._variable
         with _auto_create_lock:
             if _auto_create_key(variable) in _auto_create_attempted:
                 return False
         provider = variable.logfire_instance.config.get_variable_provider()
         if isinstance(provider, NoOpVariableProvider):
             return False
-        return provider.get_variable_config(variable.name) is None
+        try:
+            return provider.get_variable_config(variable.name) is None
+        except Exception:
+            return False
 
-    def _maybe_auto_create_for(self, resolved: ResolvedVariable[ValueT], *, ctx: RunContext[Any] | None = None) -> None:
+    def _maybe_auto_create_for(
+        self, variable: Variable[ValueT], resolved: ResolvedVariable[ValueT], *, ctx: RunContext[Any] | None = None
+    ) -> None:
         """Trigger background auto-create when a configured provider doesn't recognize the variable yet.
 
         Auto-create is for exactly one case: a provider is configured but has no entry for this name,
@@ -452,8 +487,8 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
         that has no config for this name. A `resolved`/`context_override` value isn't a candidate at
         all, and is filtered out by the reason check up front.
         """
-        if self._should_auto_create_for(resolved):
-            self._maybe_auto_create(self._variable, ctx=ctx)
+        if self._should_auto_create_for(variable, resolved):
+            self._maybe_auto_create(variable, ctx=ctx)
 
     def _resolve(self, ctx: RunContext[AgentDepsT]) -> ResolvedVariable[ValueT]:
         """Resolve the backing variable for this run using the capability's targeting inputs.
@@ -480,7 +515,7 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
         """Resolve the variable once and keep its baggage active for the duration of the run."""
         resolved = self._resolve(ctx)
         if self._auto_create_in_wrap_run:
-            self._maybe_auto_create_for(resolved, ctx=ctx)
+            self._maybe_auto_create_for(self._ensure_variable(ctx), resolved, ctx=ctx)
         with resolved:
             token = self._resolved.set(resolved)
             try:

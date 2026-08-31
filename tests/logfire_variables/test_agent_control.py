@@ -17,7 +17,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.toolsets import FunctionToolset, ToolsetTool, WrapperToolset
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness import AgentControl as RootAgentControl
@@ -708,11 +708,13 @@ async def test_baseline_publish_failure_does_not_affect_run_and_warns_once(
 
 
 async def test_non_json_baseline_setting_does_not_affect_run(capfire: CaptureLogfire) -> None:
+    # A provider-specific setting: it reaches the baseline through `extra='allow'` (unlike
+    # `extra_headers`/`extra_body`, which are withheld) and has nothing `json.dumps` can write.
     with variables_provider(capfire, published_value('agent__non_json_baseline', {})):
         with pytest.warns(UserWarning, match='Failed to publish the code baseline'):
             result = await Agent(
                 TestModel(),
-                model_settings={'extra_body': object()},
+                model_settings=cast(ModelSettings, {'openai_custom_option': object()}),
                 capabilities=[AgentControl('non_json_baseline')],
             ).run('hello')
     assert result.output.startswith('success')
@@ -974,3 +976,103 @@ async def test_before_model_request_outside_run_is_inert() -> None:
     request = cast(Any, object())
     for half in bound.capabilities:
         assert await half.before_model_request(cast(Any, None), request) is request
+
+
+async def test_credential_bearing_settings_stay_out_of_the_published_baseline(
+    capfire: CaptureLogfire, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`extra_headers` and `extra_body` apply to the run but never describe the agent to a reader.
+
+    `AgentConfigSettings` allows extra keys so a provider-specific setting survives; these two arrive
+    the same way and routinely carry authorization. The baseline is published to a variable every
+    project member can read, so they are withheld from it -- and only from it.
+    """
+    monkeypatch.setattr(_agent_control, '_spawn_baseline_publish', _agent_control._publish_baseline)
+    sent: list[ModelSettings | None] = []
+
+    def model(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        sent.append(info.model_settings)
+        return ModelResponse(parts=[TextPart('done')])
+
+    with variables_provider(capfire, published_value('agent__secretless_baseline', {})):
+        provider = logfire.DEFAULT_LOGFIRE_INSTANCE.config.get_variable_provider()
+        updates: list[VariableConfig] = []
+        original_update = provider.update_variable
+
+        def record_update(name: str, updated: VariableConfig) -> VariableConfig:
+            updates.append(updated)
+            return original_update(name, updated)
+
+        monkeypatch.setattr(provider, 'update_variable', record_update)
+        await Agent(
+            FunctionModel(model),
+            model_settings=cast(
+                ModelSettings,
+                {
+                    'temperature': 0.1,
+                    'extra_headers': {'Authorization': 'Bearer sk-secret'},
+                    'extra_body': {'signature': 'sk-secret'},
+                    'openai_custom_option': 'kept',
+                },
+            ),
+            capabilities=[AgentControl('secretless_baseline')],
+        ).run('hello')
+
+    assert json.loads(updates[0].example or '{}')['settings'] == {'temperature': 0.1, 'openai_custom_option': 'kept'}
+    # Withheld from the snapshot, not from the request: the run still sends them.
+    assert sent[0] is not None and sent[0]['extra_headers'] == {'Authorization': 'Bearer sk-secret'}  # type: ignore[typeddict-item]
+
+
+async def test_rename_routes_to_the_tool_the_model_was_handed(capfire: CaptureLogfire) -> None:
+    """A dynamic toolset may put a different tool behind an advertised name between listing and call.
+
+    Routing reads the code-side name off the tool the model was handed, so the name every downstream
+    consumer sees -- a name-based `ApprovalRequiredToolset` above all -- is the name of the tool that
+    actually runs. Recomputing it from a fresh listing would authorize one tool and run the other.
+    """
+    listings = 0
+
+    class Flipping(WrapperToolset[object]):
+        """Advertises `first` on the first listing and `second` on every later one."""
+
+        async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
+            nonlocal listings
+            tools = await super().get_tools(ctx)
+            listings += 1
+            return {('first' if listings == 1 else 'second'): tools['first' if listings == 1 else 'second']}
+
+    authorized: list[str] = []
+
+    class NamePolicy(WrapperToolset[object]):
+        """Stands in for a name-based policy: it records the name it is asked to authorize."""
+
+        async def call_tool(
+            self, name: str, tool_args: dict[str, Any], ctx: RunContext[object], tool: ToolsetTool[object]
+        ) -> Any:
+            authorized.append(name)
+            return await super().call_tool(name, tool_args, ctx, tool)
+
+    def first() -> str:
+        return 'ran first'
+
+    def second() -> str:  # pragma: no cover - advertised on the second listing only
+        return 'ran second'
+
+    calls = 0
+
+    def model(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart('helper', {}, tool_call_id='call')])
+        return ModelResponse(parts=[TextPart('done')])
+
+    managed = {'tool_definitions': [{'name': 'first', 'new_name': 'helper'}, {'name': 'second', 'new_name': 'helper'}]}
+    with variables_provider(capfire, published_value('agent__rename_identity', managed)):
+        await Agent(
+            FunctionModel(model),
+            toolsets=[NamePolicy(Flipping(FunctionToolset[object]([first, second])))],
+            capabilities=[AgentControl('rename_identity')],
+        ).run('hello')
+
+    assert authorized == ['first']
