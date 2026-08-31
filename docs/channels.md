@@ -86,7 +86,7 @@ For GovSlack, pass `api_base_url='https://slack-gov.com/api'` to `SlackChannel`.
 
 The task group owns the channel service and waits for cancellation and cleanup during shutdown.
 The lifespan and route must use the same process and async event-loop thread.
-Run one host process for each Slack app installation. Terminate TLS and limit
+Route each Slack app installation to exactly one live host process. Terminate TLS and limit
 request body size in the ASGI server or reverse proxy.
 
 ## How channels fit Pydantic AI

@@ -153,6 +153,7 @@ class TestSlackChannel:
             )
         ).status_code == 401
         assert (await channel.handle_webhook(signed_request({}, timestamp=int(time.time()) - 301))).status_code == 401
+        assert (await channel.handle_webhook(signed_request({}, timestamp=int(time.time()) + 301))).status_code == 401
         oversized_timestamp = WebhookRequest(
             'POST',
             {
