@@ -420,6 +420,7 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
                 outcome = action.summarize(call.tool_name, unit.text)
                 summary = await outcome if isinstance(outcome, Awaitable) else outcome
             else:
+                self._summary_model(ctx, action)
                 summary = await self._summarize(ctx, call.tool_name, unit.text, self._summarize_path(action))
         except UserError:
             # A misconfiguration -- e.g. a realtime run with no summarizer `model=` (#585) -- is
@@ -441,25 +442,23 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         from pydantic_ai import Agent
 
         action = self._resolve_summarize(action_path)
+        model = self._summary_model(ctx, action)
+        prompt = self.summary_prompt.format(tool_name=tool_name, output=text)
+        agent: Agent[None, str] = Agent(model, instructions='You summarize oversized tool output.')
+        run = await agent.run(prompt, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
+        return run.output.strip()
+
+    @staticmethod
+    def _summary_model(ctx: RunContext[AgentDepsT], action: Summarize) -> Model[Any] | str:
+        """Resolve and validate the model on both the caller and durable worker paths."""
         model = action.model if action.model is not None else ctx.model
-        # `ctx.model` is an `AbstractModel`; summarizing needs a request-response model. A
-        # realtime run reaches here only when no summarizer `model=` was configured on the
-        # `Summarize` action, so ask for one explicitly rather than handing `Agent` a model it
-        # cannot run with. A realtime model is an `AbstractModel` that is not a `Model`.
         if isinstance(model, AbstractModel) and not isinstance(model, Model):
             raise UserError(
                 'Summarizing oversized tool output needs a request-response model, but the run '
                 f'uses {type(model).__name__}, which is not one. Set a `model=` on the '
                 '`Summarize` action to use for summarization.'
             )
-        prompt = self.summary_prompt.format(tool_name=tool_name, output=text)
-        # `isinstance` narrows the generic `Model` to `Model[Unknown]`; `cast` recovers
-        # `Model[Any]`, mirroring core's own `reinject_system_prompt` idiom.
-        agent: Agent[None, str] = Agent(
-            cast('Model[Any] | str', model), instructions='You summarize oversized tool output.'
-        )
-        run = await agent.run(prompt, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
-        return run.output.strip()
+        return cast('Model[Any] | str', model)
 
     def _summarize_path(self, target: Summarize) -> str:
         for prefix, bands in [
@@ -474,7 +473,9 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
                         return f'{prefix}:{index}:{depth}'
                     action = _next_action(action)
                     depth += 1
-        raise RuntimeError('Summarize action is not part of this capability configuration.')
+        raise RuntimeError(  # pragma: no cover - target comes from the configuration walked above
+            'Summarize action is not part of this capability configuration.'
+        )
 
     def _resolve_summarize(self, path: str) -> Summarize:
         prefix, index_text, depth_text = path.rsplit(':', 2)

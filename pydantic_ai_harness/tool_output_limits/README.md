@@ -209,8 +209,11 @@ built-in prompt entirely. The `summary_prompt` template on the capability must c
 
 With a durable-execution capability attached, built-in model summarization is a journaled
 capability operation. Set an explicit, stable `id` on `ToolOutputLimits` so workers recover it
-under the same identity. A custom `summarize` callable runs directly and may be called again on
-replay because arbitrary callables cannot be reconstructed as durable operations.
+under the same identity; omitting it raises `UserError` during agent construction. The text being
+summarized is part of the journaled operation input, so use `Spill` rather than built-in
+`Summarize` for outputs near the durability engine's payload limit. A custom `summarize` callable
+runs directly and may be called again on replay because arbitrary callables cannot be reconstructed
+as durable operations.
 
 ## Edge cases
 

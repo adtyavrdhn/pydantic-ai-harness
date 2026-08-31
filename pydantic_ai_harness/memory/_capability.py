@@ -182,7 +182,7 @@ class Memory(AbstractCapability[AgentDepsT]):
                     }
                 )
             try:
-                main, subfiles, files_truncated = await self._load_snapshot(ctx)
+                main, subfiles, files_truncated, error_type = await self._load_snapshot(ctx)
             except Exception as exc:
                 if span.is_recording():
                     span.set_attributes(
@@ -193,6 +193,11 @@ class Memory(AbstractCapability[AgentDepsT]):
                     )
                 if self.injection_errors == 'raise':
                     raise
+                return request_context
+
+            if error_type is not None:
+                if span.is_recording():
+                    span.set_attributes({'memory.outcome': 'error', 'memory.exception_type': error_type})
                 return request_context
 
             main_content = '' if main is None else main.content
@@ -232,15 +237,24 @@ class Memory(AbstractCapability[AgentDepsT]):
         return request_context
 
     @durable_operation('load_snapshot')
-    async def _load_snapshot(self, ctx: RunContext[AgentDepsT]) -> tuple[MemoryFile | None, list[str], bool]:
+    async def _load_snapshot(
+        self, ctx: RunContext[AgentDepsT]
+    ) -> tuple[MemoryFile | None, list[str], bool, str | None]:
         store, scope = self.resolve_scope(ctx)
-        main = await store.read(f'{scope}/{MAIN_FILENAME}', max_chars=self.max_memory_size)
-        subfiles, files_truncated = await list_subfiles(
-            store,
-            scope,
-            limit=injection_listing_limit(self.max_tokens),
-        )
-        return main, subfiles, files_truncated
+        try:
+            main = await store.read(f'{scope}/{MAIN_FILENAME}', max_chars=self.max_memory_size)
+            subfiles, files_truncated = await list_subfiles(
+                store,
+                scope,
+                limit=injection_listing_limit(self.max_tokens),
+            )
+        except Exception as exc:
+            if self.injection_errors == 'raise':
+                raise
+            # Best-effort injection must not inherit an engine's retry policy and stall a
+            # workflow. Return content-safe failure metadata as the durable result instead.
+            return None, [], False, type(exc).__name__
+        return main, subfiles, files_truncated, None
 
     def _remove_previous_injection(self, messages: list[ModelMessage], marker: str) -> None:
         for index, message in enumerate(messages):

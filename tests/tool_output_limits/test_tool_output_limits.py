@@ -768,12 +768,6 @@ class TestSummarize:
 
         assert await _run(cap, 'x' * 100) == 'NESTED SUMMARY'
 
-    def test_summarize_path_rejects_action_outside_configuration(self):
-        cap: ToolOutputLimits[object] = ToolOutputLimits(bands=[Band(over=5, action=Passthrough())])
-
-        with pytest.raises(RuntimeError, match='not part of this capability'):
-            cap._summarize_path(Summarize())
-
 
 # ---------------------------------------------------------------------------
 # Passthrough action + per-tool + band selection

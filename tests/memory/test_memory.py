@@ -144,6 +144,28 @@ async def test_snapshot_load_dispatches_as_durable_operation() -> None:
     assert 'memory__capability__memory.load_snapshot' in {name for name, _ in bound.calls}
 
 
+async def test_snapshot_dispatch_failure_is_ignored_and_recorded() -> None:
+    operation = 'memory__capability__memory.load_snapshot'
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    durability = RecordingDurability(fail_operations=frozenset({operation}))
+    agent = Agent(
+        TestModel(call_tools=[]),
+        name='memory',
+        capabilities=[Memory[object](id='memory'), durability],
+    )
+    agent.instrument = InstrumentationSettings(tracer_provider=provider, include_content=False)
+
+    result = await agent.run('continue')
+
+    assert not _memory_contexts(result.all_messages())
+    span = next(span for span in exporter.get_finished_spans() if span.name == 'memory.inject')
+    assert span.attributes is not None
+    assert span.attributes['memory.exception_type'] == 'RuntimeError'
+    assert operation in {name for name, _ in durability.calls}
+
+
 @dataclass
 class DelegatingStore:
     """A custom `MemoryStore` without the optional native-search protocol."""

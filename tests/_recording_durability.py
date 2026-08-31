@@ -30,9 +30,15 @@ class _RecordingConfig:
 
 
 class _RecordingBackend(CallableOperationBackend[None]):
-    def __init__(self, agent_name: str, calls: list[tuple[str, tuple[object, ...]]]) -> None:
+    def __init__(
+        self,
+        agent_name: str,
+        calls: list[tuple[str, tuple[object, ...]]],
+        fail_operations: frozenset[str],
+    ) -> None:
         super().__init__(namer=JournalOperationNamer(agent_name), config=_RecordingConfig())
         self.calls = calls
+        self.fail_operations = fail_operations
 
     async def execute(
         self,
@@ -44,6 +50,8 @@ class _RecordingBackend(CallableOperationBackend[None]):
         config: None,
     ) -> object:
         self.calls.append((name, cache_key))
+        if name in self.fail_operations:
+            raise RuntimeError(f'{name} failed')
         return await body()
 
 
@@ -56,13 +64,14 @@ class RecordingDurability(BaseDurabilityCapability[object]):
         wrapped_toolset_kinds=frozenset(),
     )
 
-    def __init__(self) -> None:
+    def __init__(self, *, fail_operations: frozenset[str] = frozenset()) -> None:
         super().__init__()
         self.calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fail_operations = fail_operations
 
     @property
     def in_durable_context(self) -> bool:
         return True
 
     def get_durable_operation_backend(self) -> _RecordingBackend:
-        return _RecordingBackend(self.name, self.calls)
+        return _RecordingBackend(self.name, self.calls, self.fail_operations)
