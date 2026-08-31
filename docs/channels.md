@@ -57,7 +57,7 @@ an integration, not an `AbstractCapability`.
   current process. Implement `ConversationStore` for durable storage.
 - One `ChannelHost` serves one adapter. Use separate hosts and stores for
   multiple bot accounts or providers.
-- Run one live host process for each bot installation. The in-process lane and
+- Route each bot installation to exactly one live host process. The in-process lane and
   replace-style store API do not serialize turns across multiple workers.
 
 The host accepts agents with text output. It does not convert structured or
