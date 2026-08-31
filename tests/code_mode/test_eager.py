@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Sequence
 import pytest
 from pydantic_ai import Agent, RunContext, Tool
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import (
     AgentStreamEvent,
     ModelMessage,
@@ -100,6 +100,10 @@ def _run_code_return_content(messages: list[ModelMessage]) -> object:
 
 
 class TestEagerExecution:
+    async def test_eager_and_speculate_are_mutually_exclusive(self):
+        with pytest.raises(UserError, match='mutually exclusive'):
+            CodeMode[None](eager=True, speculate=['search'])
+
     async def test_statements_execute_while_the_model_is_still_streaming(self):
         """The stream stalls until the first statement's tool call has run.
 

@@ -10,11 +10,13 @@ from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import AbstractToolset
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.capabilities._tool_search import ToolSearch as _ToolSearch
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import AgentStreamEvent, ModelResponse, NativeToolSearchReturnPart, SystemPromptPart
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector
 from typing_extensions import TypedDict
 
 from pydantic_ai_harness.code_mode._eager import EagerState
+from pydantic_ai_harness.code_mode._speculation import SpeculationState, SpeculationStats
 from pydantic_ai_harness.code_mode._toolset import (
     CodeModeMount,
     CodeModeOS,
@@ -118,6 +120,27 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     both caps.
     """
 
+    speculate: Sequence[str] | Literal['declared'] | None = None
+    """Tool names that may start executing while the model is still streaming `run_code` code.
+
+    Experimental. When set, the streamed `code` argument is parsed as it arrives, and calls to
+    these tools whose arguments are all keyword literals launch immediately; when the completed
+    snippet executes, matching dispatches claim the in-flight results instead of starting cold.
+    This overlaps tool latency with model generation (speculative programmatic tool calling,
+    <https://alexzhang13.github.io/blog/2026/spec-ptc/>).
+
+    Name only tools without observable side effects: a speculated call can run for a branch the
+    snippet never takes, and its early launch is otherwise indistinguishable from the normal
+    call only when re-running or discarding it is harmless. Tool hooks fire at launch time.
+    Unclaimed launches are cancelled when the snippet finishes. Enabling this puts runs in
+    streaming mode, and has no effect under Temporal durable execution.
+
+    Pass `'declared'` instead of a list to trust the tools' own definitions as evidence:
+    first-party tools marked `Tool(..., metadata={'side_effect_free': True})` (or
+    `'idempotent'`), and MCP tools whose server publishes the `readOnlyHint` or
+    `idempotentHint` annotation.
+    """
+
     eager: bool = False
     """Execute streamed `run_code` statements in the live REPL as they close.
 
@@ -126,9 +149,16 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     streamed, and the `run_code` dispatch only executes the remainder. Side effects land
     before the tool call is committed and are not rolled back; a statement that fails leaves
     the session exactly as a failed snippet does today (assignments before the failing line
-    persist) and surfaces the error as the `run_code` result. Enabling this puts runs in
-    streaming mode, and has no effect under Temporal durable execution.
+    persist) and surfaces the error as the `run_code` result. Mutually exclusive with
+    `speculate`, which instead shadow-launches allowlisted pure calls and reconciles them
+    with claim/evict. Enabling this puts runs in streaming mode, and has no effect under
+    Temporal durable execution.
     """
+
+    speculation_stats: SpeculationStats = field(default_factory=SpeculationStats, init=False, repr=False)
+    """Aggregate launch/adopt/evict counters across this instance's runs; observability for the POC."""
+
+    _speculation_state: SpeculationState | None = field(default=None, init=False, repr=False)
 
     _eager_state: EagerState | None = field(default=None, init=False, repr=False)
 
@@ -164,17 +194,38 @@ class CodeMode(AbstractCapability[AgentDepsT]):
 
     _announced_tools: set[str] = field(default_factory=set[str], init=False, repr=False)
 
+    def __post_init__(self) -> None:
+        """Reject contradictory streaming tiers at construction."""
+        if self.eager and self.speculate is not None:
+            raise UserError(
+                '`eager` and `speculate` are mutually exclusive: eager execution runs the real '
+                'statements in order, speculation shadow-launches allowlisted calls. Choose one.'
+            )
+        if isinstance(self.speculate, str) and self.speculate != 'declared':
+            raise UserError(
+                f"`speculate` accepts a list of tool names or the string 'declared', "
+                f'not {self.speculate!r}. To allowlist one tool, pass a one-element list.'
+            )
+
     def get_ordering(self) -> CapabilityOrdering:
         """CodeMode wraps around ToolSearch so that search_tools stays native."""
         return CapabilityOrdering(position='outermost', wraps=[_ToolSearch])
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> CodeMode[AgentDepsT]:
         """Return a fresh instance so concurrent runs don't share mutable per-run state."""
-        if not self.dynamic_catalog and not self.eager:
+        if not self.dynamic_catalog and self.speculate is None and not self.eager:
             return self
-        # `replace` re-runs `__init__`, resetting `init=False` fields: `_announced_tools`
-        # starts fresh (intended).
         clone = replace(self)
+        # `replace` re-runs `__init__`, resetting `init=False` fields: `_announced_tools` starts
+        # fresh (intended), and the stats object is rebound so callers holding this instance
+        # observe counters accumulated by its per-run clones.
+        clone.speculation_stats = self.speculation_stats
+        if self.speculate is not None:
+            if isinstance(self.speculate, str):
+                allowlist: frozenset[str] | Literal['declared'] = 'declared'
+            else:
+                allowlist = frozenset(self.speculate)
+            clone._speculation_state = SpeculationState(allowlist=allowlist, stats=self.speculation_stats)
         if self.eager:
             clone._eager_state = EagerState()
         return clone
@@ -190,6 +241,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
             dynamic_catalog=self.dynamic_catalog,
             os_access=self.os_access,
             mount=self.mount,
+            speculation=self._speculation_state,
             eager=self._eager_state,
         )
         if self._eager_state is not None:
@@ -198,12 +250,12 @@ class CodeMode(AbstractCapability[AgentDepsT]):
 
     @property
     def has_wrap_run_event_stream(self) -> bool:
-        """Report the stream hook only when eager execution is enabled.
+        """Report the stream hook only when a streaming tier is enabled.
 
         The base class detects a class-level override, which would put every `CodeMode` user in
         streaming mode; gating on the instance keeps plain `CodeMode` runs non-streaming.
         """
-        return self.eager
+        return self.speculate is not None or self.eager
 
     async def wrap_run_event_stream(
         self,
@@ -211,33 +263,47 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         *,
         stream: AsyncIterable[AgentStreamEvent],
     ) -> AsyncIterable[AgentStreamEvent]:
-        """Feed streamed `run_code` argument deltas to the eager statement pump.
+        """Feed streamed `run_code` argument deltas to whichever streaming tier is active.
 
-        Wrapped events pass through unmodified; the watcher acts purely by side effect,
-        enqueueing closed statements for execution in the live REPL. Inactive under Temporal,
-        where overlapping non-deterministic work with the stream has no place in a replayed
-        workflow.
+        Wrapped events pass through unmodified. The eager watcher acts purely by side
+        effect, enqueueing closed statements for the REPL pump. The speculation watcher
+        launches eligible calls and produces events, which are yielded directly into the
+        stream right behind the event that produced them; yielding (rather than
+        `ctx.emit_event`) is what makes them live, at the cost of bypassing `@on_event`
+        listener dispatch, which happens upstream of capability wrappers. Inactive under
+        Temporal, where overlapping non-deterministic work with the stream has no place in
+        a replayed workflow.
         """
-        state = self._eager_state
-        if state is not None and _in_temporal_workflow(ctx):
-            state = None
+        eager = self._eager_state
+        speculation = self._speculation_state
+        if _in_temporal_workflow(ctx):
+            eager = None
+            speculation = None
+        run_id = next((rid for rid, cap in ctx.capabilities.items() if cap is self), None)
         try:
             async for event in stream:
                 yield event
-                if state is not None:
-                    await state.observe(event, ctx)
+                if eager is not None:
+                    await eager.observe(event, ctx)
+                if speculation is not None:
+                    for spec_event in await speculation.observe(event, ctx):
+                        yield replace(spec_event, capability_id=run_id) if run_id is not None else spec_event
         finally:
             if isinstance(stream, AsyncGenerator):
                 await stream.aclose()
 
     async def after_run(self, ctx: RunContext[AgentDepsT], *, result: AgentRunResult[Any]) -> AgentRunResult[Any]:
-        """Stop any statement pump the stream abandoned before the run returns."""
+        """Cancel speculative launches and stop any statement pump before the run returns."""
+        if self._speculation_state is not None:
+            await self._speculation_state.close(ctx)
         if self._eager_state is not None:
             await self._eager_state.close()
         return result
 
     async def on_run_error(self, ctx: RunContext[AgentDepsT], *, error: BaseException) -> AgentRunResult[Any]:
-        """Stop any statement pump when the run fails, then let the error propagate."""
+        """Cancel speculative launches and stop any statement pump, then let the error propagate."""
+        if self._speculation_state is not None:
+            await self._speculation_state.close(ctx)
         if self._eager_state is not None:
             await self._eager_state.close()
         raise error
@@ -251,16 +317,35 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         args: ValidatedToolArgs,
         result: Any,
     ) -> Any:
-        """Announce newly-discovered tools when `dynamic_catalog` is enabled.
+        """Flush buffered speculation events, and announce newly-discovered tools.
 
-        The native-search path is handled by
+        Speculation claim/miss/eviction events buffer during `run_code` execution because
+        capability-event attribution requires a capability hook context; this dispatch is the
+        first one after the snippet finishes. The discovery announcement is only active with
+        `dynamic_catalog=True`; the native-search path is handled by
         [`after_model_request`][pydantic_ai_harness.CodeMode.after_model_request] instead
         (server-side search emits a `NativeToolSearchReturnPart` rather than a regular tool
         execute result).
         """
+        if self._speculation_state is not None:
+            await self._speculation_state.flush_events(ctx)
         if self.dynamic_catalog and tool_def.tool_kind == 'tool-search':
             self._announce_newly_discovered(ctx, _extract_discovered_names(result))
         return result
+
+    async def before_model_request(
+        self, ctx: RunContext[AgentDepsT], request_context: ModelRequestContext
+    ) -> ModelRequestContext:
+        """Flush speculation events buffered by a snippet whose failure skipped `after_tool_execute`.
+
+        A snippet that fails into a `ModelRetry` produces no `after_tool_execute` dispatch, so
+        its buffered claim/miss/eviction events would otherwise wait for run end, after the
+        stream has closed. The retry's next model request is the first hook context with a live
+        stream; flushing here puts the events on it.
+        """
+        if self._speculation_state is not None:
+            await self._speculation_state.flush_events(ctx)
+        return request_context
 
     async def after_model_request(
         self,
