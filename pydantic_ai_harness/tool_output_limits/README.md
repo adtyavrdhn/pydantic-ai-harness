@@ -208,8 +208,9 @@ built-in prompt entirely. The `summary_prompt` template on the capability must c
 `{tool_name}` and `{output}` placeholders.
 
 With a durable-execution capability attached, built-in model summarization is a journaled
-capability operation. Set an explicit, stable `id` on `ToolOutputLimits` so workers recover it
-under the same identity; omitting it raises `UserError` during agent construction. The text being
+capability operation. `ToolOutputLimits` carries the stable default `id='tool_output_limits'`, so
+durable recovery works without configuration. Set an explicit `id` when attaching more than one
+`ToolOutputLimits` instance to one agent, so each keeps its own operation identity. The text being
 summarized is part of the journaled operation input, so use `Spill` rather than built-in
 `Summarize` for outputs near the durability engine's payload limit. A custom `summarize` callable
 runs directly and may be called again on replay because arbitrary callables cannot be reconstructed
