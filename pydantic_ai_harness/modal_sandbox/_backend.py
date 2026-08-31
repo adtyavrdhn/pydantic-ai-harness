@@ -633,7 +633,7 @@ class ModalSandboxBackend:
         except BaseException:
             try:
                 await backend.close(terminate=True)
-            except Exception:
+            except Exception:  # pragma: no cover - `close` preserves the pending cancellation instead
                 pass
             raise
         return backend
