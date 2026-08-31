@@ -281,7 +281,9 @@ class TestThroughAgent:
         assert returns == ['# Host capabilities']
 
     @pytest.mark.skipif(os.name == 'posix', reason='host fallback is disabled only on non-POSIX platforms')
-    async def test_framework_default_sandbox_does_not_use_host_off_posix(self, tmp_path: Path) -> None:
+    async def test_framework_default_sandbox_does_not_use_host_off_posix(  # pragma: no cover
+        self, tmp_path: Path
+    ) -> None:
         (tmp_path / 'capabilities.md').write_text('# Host capabilities', encoding='utf-8')
 
         def call_then_finish(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

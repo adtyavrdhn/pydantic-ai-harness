@@ -327,6 +327,16 @@ class TestScanAssets:
         assert inv.roots[0].settings == '.claude/settings.json'
         assert inv.roots[0].skills == []
 
+    async def test_skill_inventory_ignores_parent_directory_entries(self, tmp_path: Path) -> None:
+        sandbox = MagicMock(spec=Sandbox)
+        sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
+        sandbox.fs.stat = AsyncMock(return_value=SimpleNamespace(is_dir=True))
+        sandbox.fs.list_dir = AsyncMock(side_effect=[[SimpleNamespace(name='..', is_dir=True)], []])
+
+        inventory = await scan_assets(sandbox, tmp_path, ('.claude',))
+
+        assert inventory.roots[0].skills == []
+
     async def test_returns_model(self, tmp_path: Path, sandbox: Sandbox) -> None:
         assert isinstance(await scan_assets(sandbox, tmp_path, ()), AgentContextInventory)
 
