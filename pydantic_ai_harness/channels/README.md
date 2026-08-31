@@ -27,7 +27,8 @@ Create a Slack app with `chat:write`, `app_mentions:read`, and `im:history` bot
 scopes. Subscribe it to `app_mention` and `message.im`. Set `SLACK_BOT_TOKEN`
 and `SLACK_SIGNING_SECRET` from the app settings, keeping both outside source
 control. Replace `U0123456789` below with your Slack member id from
-**Profile > Copy member ID**.
+**Profile > Copy member ID**, and `C0123456789` with a channel where the bot may
+answer mentions.
 
 ```python
 import os
@@ -48,12 +49,13 @@ agent = Agent('anthropic:claude-fable-5')
 channel = SlackChannel(
     os.environ['SLACK_BOT_TOKEN'],
     os.environ['SLACK_SIGNING_SECRET'],
+    allowed_channel_ids={'C0123456789'},
 )
 host = ChannelHost(agent, channel, allowed_senders={'U0123456789'})
 
 
 async def receive_slack(request: Request) -> PlainTextResponse:
-    result = channel.handle_webhook(
+    result = await channel.handle_webhook(
         WebhookRequest(request.method, request.headers, request.query_params, await request.body())
     )
     return PlainTextResponse(result.body, status_code=result.status_code)
@@ -79,7 +81,8 @@ For GovSlack, pass `api_base_url='https://slack-gov.com/api'` to `SlackChannel`.
 
 The task group owns the channel service and waits for cancellation and cleanup during shutdown.
 The lifespan and route must use the same process and async event-loop thread.
-Multi-worker deployments need external ingress routing and storage.
+Run one host process for each Slack app installation. Terminate TLS and limit
+request body size in the ASGI server or reverse proxy.
 
 ## How channels fit Pydantic AI
 
@@ -125,8 +128,10 @@ History remains saved after a successful run even when delivery cannot be
 confirmed.
 
 `SlackChannel` retries one `chat.postMessage` call after an HTTP 429 with a
-valid non-negative `Retry-After`. It does not retry timeouts or other
-ambiguous failures because Slack may already have accepted the message.
+valid non-negative `Retry-After` of at most 60 seconds. Longer delays fail the
+delivery instead of holding that conversation's turn slot. It does not retry
+timeouts or other ambiguous failures because Slack may already have accepted
+the message. If a later text chunk fails, earlier chunks remain visible.
 
 The webhook handler verifies and enqueues a request before returning HTTP 200.
 It returns HTTP 503 while the channel is opening or when its bounded queue is
@@ -149,10 +154,10 @@ Slack signatures are checked over the exact request bytes with the app signing
 secret. Requests more than five minutes from the local clock are rejected.
 Replies disable link and media unfurling so Slack does not fetch URLs generated
 by the agent.
-`SlackChannel` validates one workspace and drops events from other workspaces,
+Slack direct messages are enabled by default. App mentions are accepted only
+from `allowed_channel_ids`. The adapter also drops events from other workspaces,
 bot-authored messages, edits, messages with a subtype (including file shares),
-and unaddressed channel messages. These filters
-also prevent the bot from responding to its own replies.
+and unaddressed channel messages.
 
 ## Adapters and stores
 

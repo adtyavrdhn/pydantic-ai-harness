@@ -97,8 +97,8 @@ class TestSlackChannel:
         async with channel:
             async with aclosing(channel.messages()) as messages:
                 request = event_request('Ev1', direct_message())
-                assert channel.handle_webhook(request).status_code == 200
-                assert channel.handle_webhook(request).status_code == 200
+                assert (await channel.handle_webhook(request)).status_code == 200
+                assert (await channel.handle_webhook(request)).status_code == 200
                 message = await anext(messages)
 
         assert (message.conversation_id, message.sender_id, message.message_id, message.text) == (
@@ -113,10 +113,10 @@ class TestSlackChannel:
     async def test_handles_challenge_and_rejects_invalid_requests(self) -> None:
         channel = SlackChannel('xoxb-token', _SIGNING_SECRET)
         challenge = signed_request({'type': 'url_verification', 'challenge': 'verify-me'})
-        assert channel.handle_webhook(challenge).body == 'verify-me'
-        assert channel.handle_webhook(signed_request({'type': 'url_verification'})).status_code == 400
-        assert channel.handle_webhook(signed_request({'type': 'other'})).status_code == 200
-        assert channel.handle_webhook(signed_request({}, method='GET')).status_code == 405
+        assert (await channel.handle_webhook(challenge)).body == 'verify-me'
+        assert (await channel.handle_webhook(signed_request({'type': 'url_verification'}))).status_code == 400
+        assert (await channel.handle_webhook(signed_request({'type': 'other'}))).status_code == 200
+        assert (await channel.handle_webhook(signed_request({}, method='GET'))).status_code == 405
 
         bad_signature = WebhookRequest(
             method='POST',
@@ -127,7 +127,7 @@ class TestSlackChannel:
             query={},
             body=b'{}',
         )
-        assert channel.handle_webhook(bad_signature).status_code == 401
+        assert (await channel.handle_webhook(bad_signature)).status_code == 401
         non_ascii_signature = WebhookRequest(
             method='POST',
             headers={
@@ -137,10 +137,10 @@ class TestSlackChannel:
             query={},
             body=b'{}',
         )
-        assert channel.handle_webhook(non_ascii_signature).status_code == 401
-        assert channel.handle_webhook(WebhookRequest('POST', {}, {}, b'{}')).status_code == 401
+        assert (await channel.handle_webhook(non_ascii_signature)).status_code == 401
+        assert (await channel.handle_webhook(WebhookRequest('POST', {}, {}, b'{}'))).status_code == 401
         assert (
-            channel.handle_webhook(
+            await channel.handle_webhook(
                 WebhookRequest(
                     'POST',
                     {
@@ -150,10 +150,9 @@ class TestSlackChannel:
                     {},
                     b'{}',
                 )
-            ).status_code
-            == 401
-        )
-        assert channel.handle_webhook(signed_request({}, timestamp=int(time.time()) - 301)).status_code == 401
+            )
+        ).status_code == 401
+        assert (await channel.handle_webhook(signed_request({}, timestamp=int(time.time()) - 301))).status_code == 401
         oversized_timestamp = WebhookRequest(
             'POST',
             {
@@ -163,22 +162,24 @@ class TestSlackChannel:
             {},
             b'{}',
         )
-        assert channel.handle_webhook(oversized_timestamp).status_code == 401
+        assert (await channel.handle_webhook(oversized_timestamp)).status_code == 401
 
-        assert channel.handle_webhook(signed_body(b'not json')).status_code == 400
+        assert (await channel.handle_webhook(signed_body(b'not json'))).status_code == 400
 
     async def test_requires_open_channel_for_events(self) -> None:
         channel = SlackChannel('xoxb-token', _SIGNING_SECRET)
-        assert channel.handle_webhook(event_request('Ev1', direct_message())).status_code == 503
+        assert (await channel.handle_webhook(event_request('Ev1', direct_message()))).status_code == 503
 
     async def test_filters_unaddressed_and_bot_authored_events(self) -> None:
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: auth_response()))
         channel = SlackChannel('xoxb-token', _SIGNING_SECRET, http_client=client)
 
         async with channel:
-            assert channel.handle_webhook(event_request('Ev0', direct_message(), team_id='other')).status_code == 200
             assert (
-                channel.handle_webhook(
+                await channel.handle_webhook(event_request('Ev0', direct_message(), team_id='other'))
+            ).status_code == 200
+            assert (
+                await channel.handle_webhook(
                     signed_request(
                         {
                             'type': 'event_callback',
@@ -186,20 +187,26 @@ class TestSlackChannel:
                             'event': direct_message(),
                         }
                     )
-                ).status_code
-                == 400
-            )
+                )
+            ).status_code == 400
             ignored = [
                 {**direct_message(user='UBOT')},
                 {**direct_message(), 'bot_id': 'B1'},
                 {**direct_message(), 'subtype': 'message_changed'},
                 {**direct_message(), 'channel_type': 'channel'},
+                {
+                    'type': 'app_mention',
+                    'channel': 'C2',
+                    'user': 'U1',
+                    'text': '<@UBOT> hello',
+                    'ts': '123.45',
+                },
                 {**direct_message(), 'text': ''},
                 {'type': 'reaction_added'},
                 123,
             ]
             for index, event in enumerate(ignored):
-                assert channel.handle_webhook(event_request(f'Ev{index + 1}', event)).status_code == 200
+                assert (await channel.handle_webhook(event_request(f'Ev{index + 1}', event))).status_code == 200
 
         await client.aclose()
 
@@ -216,10 +223,10 @@ class TestSlackChannel:
             async with aclosing(channel.messages()) as messages:
                 first = event_request('Ev1', direct_message(text='first'))
                 second = event_request('Ev2', direct_message(text='second'))
-                assert channel.handle_webhook(first).status_code == 200
-                assert channel.handle_webhook(second).status_code == 503
+                assert (await channel.handle_webhook(first)).status_code == 200
+                assert (await channel.handle_webhook(second)).status_code == 503
                 assert (await anext(messages)).text == 'first'
-                assert channel.handle_webhook(second).status_code == 200
+                assert (await channel.handle_webhook(second)).status_code == 200
                 assert (await anext(messages)).text == 'second'
 
         await client.aclose()
@@ -237,10 +244,10 @@ class TestSlackChannel:
             async with aclosing(channel.messages()) as messages:
                 for index in range(10_001):
                     request = event_request(f'Ev{index}', direct_message(text=str(index)))
-                    assert channel.handle_webhook(request).status_code == 200
+                    assert (await channel.handle_webhook(request)).status_code == 200
                     await anext(messages)
                 first = event_request('Ev0', direct_message(text='first again'))
-                assert channel.handle_webhook(first).status_code == 200
+                assert (await channel.handle_webhook(first)).status_code == 200
                 assert (await anext(messages)).text == 'first again'
 
         await client.aclose()
@@ -255,7 +262,12 @@ class TestSlackChannel:
             return response({'ok': True, 'ts': '124.00'})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        channel = SlackChannel('xoxb-token', _SIGNING_SECRET, http_client=client)
+        channel = SlackChannel(
+            'xoxb-token',
+            _SIGNING_SECRET,
+            allowed_channel_ids={'C1'},
+            http_client=client,
+        )
         mention = {
             'type': 'app_mention',
             'channel': 'C1',
@@ -266,17 +278,17 @@ class TestSlackChannel:
 
         async with channel:
             async with aclosing(channel.messages()) as messages:
-                assert channel.handle_webhook(event_request('Ev1', mention)).status_code == 200
+                assert (await channel.handle_webhook(event_request('Ev1', mention))).status_code == 200
                 message = await anext(messages)
                 await channel.send_text(message.conversation_id, 'reply')
                 continued = {**mention, 'thread_ts': '100.00'}
-                assert channel.handle_webhook(event_request('Ev2', continued)).status_code == 200
+                assert (await channel.handle_webhook(event_request('Ev2', continued))).status_code == 200
                 continued_message = await anext(messages)
                 empty_thread = {**mention, 'thread_ts': ''}
-                assert channel.handle_webhook(event_request('Ev3', empty_thread)).status_code == 200
+                assert (await channel.handle_webhook(event_request('Ev3', empty_thread))).status_code == 200
                 empty_thread_message = await anext(messages)
                 threaded_dm = {**direct_message(), 'thread_ts': '110.00'}
-                assert channel.handle_webhook(event_request('Ev4', threaded_dm)).status_code == 200
+                assert (await channel.handle_webhook(event_request('Ev4', threaded_dm))).status_code == 200
                 dm_message = await anext(messages)
                 await channel.send_text(dm_message.conversation_id, 'dm reply')
 
@@ -326,7 +338,7 @@ class TestSlackChannel:
             task_group.start_soon(host.serve)
             with anyio.fail_after(1):
                 await opened.wait()
-            assert channel.handle_webhook(event_request('Ev1', direct_message())).status_code == 200
+            assert (await channel.handle_webhook(event_request('Ev1', direct_message()))).status_code == 200
             with anyio.fail_after(1):
                 await posted.wait()
             task_group.cancel_scope.cancel()
@@ -359,7 +371,7 @@ class TestSlackChannel:
                 return response(
                     {'ok': False, 'error': 'ratelimited'},
                     status_code=429,
-                    headers={'Retry-After': '61'},
+                    headers={'Retry-After': '60'},
                 )
             return response({'ok': True, 'ts': str(len(posts))})
 
@@ -374,7 +386,24 @@ class TestSlackChannel:
             {'channel': 'D1', 'text': 'a' * 4000, 'mrkdwn': False, 'unfurl_links': False, 'unfurl_media': False},
             {'channel': 'D1', 'text': 'a', 'mrkdwn': False, 'unfurl_links': False, 'unfurl_media': False},
         ]
-        assert delays == [61]
+        assert delays == [60]
+        await client.aclose()
+
+    async def test_does_not_hold_conversation_lane_for_long_rate_limit(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith('/auth.test'):
+                return auth_response()
+            return response(
+                {'ok': False, 'error': 'ratelimited'},
+                status_code=429,
+                headers={'Retry-After': '61'},
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        channel = SlackChannel('xoxb-token', _SIGNING_SECRET, http_client=client)
+        async with channel:
+            with pytest.raises(ChannelError, match='rate limited'):
+                await channel.send_text('dm:D1', 'hello')
         await client.aclose()
 
     async def test_uses_configured_api_root(self) -> None:
@@ -511,7 +540,7 @@ class TestSlackChannel:
 
         async with channel:
             async with aclosing(channel.messages()) as messages:
-                assert channel.handle_webhook(event_request('Ev1', direct_message())).status_code == 200
+                assert (await channel.handle_webhook(event_request('Ev1', direct_message()))).status_code == 200
                 assert (await anext(messages)).message_id == 'Ev1'
         await client.aclose()
 
@@ -520,11 +549,11 @@ class TestSlackChannel:
         channel = SlackChannel('token', _SIGNING_SECRET, http_client=client)
         async with channel:
             messages = channel.messages()
-            assert channel.handle_webhook(event_request('Ev1', direct_message())).status_code == 200
+            assert (await channel.handle_webhook(event_request('Ev1', direct_message()))).status_code == 200
             assert (await anext(messages)).message_id == 'Ev1'
             await messages.aclose()
 
-            assert channel.handle_webhook(event_request('Ev2', direct_message())).status_code == 503
+            assert (await channel.handle_webhook(event_request('Ev2', direct_message()))).status_code == 503
         await client.aclose()
 
     async def test_old_message_iterator_ends_after_channel_reopens(self) -> None:
@@ -532,14 +561,14 @@ class TestSlackChannel:
         channel = SlackChannel('token', _SIGNING_SECRET, http_client=client)
         messages = channel.messages()
         async with channel:
-            assert channel.handle_webhook(event_request('Ev1', direct_message())).status_code == 200
+            assert (await channel.handle_webhook(event_request('Ev1', direct_message()))).status_code == 200
             assert (await anext(messages)).message_id == 'Ev1'
 
         async with channel:
             with pytest.raises(StopAsyncIteration):
                 await anext(messages)
             async with aclosing(channel.messages()) as reopened_messages:
-                assert channel.handle_webhook(event_request('Ev1', direct_message())).status_code == 200
+                assert (await channel.handle_webhook(event_request('Ev1', direct_message()))).status_code == 200
                 assert (await anext(reopened_messages)).message_id == 'Ev1'
         await client.aclose()
 
@@ -561,6 +590,8 @@ class TestSlackChannel:
             SlackChannel('token', '')
         with pytest.raises(ValueError, match='api_base_url'):
             SlackChannel('token', _SIGNING_SECRET, api_base_url='')
+        with pytest.raises(TypeError, match='allowed_channel_ids'):
+            SlackChannel('token', _SIGNING_SECRET, allowed_channel_ids='C1')
         for value in (0, True):
             with pytest.raises(ValueError, match='max_queued_messages'):
                 SlackChannel('token', _SIGNING_SECRET, max_queued_messages=value)

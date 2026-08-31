@@ -18,7 +18,7 @@ import hashlib
 import hmac
 import math
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Collection, Mapping
 from types import TracebackType
 
 import anyio
@@ -37,6 +37,7 @@ from pydantic_ai_harness.channels._webhook import RecentMessageIds, WebhookInbox
 _API_BASE = 'https://slack.com/api'
 _MAX_TEXT_CHARS = 4000
 _MAX_SEEN_EVENTS = 10_000
+_MAX_INLINE_RETRY_DELAY = 60.0
 _REQUEST_TIMEOUT = 10.0
 _SIGNATURE_TOLERANCE_SECONDS = 300
 _MAPPING_ADAPTER = TypeAdapter(dict[str, object])
@@ -50,6 +51,7 @@ class SlackChannel:
         bot_token: str,
         signing_secret: str,
         *,
+        allowed_channel_ids: Collection[str] = (),
         http_client: httpx.AsyncClient | None = None,
         api_base_url: str = _API_BASE,
         max_queued_messages: int = 100,
@@ -59,11 +61,14 @@ class SlackChannel:
         Args:
             bot_token: Bot token with `chat:write` and subscribed-event scopes.
             signing_secret: Secret used to authenticate Events API requests.
+            allowed_channel_ids: Channel ids where app mentions may invoke the agent.
+                Direct messages remain enabled when this is empty.
             http_client: Optional client whose lifecycle remains owned by the caller.
             api_base_url: Slack Web API root. Use `https://slack-gov.com/api` for GovSlack.
             max_queued_messages: Maximum verified messages waiting for the host.
 
         Raises:
+            TypeError: If `allowed_channel_ids` is a string instead of a collection of ids.
             ValueError: If a credential is empty or the queue limit is not positive.
         """
         if not bot_token:
@@ -72,11 +77,14 @@ class SlackChannel:
             raise ValueError('signing_secret must not be empty')
         if not api_base_url:
             raise ValueError('api_base_url must not be empty')
+        if isinstance(allowed_channel_ids, str):
+            raise TypeError('allowed_channel_ids must be a collection of channel ids, not a string')
         if type(max_queued_messages) is not int or max_queued_messages <= 0:
             raise ValueError('max_queued_messages must be a positive integer')
 
         self._bot_token = bot_token
         self._signing_secret = signing_secret.encode()
+        self._allowed_channel_ids = frozenset(allowed_channel_ids)
         self._provided_client = http_client
         self._api_base_url = api_base_url.rstrip('/')
         self._client: httpx.AsyncClient | None = None
@@ -126,7 +134,7 @@ class SlackChannel:
             with anyio.CancelScope(shield=True):
                 await self._client.aclose()
 
-    def handle_webhook(self, request: WebhookRequest) -> WebhookResponse:
+    async def handle_webhook(self, request: WebhookRequest) -> WebhookResponse:
         """Authenticate and enqueue one Slack Events API request.
 
         This method performs no agent work and acknowledges Slack promptly. Call
@@ -214,7 +222,7 @@ class SlackChannel:
                 if isinstance(thread_timestamp, str) and thread_timestamp
                 else f'dm:{channel_id}'
             )
-        elif event_type == 'app_mention':
+        elif event_type == 'app_mention' and channel_id in self._allowed_channel_ids:
             thread_timestamp = event.get('thread_ts')
             if not isinstance(thread_timestamp, str) or not thread_timestamp:
                 thread_timestamp = timestamp
@@ -254,6 +262,8 @@ class SlackChannel:
             try:
                 await self._call('chat.postMessage', params)
             except _RateLimited as exc:
+                if exc.retry_after > _MAX_INLINE_RETRY_DELAY:
+                    raise
                 await anyio.sleep(exc.retry_after)
                 await self._call('chat.postMessage', params)
 
