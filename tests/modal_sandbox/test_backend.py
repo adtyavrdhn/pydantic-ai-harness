@@ -165,6 +165,41 @@ class TestConnect:
             await ModalSandboxBackend.connect('sb-keep')
 
 
+class TestConnectName:
+    async def test_connects_to_running_named_sandbox(self, fake_modal: FakeModal) -> None:
+        created = await ModalSandboxBackend.create(name='stable')
+
+        connected = await ModalSandboxBackend.connect_name('pydantic-ai-harness', 'stable')
+
+        assert connected.sandbox is created.sandbox
+
+    async def test_finished_named_sandbox_is_unavailable(self, fake_modal: FakeModal) -> None:
+        await ModalSandboxBackend.create(name='finished')
+        fake_modal.sandboxes[0].poll_result = 0
+
+        with pytest.raises(ModalSandboxUnavailableError, match='not running'):
+            await ModalSandboxBackend.connect_name('pydantic-ai-harness', 'finished')
+
+    async def test_auth_error_is_terminal(self, fake_modal: FakeModal) -> None:
+        fake_modal.attach_error = fake_modal.auth_type('unauthenticated')
+
+        with pytest.raises(ModalSandboxTerminalError, match='Modal rejected the credentials'):
+            await ModalSandboxBackend.connect_name('app', 'stable')
+
+    async def test_missing_modal_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        real_import = builtins.__import__
+
+        def no_modal(name: str, *args: object, **kwargs: object) -> object:
+            if name == 'modal':
+                raise ImportError('No module named modal')
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.delitem(sys.modules, 'modal', raising=False)
+        monkeypatch.setattr(builtins, '__import__', no_modal)
+        with pytest.raises(ModalSandboxError, match="The 'modal' package is required"):
+            await ModalSandboxBackend.connect_name('app', 'stable')
+
+
 class TestClose:
     async def test_terminates_and_detaches_when_owned(self, fake_modal: FakeModal) -> None:
         backend = await ModalSandboxBackend.create()
@@ -199,6 +234,15 @@ class TestClose:
         with pytest.raises(ModalSandboxError, match='detach boom'):
             await backend.close(terminate=True)
         assert fake_modal.sandboxes[0].terminated is True
+
+    async def test_auth_failure_during_close_is_typed(self, fake_modal: FakeModal) -> None:
+        backend = await ModalSandboxBackend.create()
+        fake_modal.sandboxes[0].terminate_error = fake_modal.auth_type('unauthenticated')
+
+        with pytest.raises(ModalSandboxTerminalError, match='Modal rejected the credentials'):
+            await backend.close(terminate=True)
+
+        assert fake_modal.sandboxes[0].detached is True
 
     async def test_hanging_terminate_is_bounded_and_detach_still_runs(
         self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
@@ -483,6 +527,15 @@ class TestProcess:
         process = await backend.start(['x'])
 
         assert [(chunk.stream, chunk.data) async for chunk in process.stream()] == [('stdout', 'é')]
+
+    async def test_stream_flushes_incomplete_utf8_at_eof(self, fake_modal: FakeModal) -> None:
+        _skip_without_asyncio()
+        fake_modal.responder = lambda argv, timeout: (b'\xc3', b'', 0)
+        backend = await ModalSandboxBackend.create()
+
+        process = await backend.start(['x'])
+
+        assert [(chunk.stream, chunk.data) async for chunk in process.stream()] == [('stdout', '�')]
 
     async def test_wait_after_streaming_still_returns_the_whole_output(self, fake_modal: FakeModal) -> None:
         _skip_without_asyncio()
