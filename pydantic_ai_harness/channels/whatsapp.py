@@ -134,7 +134,8 @@ class WhatsAppChannel:
 
     async def _close_owned_client(self) -> None:
         if self._owns_client and self._client is not None:
-            await self._client.aclose()
+            with anyio.CancelScope(shield=True):
+                await self._client.aclose()
         self._owns_client = False
 
     def handle_webhook(self, request: WebhookRequest) -> WebhookResponse:
