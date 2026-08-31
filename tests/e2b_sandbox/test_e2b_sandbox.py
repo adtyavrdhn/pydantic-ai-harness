@@ -52,10 +52,11 @@ class TestLifecycle:
 
     async def test_acquire_chooses_oldest_matching_sandbox(self, fake_e2b: FakeE2B) -> None:
         metadata = {'pydantic-ai-run-id': 'run-1'}
-        fake_e2b.new_sandbox('oldest', metadata)
-        fake_e2b.new_sandbox('newest', metadata)
+        oldest = fake_e2b.new_sandbox('oldest', metadata)
+        newest = fake_e2b.new_sandbox('newest', metadata)
+        latest = fake_e2b.new_sandbox('latest', metadata)
         # E2B 2.34 cannot order this query server-side, so exercise an unordered response.
-        fake_e2b.sandboxes.reverse()
+        fake_e2b.sandboxes[:] = [newest, oldest, latest]
 
         ref = await E2BSandbox[None]().acquire_sandbox(_ctx())
 
@@ -114,6 +115,16 @@ class TestLifecycle:
         await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='gone'))
 
         assert fake_e2b.kill_ids == ['gone']
+
+    async def test_release_is_idempotent_when_sandbox_was_already_killed(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.new_sandbox('owned')
+        capability = E2BSandbox[None]()
+        ref = SandboxRef(provider='e2b', sandbox_id='owned')
+
+        await capability.release_sandbox(_ctx(), ref)
+        await capability.release_sandbox(_ctx(), ref)
+
+        assert fake_e2b.kill_ids == ['owned', 'owned']
 
     async def test_release_kill_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend._TEARDOWN_TIMEOUT', 0.05)
@@ -192,6 +203,9 @@ class TestConfiguration:
     def test_rejects_relative_workdir(self) -> None:
         with pytest.raises(ValueError, match='absolute'):
             E2BSandbox(workdir='repo')
+
+    def test_normalizes_absolute_workdir(self) -> None:
+        assert E2BSandbox(workdir='/workspace/../repo').workdir == '/repo'
 
     def test_rejects_non_boolean_internet_access(self) -> None:
         with pytest.raises(ValueError, match='allow_internet_access'):

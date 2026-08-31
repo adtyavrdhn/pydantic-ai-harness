@@ -114,6 +114,27 @@ class TestCreate:
             await E2BSandboxBackend.create()
         assert fake_e2b.sandboxes[0].killed is True
 
+    async def test_cancel_during_create_preserves_cancellation_when_cleanup_fails(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.kill_error = RuntimeError('cleanup failed')
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            await E2BSandboxBackend.create()
+
+    async def test_cancel_during_create_preserves_cancellation_when_cleanup_extra_disappears(
+        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        create = fake_e2b.module.AsyncSandbox.create
+
+        async def create_then_hide_extra(**kwargs: object) -> object:
+            sandbox = await create(**kwargs)
+            _hide_e2b(monkeypatch)
+            return sandbox
+
+        monkeypatch.setattr(fake_e2b.module.AsyncSandbox, 'create', create_then_hide_extra)
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            await E2BSandboxBackend.create()
+
     async def test_task_cancellation_during_create_kills_the_new_sandbox(self, fake_e2b: FakeE2B) -> None:
         if sniffio.current_async_library() != 'asyncio':
             pytest.skip('raw asyncio task cancellation requires asyncio')
@@ -228,6 +249,25 @@ class TestClose:
 
         with pytest.raises(E2BSandboxTerminalError, match='E2B rejected the credentials'):
             await backend.close(terminate=True)
+
+    async def test_close_names_the_missing_extra(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
+        backend = await E2BSandboxBackend.create()
+        _hide_e2b(monkeypatch)
+
+        with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
+            await backend.close(terminate=True)
+
+    async def test_find_id_names_the_missing_extra(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _hide_e2b(monkeypatch)
+
+        with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
+            await E2BSandboxBackend._find_id({})  # pyright: ignore[reportPrivateUsage]
+
+    async def test_kill_by_id_names_the_missing_extra(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _hide_e2b(monkeypatch)
+
+        with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
+            await E2BSandboxBackend._kill_by_id('missing')  # pyright: ignore[reportPrivateUsage]
 
     async def test_hanging_kill_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
         # Teardown runs shielded, so a hanging kill would be uncancellable; its own deadline
