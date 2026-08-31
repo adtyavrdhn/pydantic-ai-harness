@@ -404,7 +404,8 @@ A run-request / iteration limiter will therefore see compaction calls among its 
 
 With a durable-execution capability attached, the summary call runs as a contributed durable
 operation, so replay uses the recorded summary instead of calling the model again. When `model` is
-not set, the operation uses the run's model.
+not set, the operation uses the run's model. Set an explicit, stable `id` on the capability when
+using durable execution so workers can recover the operation by the same identity.
 
 ## `DeduplicateFileReads.file_key`
 
