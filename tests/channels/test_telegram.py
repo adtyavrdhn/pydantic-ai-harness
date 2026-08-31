@@ -122,6 +122,26 @@ class TestTelegramChannel:
         assert texts == ['a' * 4096, 'a' * 4096, 'a', '😀' * 2049]
         await client.aclose()
 
+    async def test_does_not_hold_conversation_lane_for_long_rate_limit(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith('/getMe'):
+                return response({'ok': True, 'result': {}})
+            return response(
+                {
+                    'ok': False,
+                    'description': 'Too Many Requests',
+                    'parameters': {'retry_after': 61},
+                },
+                status_code=429,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        channel = TelegramChannel('token', http_client=client)
+        async with channel:
+            with pytest.raises(ChannelError, match='Too Many Requests'):
+                await channel.send_text('chat', 'hello')
+        await client.aclose()
+
     async def test_provider_error_does_not_expose_token(self) -> None:
         calls = 0
 

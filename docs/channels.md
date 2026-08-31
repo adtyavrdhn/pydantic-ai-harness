@@ -99,7 +99,9 @@ History remains saved after a successful run even when delivery cannot be
 confirmed.
 
 The Telegram adapter retries one send when the Bot API returns an explicit
-`retry_after`. Its poll loop retries transient transport and response failures.
+`retry_after` of at most 60 seconds. Longer send delays fail the delivery instead
+of holding that conversation's turn slot. Its poll loop honors provider delays
+while retrying transient transport and response failures.
 Bot API errors 401, 404, and 409 stop polling because they indicate invalid
 credentials, a missing bot, or a conflicting webhook. After a week without a
 valid update, the adapter clears its offset because Telegram may randomize the

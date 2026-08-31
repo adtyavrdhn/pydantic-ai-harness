@@ -31,6 +31,7 @@ from pydantic_ai_harness.channels._types import ChannelError, InboundMessage
 
 _API_BASE = 'https://api.telegram.org'
 _MAX_TEXT_CHARS = 4096
+_MAX_INLINE_RETRY_DELAY = 60.0
 _REQUEST_TIMEOUT = 10.0
 _UPDATE_ID_RESET_SECONDS = 7 * 24 * 60 * 60
 _MAPPING_ADAPTER = TypeAdapter(dict[str, object])
@@ -134,6 +135,8 @@ class TelegramChannel:
             try:
                 await self._call('sendMessage', params)
             except _RateLimited as exc:
+                if exc.retry_after > _MAX_INLINE_RETRY_DELAY:
+                    raise
                 await anyio.sleep(exc.retry_after)
                 await self._call('sendMessage', params)
 
