@@ -98,6 +98,7 @@ class TelegramChannel:
         if self._client is not None:
             raise RuntimeError('TelegramChannel is already open')
         httpx_logger = logging.getLogger('httpx')
+        # Keep the singleton installed because HTTPX's logger is process-wide and adapters may overlap.
         if _TOKEN_FILTER not in httpx_logger.filters:
             httpx_logger.addFilter(_TOKEN_FILTER)
         self._client = self._provided_client or httpx.AsyncClient()
