@@ -318,8 +318,7 @@ class TestSlackChannel:
         ]
         await client.aclose()
 
-    @pytest.mark.parametrize('anyio_backend', ['asyncio'])
-    async def test_webhook_runs_agent_and_posts_reply(self, anyio_backend: str) -> None:
+    async def test_webhook_runs_agent_and_posts_reply(self) -> None:
         opened = anyio.Event()
         posted = anyio.Event()
         posts: list[dict[str, object]] = []
