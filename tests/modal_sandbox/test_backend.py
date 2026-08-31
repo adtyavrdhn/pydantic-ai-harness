@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 import sys
 import time
@@ -13,12 +14,10 @@ from pydantic_ai.sandboxes import Sandbox, SandboxBackend, SupportsFilesystem, S
 
 from pydantic_ai_harness.modal_sandbox import (
     ModalSandboxBackend,
-    ModalSandboxError,
-    ModalSandboxUnavailableError,
-)
-from pydantic_ai_harness.modal_sandbox._backend import (
     ModalSandboxCommandTimeoutError,
+    ModalSandboxError,
     ModalSandboxTerminalError,
+    ModalSandboxUnavailableError,
 )
 
 from .fake_modal import FakeModal, FileInfo, _AioCallable
@@ -32,6 +31,22 @@ class _HangingCall(_AioCallable):
 
     async def aio(self, *args: object, **kwargs: object) -> None:
         await anyio.sleep_forever()
+
+
+class _GatedCall:
+    def __init__(self, inner: _AioCallable, cleanup_error: Exception | None = None) -> None:
+        self._inner = inner
+        self._cleanup_error = cleanup_error
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def aio(self, *args: object, **kwargs: object) -> object:
+        self.started.set()
+        await self.release.wait()
+        result = await self._inner.aio(*args, **kwargs)
+        if self._cleanup_error is not None:
+            result.terminate_error = self._cleanup_error
+        return result
 
 
 def _skip_without_asyncio() -> None:
@@ -127,6 +142,71 @@ class TestCreate:
         assert fake_modal.sandboxes[0].terminated is True
         assert fake_modal.sandboxes[0].detached is True
 
+    async def test_task_cancellation_during_create_terminates_the_new_sandbox(
+        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _skip_without_asyncio()
+        create = _GatedCall(fake_modal.module.Sandbox.create)
+        monkeypatch.setattr(fake_modal.module.Sandbox, 'create', create)
+        creating = asyncio.create_task(ModalSandboxBackend.create())
+        await create.started.wait()
+
+        creating.cancel()
+        create.release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await creating
+        assert fake_modal.sandboxes[0].terminated is True
+        assert fake_modal.sandboxes[0].detached is True
+
+    async def test_task_cancellation_during_hung_create_is_bounded(
+        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _skip_without_asyncio()
+        monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._CREATE_TIMEOUT', 0.05)
+        create = _GatedCall(fake_modal.module.Sandbox.create)
+        monkeypatch.setattr(fake_modal.module.Sandbox, 'create', create)
+        creating = asyncio.create_task(ModalSandboxBackend.create())
+        await create.started.wait()
+
+        creating.cancel()
+
+        with anyio.fail_after(1):
+            with pytest.raises(asyncio.CancelledError):
+                await creating
+        assert fake_modal.sandboxes == []
+
+    async def test_task_cancellation_is_not_masked_by_cleanup_failure(
+        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _skip_without_asyncio()
+        create = _GatedCall(fake_modal.module.Sandbox.create, RuntimeError('cleanup failed'))
+        monkeypatch.setattr(fake_modal.module.Sandbox, 'create', create)
+        creating = asyncio.create_task(ModalSandboxBackend.create())
+        await create.started.wait()
+
+        creating.cancel()
+        create.release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await creating
+        assert fake_modal.sandboxes[0].detached is True
+
+    async def test_rejects_relative_workdir(self, fake_modal: FakeModal) -> None:
+        with pytest.raises(ValueError, match='workdir must be an absolute sandbox path'):
+            await ModalSandboxBackend.create(workdir='repo')
+
+    async def test_preserves_parent_segments_in_workdir(self, fake_modal: FakeModal) -> None:
+        await ModalSandboxBackend.create(workdir='/linked/../target')
+
+        assert fake_modal.create_kwargs[-1]['workdir'] == '/linked/../target'
+
+    async def test_named_create_translates_already_exists(self, fake_modal: FakeModal) -> None:
+        await ModalSandboxBackend.create(name='stable')
+
+        with pytest.raises(ModalSandboxError, match="named 'stable' already exists"):
+            await ModalSandboxBackend.create(name='stable')
+
 
 class TestConnect:
     async def test_connects_to_a_running_sandbox(self, fake_modal: FakeModal) -> None:
@@ -149,6 +229,12 @@ class TestConnect:
     async def test_connect_auth_error_is_terminal(self, fake_modal: FakeModal) -> None:
         fake_modal.attach_error = fake_modal.auth_type('unauthenticated')
         with pytest.raises(ModalSandboxTerminalError, match='Modal rejected the credentials'):
+            await ModalSandboxBackend.connect('sb-keep')
+
+    async def test_connect_sdk_error_is_translated(self, fake_modal: FakeModal) -> None:
+        fake_modal.attach_error = fake_modal.error_type('transport failed')
+
+        with pytest.raises(ModalSandboxError, match='transport failed'):
             await ModalSandboxBackend.connect('sb-keep')
 
     async def test_missing_modal_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,6 +270,12 @@ class TestConnectName:
         fake_modal.attach_error = fake_modal.auth_type('unauthenticated')
 
         with pytest.raises(ModalSandboxTerminalError, match='Modal rejected the credentials'):
+            await ModalSandboxBackend.connect_name('app', 'stable')
+
+    async def test_sdk_error_is_translated(self, fake_modal: FakeModal) -> None:
+        fake_modal.attach_error = fake_modal.error_type('transport failed')
+
+        with pytest.raises(ModalSandboxError, match='transport failed'):
             await ModalSandboxBackend.connect_name('app', 'stable')
 
     async def test_missing_modal_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -293,6 +385,19 @@ class TestRun:
         assert call.workdir == '/srv'
         assert call.env == {'FOO': 'bar'}
 
+    async def test_rejects_relative_cwd(self, fake_modal: FakeModal) -> None:
+        backend = await ModalSandboxBackend.create()
+
+        with pytest.raises(ValueError, match='cwd must be an absolute sandbox path'):
+            await backend.run(['pwd'], cwd='repo')
+
+    async def test_preserves_parent_segments_in_cwd(self, fake_modal: FakeModal) -> None:
+        backend = await ModalSandboxBackend.create()
+
+        await backend.run(['pwd'], cwd='/linked/../target')
+
+        assert fake_modal.sandboxes[0].exec_calls[-1].workdir == '/linked/../target'
+
     @pytest.mark.parametrize(
         ('command', 'shell', 'message'),
         [
@@ -347,14 +452,23 @@ class TestRun:
         # The server enforces the deadline before the client's own clock fires, so its
         # SIGKILL (exit 137) can beat Modal's -1 sentinel; a 137 that consumed the whole
         # deadline window is a timeout, not a mysterious ordinary exit.
-        def slow_kill(argv: list[str], timeout: int | None) -> tuple[str, str, int]:
-            time.sleep(1.05)  # exceed the 1s deadline; the fake responder runs inline
-            return ('', '', 137)
+        def deadline_kill(argv: list[str], timeout: int | None) -> tuple[str, str, int]:
+            time.sleep(1.05)  # the deadline is consumed inside the exec RPC, before `wait()`
+            return '', '', 137
 
-        fake_modal.responder = slow_kill
+        fake_modal.responder = deadline_kill
         backend = await ModalSandboxBackend.create()
         with pytest.raises(ModalSandboxCommandTimeoutError):
             await backend.run(['sleep', '99'], timeout=1)
+
+    async def test_deferred_wait_does_not_turn_an_early_sigkill_into_a_timeout(self, fake_modal: FakeModal) -> None:
+        fake_modal.responder = lambda argv, timeout: ('', '', 137)
+        backend = await ModalSandboxBackend.create()
+        process = await backend.start(['kill-self'], timeout=0.05)
+
+        await anyio.sleep(1.05)  # collect after Modal's rounded one-second deadline
+
+        assert (await process.wait()).exit_code == 137
 
     async def test_early_sigkill_is_a_real_exit(self, fake_modal: FakeModal) -> None:
         # A command that dies by SIGKILL well before the deadline (an OOM kill, a `kill -9`

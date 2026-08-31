@@ -3,25 +3,95 @@
 from __future__ import annotations
 
 import inspect
+from typing import cast
 
 import pytest
+from pydantic_ai import Agent
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.sandboxes import SandboxRef
+from pydantic_ai.sandboxes import Sandbox, SandboxRef
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 import pydantic_ai_harness
 import pydantic_ai_harness.modal_sandbox as modal_sandbox
-from pydantic_ai_harness.modal_sandbox import ModalSandbox, ModalSandboxBackend
+from pydantic_ai_harness.modal_sandbox import ModalSandbox, ModalSandboxBackend, ModalSandboxSession
+from pydantic_ai_harness.modal_sandbox._toolset import ModalSandboxToolset
 
 from .fake_modal import FakeModal
 
+pytestmark = pytest.mark.anyio(backends=['asyncio'])
 
-def _ctx(run_id: str = 'run-1') -> RunContext[None]:
-    return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id)
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return 'asyncio'
+
+
+def _ctx(run_id: str = 'run-1', *, sandbox: Sandbox | None = None) -> RunContext[None]:
+    if sandbox is None:
+        return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id)
+    return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id, sandbox=sandbox)
 
 
 class TestLifecycle:
+    async def test_released_tools_still_run(self, fake_modal: FakeModal) -> None:
+        backend = await ModalSandboxBackend.create()
+        ctx = _ctx(sandbox=Sandbox(backend))
+        toolset = cast(ModalSandboxToolset[None], ModalSandbox[None](max_output_bytes=100).get_toolset())
+        assert isinstance(toolset, ModalSandboxToolset)
+        run_toolset = await toolset.for_run(ctx)
+        assert isinstance(run_toolset, ModalSandboxToolset)
+
+        async with run_toolset:
+            assert await run_toolset.run_command(ctx, 'echo hello') == '[stdout]\nsh -c echo hello'
+            assert await run_toolset.write_file(ctx, '/note.txt', 'hello') == "Wrote 5 bytes to '/note.txt'."
+            assert await run_toolset.read_file(ctx, '/note.txt') == 'hello'
+            fake_modal.sandboxes[0].listing = []
+            assert await run_toolset.list_directory(ctx, '/') == '(empty)'
+        await backend.close(terminate=True)
+
+    async def test_released_tool_and_ctx_sandbox_share_one_sandbox(self, fake_modal: FakeModal) -> None:
+        async def respond(messages: list[ModelMessage], _: AgentInfo) -> ModelResponse:
+            returns = [
+                part
+                for message in messages
+                if isinstance(message, ModelRequest)
+                for part in message.parts
+                if isinstance(part, ToolReturnPart)
+            ]
+            if not returns:
+                return ModelResponse(parts=[ToolCallPart('write_file', {'path': '/shared.txt', 'content': 'same'})])
+            if len(returns) == 1:
+                return ModelResponse(parts=[ToolCallPart('read_via_ctx', {})])
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent = Agent(FunctionModel(respond), deps_type=type(None), capabilities=[ModalSandbox[None]()])
+
+        @agent.tool
+        async def read_via_ctx(ctx: RunContext[None]) -> str:
+            return await ctx.sandbox.read_text('/shared.txt')
+
+        result = await agent.run('Use the sandbox.')
+
+        assert result.output == 'done'
+        assert len(fake_modal.sandboxes) == 1
+        returns = [
+            part
+            for message in result.all_messages()
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        assert [part.content for part in returns] == ["Wrote 4 bytes to '/shared.txt'.", 'same']
+
+    def test_default_instructions_describe_released_tools(self) -> None:
+        instructions = ModalSandbox().get_instructions()
+
+        assert instructions is not None
+        assert all(name in instructions for name in ('run_command', 'read_file', 'write_file', 'list_directory'))
+
     async def test_acquire_is_idempotent_for_one_logical_run(self, fake_modal: FakeModal) -> None:
         capability = ModalSandbox[None]()
 
@@ -30,6 +100,7 @@ class TestLifecycle:
 
         assert first == second
         assert len(fake_modal.sandboxes) == 1
+        assert fake_modal.sandboxes[0].detached is True
         assert fake_modal.create_kwargs[0]['name'] is not None
 
     async def test_different_runs_use_different_names(self, fake_modal: FakeModal) -> None:
@@ -87,6 +158,17 @@ class TestLifecycle:
         assert ref == SandboxRef(provider='modal', sandbox_id='sb-existing')
         assert fake_modal.sandboxes == []
 
+    async def test_open_session_remains_caller_owned(self, fake_modal: FakeModal) -> None:
+        async with ModalSandboxSession() as session:
+            capability = ModalSandbox[None](session=session)
+            ref = await capability.acquire_sandbox(_ctx())
+
+            assert isinstance(await capability.get_sandbox(_ctx(), ref), ModalSandboxBackend)
+            await capability.release_sandbox(_ctx(), ref)
+            assert fake_modal.sandboxes[0].terminated is False
+
+        assert fake_modal.sandboxes[0].terminated is True
+
 
 class TestConfiguration:
     def test_defaults(self) -> None:
@@ -135,7 +217,11 @@ class TestConfiguration:
             'ModalSandbox',
             'ModalSandboxAuthError',
             'ModalSandboxBackend',
+            'ModalSandboxCommandTimeoutError',
             'ModalSandboxError',
+            'ModalSandboxExecResult',
+            'ModalSandboxSession',
+            'ModalSandboxTerminalError',
             'ModalSandboxUnavailableError',
         }
 

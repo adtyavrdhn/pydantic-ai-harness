@@ -8,17 +8,27 @@ a run as `sandbox=`.
 """
 
 from pydantic_ai_harness.modal_sandbox._backend import (
-    ModalSandboxAuthError,
     ModalSandboxBackend,
-    ModalSandboxError,
-    ModalSandboxUnavailableError,
+    ModalSandboxCommandTimeoutError,
 )
 from pydantic_ai_harness.modal_sandbox._capability import ModalSandbox
+from pydantic_ai_harness.modal_sandbox._session import (
+    ModalSandboxAuthError,
+    ModalSandboxError,
+    ModalSandboxExecResult,
+    ModalSandboxSession,
+    ModalSandboxTerminalError,
+    ModalSandboxUnavailableError,
+)
 
 __all__ = [
     'ModalSandbox',
     'ModalSandboxAuthError',
     'ModalSandboxBackend',
+    'ModalSandboxCommandTimeoutError',
     'ModalSandboxError',
+    'ModalSandboxExecResult',
+    'ModalSandboxSession',
+    'ModalSandboxTerminalError',
     'ModalSandboxUnavailableError',
 ]

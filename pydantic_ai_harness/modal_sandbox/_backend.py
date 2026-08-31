@@ -15,7 +15,7 @@ import itertools
 import math
 import posixpath
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -23,6 +23,13 @@ from typing import TYPE_CHECKING, Literal
 import anyio
 import anyio.lowlevel
 from typing_extensions import Self
+
+from pydantic_ai_harness.modal_sandbox._session import (
+    ModalSandboxAuthError,
+    ModalSandboxError,
+    ModalSandboxTerminalError,
+    ModalSandboxUnavailableError,
+)
 
 if TYPE_CHECKING:
     import modal
@@ -83,6 +90,11 @@ _TEARDOWN_TIMEOUT = 30
 # internal `pwd` probe behind `working_dir()`.
 _INTERNAL_EXEC_TIMEOUT = 10
 
+# A command deadline bounds the remote process but not a wedged control-plane wait RPC.
+# Give Modal time to report the server-side kill, then stop the background observer so an
+# abandoned process handle cannot retain a task forever.
+_EXIT_OBSERVER_GRACE = 30
+
 # What Modal's client reports when its own copy of a command's deadline ends the wait.
 _CLIENT_DEADLINE_EXIT = -1
 # The exit status of a process killed by SIGKILL (128 + 9): what the server side of the same
@@ -90,29 +102,38 @@ _CLIENT_DEADLINE_EXIT = -1
 _SIGKILL_EXIT = 137
 
 
-class ModalSandboxError(RuntimeError):
-    """Base class for failures reported by the Modal sandbox integration."""
+def _absolute_path(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not posixpath.isabs(value):
+        raise ValueError(f'{name} must be an absolute sandbox path or None, got {value!r}.')
+    return value
 
 
-class ModalSandboxTerminalError(ModalSandboxError):
-    """A sandbox failure that retrying the same operation cannot fix."""
-
-
-class ModalSandboxUnavailableError(ModalSandboxTerminalError):
-    """The sandbox no longer exists: terminated, or expired at its `sandbox_timeout`.
-
-    Every later command against it would fail the same way, so it is terminal. For an
-    owned sandbox this is what a run outliving the sandbox lifetime looks like; raise
-    `sandbox_timeout` (or shorten the work) if runs legitimately need longer.
-    """
-
-
-class ModalSandboxAuthError(ModalSandboxTerminalError):
-    """Modal rejected the credentials, so no sandbox operation can succeed.
-
-    Fixing this is an operator action (configure credentials), not something a
-    retry or a new run can do, which is why it is terminal.
-    """
+async def _create_on_asyncio(
+    create: Callable[[], Coroutine[object, object, modal.Sandbox]],
+    cleanup: Callable[[modal.Sandbox], Awaitable[object]],
+) -> modal.Sandbox:
+    started = time.monotonic()
+    task = asyncio.create_task(create())
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), _CREATE_TIMEOUT)
+    except (TimeoutError, asyncio.TimeoutError):
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    except asyncio.CancelledError:
+        try:
+            remaining = max(0.0, _CREATE_TIMEOUT - (time.monotonic() - started))
+            created = await asyncio.wait_for(task, remaining)
+        except (Exception, asyncio.CancelledError):
+            pass
+        else:
+            try:
+                await cleanup(created)
+            except Exception:
+                pass
+        raise
 
 
 class ModalSandboxCommandTimeoutError(TimeoutError):
@@ -131,6 +152,10 @@ class ModalSandboxCommandTimeoutError(TimeoutError):
         """Standard error produced before the deadline kill."""
         self.timeout = timeout
         """The whole-second deadline Modal actually enforced."""
+
+
+class _ModalSandboxAlreadyExists(ModalSandboxError):
+    """A named create lost a race to an existing sandbox."""
 
 
 @dataclass(frozen=True)
@@ -198,15 +223,40 @@ class _ModalProcess:
         *,
         classify: Callable[[Exception, str], Awaitable[ModalSandboxError]],
         deadline: int | None,
-        started: float,
+        started_at: float,
     ) -> None:
         self._process = process
         self._classify = classify
         self._deadline = deadline
-        self._started = started
+        self._started_at = started_at
+        # A finite Modal deadline bounds this observer even when the caller defers or abandons
+        # `wait()`. Starting it here records when the process actually becomes observable as
+        # complete, rather than when a later caller happens to collect that result.
+        self._exit_observation: tuple[int | None, float, Exception | None] | None = None
+        self._exit_observed = anyio.Event()
+        self._exit_observer: asyncio.Task[None] | None = None
+        if deadline is not None:
+            self._start_exit_observer()
         self._streaming = False
         self._lock = anyio.Lock()
         self._outcome: _ModalResult | Exception | None = None
+
+    def _start_exit_observer(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Modal itself is asyncio-native, but the fake SDK also exercises this protocol
+            # under Trio. A system task gives that backend the same cancellation-independent
+            # finite observer without imposing Trio on asyncio users.
+            import trio
+
+            trio.lowlevel.spawn_system_task(self._observe_exit_and_store)
+        else:
+            self._exit_observer = loop.create_task(self._observe_exit_and_store())
+
+    async def _observe_exit_and_store(self) -> None:
+        self._exit_observation = await self._observe_exit()
+        self._exit_observed.set()
 
     @property
     def pid(self) -> int | None:
@@ -313,13 +363,16 @@ class _ModalProcess:
 
         async def collect_exit_code() -> None:
             nonlocal exit_code, elapsed, failure
-            try:
-                exit_code = await self._process.wait.aio()
-                # Stamped where the exit code lands rather than where the last of the output
-                # does: a command that exited long before its output finished streaming must
-                # not be read as one the deadline killed.
-                elapsed = time.monotonic() - self._started
-            except Exception as error:
+            if self._deadline is None:
+                observation = await self._observe_exit()
+            else:
+                # A cancelled result collection must not cancel the finite-deadline observer;
+                # the command can still finish and a later `wait()` can collect its verdict.
+                await self._exit_observed.wait()
+                observation = self._exit_observation
+                assert observation is not None
+            exit_code, elapsed, error = observation
+            if error is not None:
                 failure = error
                 task_group.cancel_scope.cancel()
 
@@ -343,6 +396,18 @@ class _ModalProcess:
                 timeout=self._deadline,
             )
         return _ModalResult(exit_code=exit_code, stdout=output['stdout'], stderr=output['stderr'])
+
+    async def _observe_exit(self) -> tuple[int | None, float, Exception | None]:
+        try:
+            if self._deadline is None:
+                exit_code = await self._process.wait.aio()
+            else:
+                remaining = max(0.0, self._started_at + self._deadline - time.monotonic())
+                with anyio.fail_after(remaining + _EXIT_OBSERVER_GRACE):
+                    exit_code = await self._process.wait.aio()
+        except Exception as error:
+            return None, time.monotonic() - self._started_at, error
+        return exit_code, time.monotonic() - self._started_at, None
 
     def _timed_out(self, exit_code: int, elapsed: float) -> bool:
         if self._deadline is None:
@@ -483,6 +548,7 @@ class ModalSandboxBackend:
         working_dir: str | None = None,
         sandbox_timeout: int | None = None,
     ) -> None:
+        working_dir = _absolute_path('working_dir', working_dir)
         self.sandbox = sandbox
         """The underlying `modal.Sandbox`, for provider-specific functionality."""
         self.fs = _ModalFilesystem(sandbox, self._ambiguous_error)
@@ -521,49 +587,54 @@ class ModalSandboxBackend:
         except ImportError as e:
             raise ModalSandboxError(_MISSING_MODAL) from e
 
+        workdir = _absolute_path('workdir', workdir)
+
+        async def create_sandbox() -> modal.Sandbox:
+            app = await modal.App.lookup.aio(app_name, create_if_missing=create_app_if_missing)
+            built = modal.Image.from_registry(image)  # pyright: ignore[reportUnknownMemberType]
+            variables: dict[str, str | None] | None = dict(env) if env is not None else None
+            return await modal.Sandbox.create.aio(  # pyright: ignore[reportUnknownMemberType]
+                app=app, image=built, timeout=sandbox_timeout, workdir=workdir, env=variables, name=name
+            )
+
+        async def cleanup_created(created: modal.Sandbox) -> None:
+            await cls(created, working_dir=workdir, sandbox_timeout=sandbox_timeout).close(terminate=True)
+
         sandbox: modal.Sandbox | None = None
         try:
-            # Shield creation so a cancellation arriving mid-create cannot drop the sandbox
-            # handle before we return it. Without this, a sandbox created server-side would be
-            # orphaned (reaped only by its own `sandbox_timeout`) because the caller would have
-            # no handle to terminate. The inner deadline bounds the shielded RPC so a wedged
-            # control plane cannot make this uncancellable. The shield holds for anyio-scope
-            # cancellation; a raw `asyncio.Task.cancel()` can still interrupt it, in which case
-            # the server-side `sandbox_timeout` is the backstop.
             with anyio.CancelScope(shield=True):
-                with anyio.move_on_after(_CREATE_TIMEOUT):
-                    app = await modal.App.lookup.aio(app_name, create_if_missing=create_app_if_missing)
-                    # `from_registry` builds the image spec locally (no network), so it has no
-                    # `.aio` variant. Its typing uses an untyped `**kwargs`, so pyright flags it.
-                    built = modal.Image.from_registry(image)  # pyright: ignore[reportUnknownMemberType]
-                    # Modal types env values as `str | None` (None unsets); widen ours to match,
-                    # since dict is invariant in its value type.
-                    variables: dict[str, str | None] | None = dict(env) if env is not None else None
-                    # `create.aio` is typed with a partially-`Any` coroutine return.
-                    sandbox = await modal.Sandbox.create.aio(  # pyright: ignore[reportUnknownMemberType]
-                        app=app, image=built, timeout=sandbox_timeout, workdir=workdir, env=variables, name=name
-                    )
-        except modal.exception.AlreadyExistsError:
-            raise
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    with anyio.move_on_after(_CREATE_TIMEOUT):
+                        sandbox = await create_sandbox()
+                else:
+                    try:
+                        sandbox = await _create_on_asyncio(create_sandbox, cleanup_created)
+                    except (TimeoutError, asyncio.TimeoutError) as error:
+                        raise ModalSandboxError(
+                            f'Modal sandbox creation did not complete within {_CREATE_TIMEOUT}s; '
+                            'the Modal control plane may be unreachable.'
+                        ) from error
+        except modal.exception.AlreadyExistsError as error:
+            raise _ModalSandboxAlreadyExists(f'Modal sandbox named {name!r} already exists.') from error
         except modal.exception.AuthError as e:
             raise ModalSandboxAuthError(_AUTH_MESSAGE) from e
         except modal.exception.Error as e:
             raise ModalSandboxError(f'Could not start Modal sandbox: {e}') from e
         if sandbox is None:
-            # The deadline fired: the create RPC never returned. Fail here rather than hand back
-            # no sandbox. Anything Modal provisioned before the hang is reaped by its own
-            # `sandbox_timeout`, the same backstop as a create leak.
             raise ModalSandboxError(
                 f'Modal sandbox creation did not complete within {_CREATE_TIMEOUT}s; '
                 'the Modal control plane may be unreachable.'
             )
         backend = cls(sandbox, working_dir=workdir, sandbox_timeout=sandbox_timeout)
         try:
-            # If the caller was cancelled during the shielded create, this raises; tear the
-            # just-created sandbox down here rather than leaving it for `sandbox_timeout`.
             await anyio.lowlevel.checkpoint()
         except BaseException:
-            await backend.close(terminate=True)
+            try:
+                await backend.close(terminate=True)
+            except Exception:
+                pass
             raise
         return backend
 
@@ -588,8 +659,6 @@ class ModalSandboxBackend:
             return await cls.connect_name(app_name, name)
         except ModalSandboxUnavailableError:
             pass
-        import modal
-
         try:
             return await cls.create(
                 image=image,
@@ -600,7 +669,7 @@ class ModalSandboxBackend:
                 env=env,
                 name=name,
             )
-        except modal.exception.AlreadyExistsError:
+        except _ModalSandboxAlreadyExists:
             pass
         return await cls.connect_name(app_name, name)
 
@@ -623,6 +692,8 @@ class ModalSandboxBackend:
             raise ModalSandboxAuthError(_AUTH_MESSAGE) from e
         except _unavailable_sandbox_exc_types() as e:
             raise ModalSandboxUnavailableError(_attached_gone_message(sandbox_id)) from e
+        except modal.exception.Error as e:
+            raise ModalSandboxError(f'Could not connect to Modal sandbox {sandbox_id!r}: {e}') from e
         if finished is not None:
             raise ModalSandboxUnavailableError(_attached_gone_message(sandbox_id))
         return cls(sandbox)
@@ -642,6 +713,10 @@ class ModalSandboxBackend:
         except _unavailable_sandbox_exc_types() as error:
             raise ModalSandboxUnavailableError(
                 f'Modal sandbox named {name!r} in app {app_name!r} is not running.'
+            ) from error
+        except modal.exception.Error as error:
+            raise ModalSandboxError(
+                f'Could not connect to Modal sandbox named {name!r} in app {app_name!r}: {error}'
             ) from error
         if finished is not None:
             raise ModalSandboxUnavailableError(f'Modal sandbox named {name!r} in app {app_name!r} is not running.')
@@ -745,6 +820,7 @@ class ModalSandboxBackend:
         import modal
 
         argv = _command_argv(command, shell)
+        cwd = _absolute_path('cwd', cwd)
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         # Modal takes whole seconds and reads a missing deadline as "run until the sandbox
@@ -753,15 +829,15 @@ class ModalSandboxBackend:
         # Stamped before the call, so the window a `137` is dated against is a superset of the
         # one Modal's own timer runs: the platform starts counting when the command starts,
         # which happens inside this round trip.
-        started = time.monotonic()
         variables: dict[str, str | None] | None = dict(env) if env is not None else None
+        started_at = time.monotonic()
         try:
             # Modal's text mode decodes strictly, so read bytes and decode with replacement:
             # a command printing invalid UTF-8 must not abort the run.
             process = await self.sandbox.exec.aio(*argv, timeout=deadline, workdir=cwd, env=variables, text=False)
         except modal.exception.Error as e:
             raise await self._exec_error(e, 'Command could not run in the sandbox') from e
-        return _ModalProcess(process, classify=self._exec_error, deadline=deadline, started=started)
+        return _ModalProcess(process, classify=self._exec_error, deadline=deadline, started_at=started_at)
 
     def _unavailable_message(self) -> str:
         if self._sandbox_timeout is None:
@@ -839,7 +915,12 @@ if TYPE_CHECKING:
         modal.container_process.ContainerProcess[bytes]
     )
     _backend = ModalSandboxBackend(_sandbox)
-    _process = _ModalProcess(_container_process, classify=_backend._exec_error, deadline=None, started=0.0)  # pyright: ignore[reportPrivateUsage]
+    _process = _ModalProcess(
+        _container_process,
+        classify=_backend._exec_error,  # pyright: ignore[reportPrivateUsage]
+        deadline=None,
+        started_at=time.monotonic(),
+    )
     _backend_conforms: SandboxBackend = _backend
     _filesystem_backend_conforms: SupportsFilesystem = _backend
     _start_conforms: SupportsStart = _backend
