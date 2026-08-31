@@ -236,6 +236,25 @@ class TestWhatsAppChannel:
                 assert (await anext(messages)).text == 'second'
         assert channel.handle_webhook(second).status_code == 503
 
+    async def test_bounds_recent_message_deduplication(self) -> None:
+        channel = WhatsAppChannel(
+            'token',
+            _PHONE_ID,
+            _APP_SECRET,
+            'verify-token',
+            max_queued_messages=1,
+        )
+
+        async with channel:
+            async with aclosing(channel.messages()) as messages:
+                for index in range(10_001):
+                    request = signed_request(webhook_payload([text_message(f'wamid.{index}', body=str(index))]))
+                    assert channel.handle_webhook(request).status_code == 200
+                    await anext(messages)
+                first = signed_request(webhook_payload([text_message('wamid.0', body='first again')]))
+                assert channel.handle_webhook(first).status_code == 200
+                assert (await anext(messages)).text == 'first again'
+
     async def test_chunks_messages_and_retries_one_throttling_error(self) -> None:
         posts: list[dict[str, object]] = []
         paths: list[str] = []
