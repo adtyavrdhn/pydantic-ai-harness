@@ -14,13 +14,13 @@ changing authentication, polling, or text delivery.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from time import monotonic
 from types import TracebackType
 
+import anyio
 import httpx
 from pydantic import TypeAdapter, ValidationError
 from typing_extensions import Self
@@ -134,10 +134,10 @@ class TelegramChannel:
             try:
                 await self._call('sendMessage', params)
             except _RateLimited as exc:
-                await asyncio.sleep(exc.retry_after)
+                await anyio.sleep(exc.retry_after)
                 await self._call('sendMessage', params)
 
-    async def messages(self) -> AsyncIterator[InboundMessage]:
+    async def messages(self) -> AsyncGenerator[InboundMessage, None]:
         """Yield private text messages from `getUpdates` until cancelled."""
         while True:
             if (
@@ -160,17 +160,17 @@ class TelegramChannel:
                 raise
             except _RateLimited as exc:
                 logger.warning('Telegram polling rate limited; retrying in %s seconds', exc.retry_after)
-                await asyncio.sleep(exc.retry_after)
+                await anyio.sleep(exc.retry_after)
                 continue
             except ChannelError as exc:
                 logger.warning('Telegram polling failed: %s; retrying in %s seconds', exc, self._retry_delay)
-                await asyncio.sleep(self._retry_delay)
+                await anyio.sleep(self._retry_delay)
                 continue
             except ValidationError:
                 logger.warning(
                     'Telegram getUpdates returned an invalid result; retrying in %s seconds', self._retry_delay
                 )
-                await asyncio.sleep(self._retry_delay)
+                await anyio.sleep(self._retry_delay)
                 continue
 
             advanced_offset = False
@@ -191,7 +191,7 @@ class TelegramChannel:
                 logger.warning(
                     'Telegram returned updates without usable ids; retrying in %s seconds', self._retry_delay
                 )
-                await asyncio.sleep(self._retry_delay)
+                await anyio.sleep(self._retry_delay)
 
     async def _call(self, method: str, params: Mapping[str, object] | None = None) -> object:
         client = self._client

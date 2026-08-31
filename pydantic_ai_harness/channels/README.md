@@ -28,9 +28,9 @@ Set `TELEGRAM_BOT_TOKEN` to the bot token and keep it outside source control.
 Replace `123456789` below with the `from.id` value.
 
 ```python
-import asyncio
 import os
 
+import anyio
 from pydantic_ai import Agent
 
 from pydantic_ai_harness.channels import ChannelHost
@@ -48,7 +48,7 @@ async def main() -> None:
     await host.serve()
 
 
-asyncio.run(main())
+anyio.run(main)
 ```
 
 ## How channels fit Pydantic AI

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import aclosing
 
 import httpx
 import pytest
@@ -75,9 +76,9 @@ class TestTelegramChannel:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         channel: ChannelAdapter = TelegramChannel('token', http_client=client, poll_timeout=7)
         async with channel:
-            messages = channel.messages()
-            first = await anext(messages)
-            second = await anext(messages)
+            async with aclosing(channel.messages()) as messages:
+                first = await anext(messages)
+                second = await anext(messages)
 
         assert (first.conversation_id, first.sender_id, first.message_id, first.text) == ('40', '30', '22', 'hello')
         assert second.text == 'again'
@@ -206,7 +207,8 @@ class TestTelegramChannel:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         channel = TelegramChannel('token', http_client=client, retry_delay=0.001)
         async with channel:
-            message = await anext(channel.messages())
+            async with aclosing(channel.messages()) as messages:
+                message = await anext(messages)
 
         assert message.text == 'recovered'
         assert poll_count == 2
@@ -243,9 +245,9 @@ class TestTelegramChannel:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         channel = TelegramChannel('token', http_client=client)
         async with channel:
-            messages = channel.messages()
-            assert (await anext(messages)).text == '10'
-            assert (await anext(messages)).text == '5'
+            async with aclosing(channel.messages()) as messages:
+                assert (await anext(messages)).text == '10'
+                assert (await anext(messages)).text == '5'
 
         assert poll_bodies == [
             {'timeout': 30, 'allowed_updates': ['message']},
@@ -344,9 +346,10 @@ class TestTelegramChannel:
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         channel = TelegramChannel('token', http_client=client, retry_delay=0.25)
-        monkeypatch.setattr('pydantic_ai_harness.channels.telegram.asyncio.sleep', sleep)
+        monkeypatch.setattr('pydantic_ai_harness.channels.telegram.anyio.sleep', sleep)
         async with channel:
-            message = await anext(channel.messages())
+            async with aclosing(channel.messages()) as messages:
+                message = await anext(messages)
 
         assert message.text == 'valid update'
         assert 'invalid result' in caplog.text
