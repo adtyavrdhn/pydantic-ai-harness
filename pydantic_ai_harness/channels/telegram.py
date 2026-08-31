@@ -182,7 +182,7 @@ class TelegramChannel:
                 if update is None:
                     continue
                 update_id = update.get('update_id')
-                if not isinstance(update_id, int):
+                if isinstance(update_id, bool) or not isinstance(update_id, int):
                     continue
                 self._offset = update_id + 1
                 self._last_update_at = monotonic()
@@ -227,13 +227,23 @@ class TelegramChannel:
             raise ChannelError(f'Telegram Bot API returned an invalid response: {method}') from None
 
         envelope = _mapping(payload)
+        if response.status_code in _FATAL_ERROR_CODES:
+            description = envelope.get('description') if envelope is not None else None
+            message = (
+                _redact_telegram_url(description)
+                if isinstance(description, str)
+                else f'Telegram Bot API rejected {method} with HTTP {response.status_code}'
+            )
+            raise _FatalTelegramError(message)
         if envelope is None:
             raise ChannelError(f'Telegram Bot API returned an invalid response: {method}')
         if envelope.get('ok') is True:
             return envelope.get('result')
 
         description = envelope.get('description')
-        message = description if isinstance(description, str) else 'unknown Telegram Bot API error'
+        message = (
+            _redact_telegram_url(description) if isinstance(description, str) else 'unknown Telegram Bot API error'
+        )
         error_code = envelope.get('error_code')
         if isinstance(error_code, int) and error_code in _FATAL_ERROR_CODES:
             raise _FatalTelegramError(message)
@@ -276,7 +286,12 @@ def _retry_after(envelope: Mapping[str, object]) -> float | None:
     if parameters is None:
         return None
     retry_after = parameters.get('retry_after')
-    if isinstance(retry_after, int | float) and retry_after >= 0 and math.isfinite(retry_after):
+    if (
+        isinstance(retry_after, int | float)
+        and not isinstance(retry_after, bool)
+        and retry_after >= 0
+        and math.isfinite(retry_after)
+    ):
         return float(retry_after)
     return None
 

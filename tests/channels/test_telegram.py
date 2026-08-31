@@ -150,7 +150,12 @@ class TestTelegramChannel:
             calls += 1
             if calls == 1:
                 return response({'ok': True, 'result': {}})
-            return response({'ok': False, 'description': 'chat not found'})
+            return response(
+                {
+                    'ok': False,
+                    'description': 'chat not found: https://api.telegram.org/botsecret-token/sendMessage',
+                }
+            )
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         channel = TelegramChannel('secret-token', http_client=client)
@@ -159,6 +164,7 @@ class TestTelegramChannel:
                 await channel.send_text('chat', 'hello')
 
         assert 'secret-token' not in str(exc_info.value)
+        assert '/bot<redacted>/' in str(exc_info.value)
         await client.aclose()
 
     async def test_transport_error_suppresses_token_bearing_exception(self) -> None:
@@ -294,7 +300,7 @@ class TestTelegramChannel:
                     },
                     status_code=429,
                 )
-            return response({'ok': False, 'error_code': 409, 'description': 'webhook is active'}, status_code=409)
+            return response({'ok': False, 'error_code': 409, 'description': 'webhook is active'})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         channel = TelegramChannel('token', http_client=client)
@@ -325,7 +331,7 @@ class TestTelegramChannel:
             if poll_count == 1:
                 return response({'ok': True, 'result': 'not a list'})
             if poll_count == 2:
-                return response({'ok': True, 'result': [123, {'update_id': 'unknown'}]})
+                return response({'ok': True, 'result': [123, {'update_id': 'unknown'}, {'update_id': True}]})
             return response(
                 {
                     'ok': True,
@@ -402,6 +408,14 @@ class TestTelegramChannel:
                     200,
                     content=b'{"ok":false,"description":"non-finite error","parameters":{"retry_after":Infinity}}',
                 )
+            if calls == 6:
+                return response(
+                    {
+                        'ok': False,
+                        'description': 'boolean delay',
+                        'parameters': {'retry_after': False},
+                    }
+                )
             return response({'ok': False})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -415,8 +429,10 @@ class TestTelegramChannel:
                 await channel.send_text('chat', 'third')
             with pytest.raises(ChannelError, match='non-finite error'):
                 await channel.send_text('chat', 'fourth')
-            with pytest.raises(ChannelError, match='unknown Telegram Bot API error'):
+            with pytest.raises(ChannelError, match='boolean delay'):
                 await channel.send_text('chat', 'fifth')
+            with pytest.raises(ChannelError, match='unknown Telegram Bot API error'):
+                await channel.send_text('chat', 'sixth')
         await client.aclose()
 
     async def test_owned_client_closes_on_success_and_open_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -444,13 +460,14 @@ class TestTelegramChannel:
                 pass  # pragma: no cover
         assert rejected.is_closed
 
-    async def test_non_json_fatal_response_does_not_retry(self) -> None:
+    @pytest.mark.parametrize('body', [b'Unauthorized', b'{}'])
+    async def test_fatal_http_response_does_not_retry(self, body: bytes) -> None:
         calls = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
             nonlocal calls
             calls += 1
-            return httpx.Response(401, content=b'Unauthorized')
+            return httpx.Response(401, content=body)
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         with pytest.raises(ChannelError, match='HTTP 401'):
