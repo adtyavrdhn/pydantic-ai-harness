@@ -209,6 +209,8 @@ class FakeSandbox:
         self.started = False
         self.start_calls: list[float | None] = []
         self.start_error: Exception | None = None
+        self.start_gate: asyncio.Event | None = None
+        self.start_started = asyncio.Event()
         self.files: dict[str, bytes] = {}
         self.directories: set[str] = set()
         self.reported_sizes: dict[str, int] = {}
@@ -240,6 +242,9 @@ class FakeSandbox:
 
     async def start(self, timeout: float | None = 60) -> None:
         self.start_calls.append(timeout)
+        self.start_started.set()
+        if self.start_gate is not None:
+            await self.start_gate.wait()
         if self.start_error is not None:
             raise self.start_error
         self.started = True
@@ -277,6 +282,9 @@ class FakeClient:
         sandbox.deleted = True
 
     async def close(self) -> None:
+        self.owner.close_started.set()
+        if self.owner.close_gate is not None:
+            await self.owner.close_gate.wait()
         if self.owner.close_error is not None:
             raise self.owner.close_error
         self.closed = True
@@ -294,6 +302,8 @@ class FakeDaytona:
         self.get_error: Exception | None = None
         self.delete_error: Exception | None = None
         self.close_error: Exception | None = None
+        self.close_gate: asyncio.Event | None = None
+        self.close_started = asyncio.Event()
         self.create_gate: asyncio.Event | None = None
         self.create_started = asyncio.Event()
 

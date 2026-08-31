@@ -58,6 +58,9 @@ class TestLifecycle:
         assert backend is None
         assert fake_daytona.sandboxes == []
 
+    def test_normalizes_absolute_workdir(self) -> None:
+        assert DaytonaSandbox(workdir='/workspace/../repo').workdir == '/repo'
+
     async def test_release_deletes_without_starting(self, fake_daytona: FakeDaytona) -> None:
         capability = DaytonaSandbox[None]()
         ref = await capability.acquire_sandbox(_ctx())
@@ -96,17 +99,37 @@ class TestBackend:
         with pytest.raises(ValueError, match='cwd must be an absolute sandbox path'):
             await backend.run(['pwd'], cwd='repo')
 
-    async def test_attached_start_timeout_is_typed(self, fake_daytona: FakeDaytona) -> None:
+    @pytest.mark.parametrize('close_fails', [False, True])
+    async def test_attached_start_timeout_is_typed(self, fake_daytona: FakeDaytona, close_fails: bool) -> None:
         sandbox = fake_daytona.sandbox()
         sandbox.start_error = asyncio.TimeoutError()
+        if close_fails:
+            fake_daytona.close_error = RuntimeError('close failed')
         with pytest.raises(DaytonaSandboxCommandTimeoutError, match='sandbox setup timed out'):
             await DaytonaSandboxBackend.connect(sandbox.id)
+        assert fake_daytona.closed_clients == (0 if close_fails else 1)
 
     async def test_process_setup_timeout_is_typed(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
         fake_daytona.sandboxes[0].process_create_error = asyncio.TimeoutError()
         with pytest.raises(DaytonaSandboxCommandTimeoutError, match='process setup timed out'):
             await backend.start(['true'])
+
+    async def test_process_setup_deadline_is_typed(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_create_gate = asyncio.Event()
+
+        async def finish_remote_setup() -> None:
+            await asyncio.sleep(0.02)
+            assert sandbox.process_create_gate is not None
+            sandbox.process_create_gate.set()
+
+        finishing = asyncio.create_task(finish_remote_setup())
+
+        with pytest.raises(DaytonaSandboxCommandTimeoutError, match='command setup timed out'):
+            await backend.start(['true'], timeout=0.01)
+        await finishing
 
     async def test_argv_is_quoted_and_streams_stay_separate(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()

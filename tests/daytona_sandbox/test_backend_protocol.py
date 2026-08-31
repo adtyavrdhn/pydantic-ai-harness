@@ -14,15 +14,17 @@ from daytona import (
     DaytonaConnectionError,
     DaytonaNotFoundError,
 )
+from pydantic_ai.sandboxes import SandboxRef
 
 from pydantic_ai_harness.daytona_sandbox import (
+    DaytonaSandbox,
     DaytonaSandboxAuthError,
     DaytonaSandboxBackend,
     DaytonaSandboxError,
     DaytonaSandboxUnavailableError,
 )
 from pydantic_ai_harness.daytona_sandbox._backend import _command_context, _command_line, _DaytonaResult
-from pydantic_ai_harness.daytona_sandbox._session import DaytonaSandboxSession
+from pydantic_ai_harness.daytona_sandbox._session import DaytonaSandboxSession, _finish_cleanup
 
 from .fake_daytona import FakeDaytona
 
@@ -223,6 +225,57 @@ class TestSessionLifecycle:
         with pytest.raises(DaytonaSandboxError, match='package is required'):
             await DaytonaSandboxSession().__aenter__()
 
+    async def test_release_missing_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        real_import = builtins.__import__
+
+        def no_daytona(name: str, *args: object, **kwargs: object) -> object:
+            if name == 'daytona':
+                raise ImportError('missing')
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.delitem(sys.modules, 'daytona', raising=False)
+        monkeypatch.setattr(builtins, '__import__', no_daytona)
+        with pytest.raises(DaytonaSandboxError, match='package is required'):
+            await DaytonaSandbox().release_sandbox(cast(Any, None), SandboxRef(provider='daytona', sandbox_id='sb'))
+
+    @pytest.mark.parametrize(
+        ('error', 'error_type'),
+        [
+            (DaytonaAuthenticationError('denied'), DaytonaSandboxAuthError),
+            (DaytonaConnectionError('offline'), DaytonaSandboxError),
+        ],
+    )
+    @pytest.mark.parametrize('close_fails', [False, True])
+    async def test_release_translates_delete_failure_and_preserves_it_when_close_fails(
+        self,
+        fake_daytona: FakeDaytona,
+        error: Exception,
+        error_type: type[Exception],
+        close_fails: bool,
+    ) -> None:
+        sandbox = fake_daytona.sandbox()
+        fake_daytona.delete_error = error
+        if close_fails:
+            fake_daytona.close_error = RuntimeError('close failed')
+
+        with pytest.raises(error_type, match='credentials' if error_type is DaytonaSandboxAuthError else 'offline'):
+            await DaytonaSandbox().release_sandbox(
+                cast(Any, None), SandboxRef(provider='daytona', sandbox_id=sandbox.id)
+            )
+
+        assert sandbox.start_calls == []
+
+    async def test_release_translates_close_failure_after_delete(self, fake_daytona: FakeDaytona) -> None:
+        sandbox = fake_daytona.sandbox()
+        fake_daytona.close_error = DaytonaConnectionError('close failed')
+
+        with pytest.raises(DaytonaSandboxError, match='close failed'):
+            await DaytonaSandbox().release_sandbox(
+                cast(Any, None), SandboxRef(provider='daytona', sandbox_id=sandbox.id)
+            )
+
+        assert sandbox.deleted is True
+
     async def test_attached_session_is_not_deleted(self, fake_daytona: FakeDaytona) -> None:
         sandbox = fake_daytona.sandbox()
         async with DaytonaSandboxSession(sandbox_id=sandbox.id):
@@ -322,6 +375,86 @@ class TestSessionLifecycle:
         fake_daytona.delete_error = None
         await session.close(terminate=True)
         assert fake_daytona.sandboxes[0].deleted is True
+
+    def test_cancelled_attached_start_preserves_cancellation_when_start_fails(self, fake_daytona: FakeDaytona) -> None:
+        async def scenario() -> None:
+            sandbox = fake_daytona.sandbox()
+            sandbox.start_gate = asyncio.Event()
+            sandbox.start_error = RuntimeError('start failed')
+            session = DaytonaSandboxSession(sandbox_id=sandbox.id)
+            entering = asyncio.create_task(session.__aenter__())
+            await sandbox.start_started.wait()
+            entering.cancel()
+            sandbox.start_gate.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await entering
+            assert fake_daytona.closed_clients == 1
+
+        asyncio.run(scenario())
+
+    def test_cancelled_attached_start_preserves_cancellation_after_start_succeeds(
+        self, fake_daytona: FakeDaytona
+    ) -> None:
+        async def scenario() -> None:
+            sandbox = fake_daytona.sandbox()
+            sandbox.start_gate = asyncio.Event()
+            session = DaytonaSandboxSession(sandbox_id=sandbox.id)
+            entering = asyncio.create_task(session.__aenter__())
+            await sandbox.start_started.wait()
+            entering.cancel()
+            sandbox.start_gate.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await entering
+            assert fake_daytona.closed_clients == 1
+
+        asyncio.run(scenario())
+
+    def test_cancellation_waits_for_cleanup_without_callback(self) -> None:
+        async def scenario() -> None:
+            gate = asyncio.Event()
+
+            async def cleanup() -> None:
+                await gate.wait()
+
+            cleaning = asyncio.create_task(_finish_cleanup(cleanup()))
+            await asyncio.sleep(0)
+            cleaning.cancel()
+            gate.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await cleaning
+
+        asyncio.run(scenario())
+
+    @pytest.mark.parametrize('close_fails', [False, True])
+    def test_repeated_cancellation_waits_for_client_close(self, fake_daytona: FakeDaytona, close_fails: bool) -> None:
+        async def scenario() -> None:
+            fake_daytona.create_gate = asyncio.Event()
+            fake_daytona.close_gate = asyncio.Event()
+            if close_fails:
+                fake_daytona.close_error = RuntimeError('close failed')
+            session = DaytonaSandboxSession()
+            entering = asyncio.create_task(session.__aenter__())
+            await fake_daytona.create_started.wait()
+            entering.cancel()
+            fake_daytona.create_gate.set()
+            await fake_daytona.close_started.wait()
+            entering.cancel()
+            fake_daytona.close_gate.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await entering
+
+            if close_fails:
+                assert session._client is not None
+                fake_daytona.close_error = None
+                await session.close(terminate=False)
+            else:
+                assert session.sandbox_id is None
+
+        asyncio.run(scenario())
 
     async def test_already_deleted_owned_sandbox_is_cleanup_success(self, fake_daytona: FakeDaytona) -> None:
         session = DaytonaSandboxSession()
