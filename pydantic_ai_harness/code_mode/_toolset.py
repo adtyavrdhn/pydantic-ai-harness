@@ -783,7 +783,25 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         # fallback lets it adopt them under its fresh tool call id. Run-end `close`
         # bounds whatever a run abandons.
         await self.speculation.evict_part(ctx.tool_call_id or 'pyd_ai_code_mode')
+        self._annotate_savings(result, ctx)
         return result
+
+    def _annotate_savings(self, result: Any, ctx: RunContext[AgentDepsT], eager: dict[str, Any] | None = None) -> None:
+        """Record what streaming bought on the `ToolReturn`'s history-only metadata.
+
+        The model already saw the latency it did or did not pay; repeating the telemetry in
+        the visible content would spend tokens on it every turn. Metadata persists in message
+        history instead, where UIs and traces can read it after the run.
+        """
+        assert isinstance(result, ToolReturn), 'a successful `run_code` dispatch returns a `ToolReturn`'
+        metadata: dict[str, Any] | None = result.metadata
+        assert metadata is not None, '`run_code` always attaches metadata'
+        if eager is not None:
+            metadata['eager'] = eager
+        if self.speculation is not None:
+            summary = self.speculation.part_summary(ctx.tool_call_id or 'pyd_ai_code_mode')
+            if summary is not None:
+                metadata['speculation'] = summary
 
     async def _call_tool_eager(
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentDepsT], tool: _RunCodeTool[AgentDepsT]
@@ -847,6 +865,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # Same contract as the speculation-only path: eviction only on success, so a
             # failed tail keeps its launches for the retry to adopt.
             await self.speculation.evict_part(ctx.tool_call_id or 'pyd_ai_code_mode')
+        eager_summary = None
         if part.feed_count:
             # Buffered rather than emitted: capability-event attribution requires a hook
             # context, and `CodeMode.after_tool_execute` is the next one after this dispatch.
@@ -858,6 +877,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                     waited_ms=waited_seconds * 1000,
                 ),
             )
+            eager_summary = {
+                'statements': part.feed_count,
+                'executed_ms': round(part.busy_seconds * 1000, 3),
+                'waited_ms': round(waited_seconds * 1000, 3),
+            }
+        self._annotate_savings(result, ctx, eager=eager_summary)
         return result
 
     async def feed_eager_fragment(self, part: _EagerPart, source: str, ctx: RunContext[AgentDepsT]) -> None:

@@ -50,8 +50,10 @@ from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.toolsets.abstract import AbstractToolset, ToolsetTool
 
 from pydantic_ai_harness.code_mode._events import (
+    SpeculativeCallClaimedEvent,
     SpeculativeCallEvictedEvent,
     SpeculativeCallLaunchedEvent,
+    SpeculativeCallMissedEvent,
     SpeculativeCallSettledEvent,
     SpeculativeCodeUpdateEvent,
     emit_best_effort,
@@ -663,6 +665,42 @@ class SpeculationState:
         events, self.pending_events = self.pending_events, []
         for event in events:
             await emit_best_effort(ctx, event)
+
+    def part_summary(self, parent_tool_call_id: str) -> dict[str, Any] | None:
+        """Summarize one executed part's buffered outcomes, for the tool return's metadata.
+
+        Must be read after `evict_part` and before the hook flush drains the buffer: that is
+        the only window where the part's claims, misses, and evictions are all pending.
+        Under composed eager execution, claims dispatched from pumped fragments carry the
+        fragment's derived id (`{part}~e{n}`), so those count toward the part too.
+        """
+
+        def belongs(event_id: str | None) -> bool:
+            return event_id == parent_tool_call_id or (event_id or '').startswith(f'{parent_tool_call_id}~e')
+
+        hits = [
+            event
+            for event in self.pending_events
+            if isinstance(event, SpeculativeCallClaimedEvent) and belongs(event.tool_call_id)
+        ]
+        misses = sum(
+            1
+            for event in self.pending_events
+            if isinstance(event, SpeculativeCallMissedEvent) and belongs(event.tool_call_id)
+        )
+        wasted = sum(
+            1
+            for event in self.pending_events
+            if isinstance(event, SpeculativeCallEvictedEvent) and belongs(event.tool_call_id)
+        )
+        if not hits and not misses and not wasted:
+            return None
+        return {
+            'hits': len(hits),
+            'hidden_ms': round(sum(event.elapsed_ms for event in hits), 3),
+            'misses': misses,
+            'wasted': wasted,
+        }
 
     async def evict_part(self, parent_tool_call_id: str) -> None:
         """Drop unclaimed launches for one executed `run_code` part.

@@ -316,7 +316,11 @@ sequential awaits collect from concurrently-running tasks instead of blocking on
 With `eager` also enabled, each committed prefix reports an `EagerPrefixCommittedEvent`:
 how many statements the pump executed during generation (`executed_ms`) and how long the
 dispatch still waited for it (`waited_ms`); the difference is the generation overlap eager
-bought for that snippet.
+bought for that snippet. The same numbers persist in message history: a `run_code`
+return's history-only metadata gains `eager` (`statements`, `executed_ms`, `waited_ms`)
+and `speculation` (`hits`, `hidden_ms`, `misses`, `wasted`) entries when the tiers did
+work, alongside the existing nested `tool_calls`/`tool_returns` records. The model's
+visible content stays `{'output': ..., 'result': ...}`; telemetry does not spend tokens.
 Delivery differs by phase:
 stream-phase events (updates, launches, settles) are yielded directly into the wrapped event
 stream, interleaved live with the argument deltas that produced them -- so they reach stream

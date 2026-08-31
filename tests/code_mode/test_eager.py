@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import json
 from collections.abc import AsyncIterable, AsyncIterator, Sequence
+from typing import Any
 
 import pytest
 from pydantic_ai import Agent, RunContext, Tool
@@ -100,6 +101,18 @@ def _run_code_return_content(messages: list[ModelMessage]) -> object:
     return contents[-1]
 
 
+def _run_code_return_metadata(messages: list[ModelMessage]) -> dict[str, Any]:
+    parts = [
+        p
+        for m in messages
+        for p in getattr(m, 'parts', [])
+        if isinstance(p, ToolReturnPart) and p.tool_name == 'run_code'
+    ]
+    assert parts, 'no run_code ToolReturnPart in history'
+    metadata: dict[str, Any] = parts[-1].metadata
+    return metadata
+
+
 class TestEagerExecution:
     async def test_statements_execute_while_the_model_is_still_streaming(self):
         """The stream stalls until the first statement's tool call has run.
@@ -158,6 +171,9 @@ class TestEagerExecution:
         assert commits[0].statements == 3
         assert commits[0].executed_ms > 0
         assert commits[0].waited_ms >= 0
+        eager_meta: dict[str, Any] = _run_code_return_metadata(result.all_messages())['eager']
+        assert eager_meta['statements'] == 3
+        assert eager_meta['executed_ms'] > 0
 
     async def test_failed_statement_surfaces_and_earlier_state_persists(self):
         """A statement that fails mid-stream stops the pump; the retry sees prior assignments.

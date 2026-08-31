@@ -13,6 +13,7 @@ import dataclasses
 import json
 from collections.abc import AsyncIterable, AsyncIterator, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 from pydantic_ai import Agent, RunContext, Tool
@@ -30,6 +31,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolCallPartDelta,
     ToolReturn,
+    ToolReturnPart,
 )
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -1039,6 +1041,19 @@ class TestDeclaredSpeculation:
         assert capability.speculation_stats.launched == 2
         assert capability.speculation_stats.adopted == 1
         assert capability.speculation_stats.evicted == 1
+        parts = [
+            p
+            for m in result.all_messages()
+            for p in getattr(m, 'parts', [])
+            if isinstance(p, ToolReturnPart) and p.tool_name == 'run_code'
+        ]
+        metadata: dict[str, Any] = parts[-1].metadata
+        assert 'eager' not in metadata
+        speculation_meta: dict[str, Any] = metadata['speculation']
+        assert speculation_meta['hits'] == 1
+        assert speculation_meta['misses'] == 0
+        assert speculation_meta['wasted'] == 1
+        assert speculation_meta['hidden_ms'] >= 0
 
     async def test_a_bare_string_that_is_not_declared_is_rejected(self):
         """`speculate='search'` is a likely typo for a one-element list, not a mode."""
@@ -1114,6 +1129,21 @@ class TestTierComposition:
         assert capability.speculation_stats.launched == 2
         assert capability.speculation_stats.adopted == 1
         assert capability.speculation_stats.evicted == 1
+        parts = [
+            p
+            for m in result.all_messages()
+            for p in getattr(m, 'parts', [])
+            if isinstance(p, ToolReturnPart) and p.tool_name == 'run_code'
+        ]
+        metadata: dict[str, Any] = parts[-1].metadata
+        eager_meta: dict[str, Any] = metadata['eager']
+        assert eager_meta['statements'] >= 1
+        assert eager_meta['executed_ms'] >= 0
+        speculation_meta: dict[str, Any] = metadata['speculation']
+        assert speculation_meta['hits'] == 1
+        assert speculation_meta['misses'] == 0
+        assert speculation_meta['wasted'] == 1
+        assert speculation_meta['hidden_ms'] >= 0
 
 
 class TestCallLevelLaunch:
