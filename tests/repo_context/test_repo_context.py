@@ -138,11 +138,12 @@ class TestRender:
         assert outside.as_posix() in rendered
 
     def test_trailing_newline_does_not_open_a_gap_before_the_closing_tag(self, tmp_path: Path) -> None:
-        path = _write(tmp_path / 'CLAUDE.md', 'be nice\n')
+        # The terminator goes; the two spaces before it stay, being a hard line break in Markdown.
+        path = _write(tmp_path / 'CLAUDE.md', 'be nice  \n')
         cf = ContextFile(directory=path.parent, path=path, content=path.read_text(encoding='utf-8'))
         assert (
             render_context_files([cf], relative_to=tmp_path)
-            == '<context-file path="CLAUDE.md">\nbe nice\n</context-file>'
+            == '<context-file path="CLAUDE.md">\nbe nice  \n</context-file>'
         )
 
 
