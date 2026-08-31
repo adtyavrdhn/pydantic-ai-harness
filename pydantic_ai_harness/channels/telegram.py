@@ -5,6 +5,8 @@ External assumptions verified 2026-08-31:
 * The Bot API base is `https://api.telegram.org/bot<token>/METHOD`.
 * `getUpdates` is the long-polling transport, confirms updates through the next
   offset, and cannot run while a webhook is configured.
+* After at least a week without updates, Telegram may choose a random next
+  `update_id`, so a stale local offset must be discarded.
 * `sendMessage` text is limited to 4096 Unicode characters. UTF-16 units apply
   to message entity offsets, not the text limit.
 
@@ -86,7 +88,6 @@ class TelegramChannel:
         self._token = token
         self._provided_client = http_client
         self._client: httpx.AsyncClient | None = None
-        self._owns_client = False
         self._poll_timeout = poll_timeout
         self._retry_delay = retry_delay
         self._offset: int | None = None
@@ -100,7 +101,6 @@ class TelegramChannel:
         if _TOKEN_FILTER not in httpx_logger.filters:
             httpx_logger.addFilter(_TOKEN_FILTER)
         self._client = self._provided_client or httpx.AsyncClient()
-        self._owns_client = self._provided_client is None
         try:
             await self._call('getMe')
         except BaseException:
@@ -114,17 +114,15 @@ class TelegramChannel:
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         traceback: TracebackType | None,
-    ) -> bool | None:
+    ) -> None:
         """Close the internally created HTTP client, if any."""
         await self._close_owned_client()
         self._client = None
-        return None
 
     async def _close_owned_client(self) -> None:
-        if self._owns_client and self._client is not None:
+        if self._provided_client is None and self._client is not None:
             with anyio.CancelScope(shield=True):
                 await self._client.aclose()
-        self._owns_client = False
 
     async def send_text(self, conversation_id: str, text: str) -> None:
         """Send text in ordered chunks no longer than Telegram's limit."""
@@ -155,7 +153,7 @@ class TelegramChannel:
             if self._offset is not None:
                 params['offset'] = self._offset
             try:
-                payload = await self._call('getUpdates', params)
+                payload = await self._call('getUpdates', params, timeout=self._poll_timeout + 5)
                 updates = _LIST_ADAPTER.validate_python(payload)
             except _FatalTelegramError:
                 raise
@@ -194,7 +192,13 @@ class TelegramChannel:
                 )
                 await anyio.sleep(self._retry_delay)
 
-    async def _call(self, method: str, params: Mapping[str, object] | None = None) -> object:
+    async def _call(
+        self,
+        method: str,
+        params: Mapping[str, object] | None = None,
+        *,
+        timeout: float = _REQUEST_TIMEOUT,
+    ) -> object:
         client = self._client
         if client is None:
             raise RuntimeError('TelegramChannel must be opened before use')
@@ -202,7 +206,7 @@ class TelegramChannel:
             response = await client.post(
                 f'{_API_BASE}/bot{self._token}/{method}',
                 json=dict(params or {}),
-                timeout=self._poll_timeout + 5 if method == 'getUpdates' else _REQUEST_TIMEOUT,
+                timeout=timeout,
             )
         except httpx.RequestError:
             # httpx exceptions include the request URL, whose path contains the
