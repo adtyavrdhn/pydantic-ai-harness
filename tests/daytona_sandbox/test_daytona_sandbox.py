@@ -13,8 +13,12 @@ from pydantic_ai.usage import RunUsage
 
 import pydantic_ai_harness
 import pydantic_ai_harness.daytona_sandbox as daytona_sandbox
-from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox, DaytonaSandboxBackend
-from pydantic_ai_harness.daytona_sandbox._session import DaytonaSandboxError
+from pydantic_ai_harness.daytona_sandbox import (
+    DaytonaSandbox,
+    DaytonaSandboxBackend,
+    DaytonaSandboxCommandTimeoutError,
+    DaytonaSandboxError,
+)
 
 from .fake_daytona import FakeDaytona
 
@@ -54,10 +58,13 @@ class TestLifecycle:
         assert backend is None
         assert fake_daytona.sandboxes == []
 
-    async def test_release_reconnects_and_deletes(self, fake_daytona: FakeDaytona) -> None:
+    async def test_release_deletes_without_starting(self, fake_daytona: FakeDaytona) -> None:
         capability = DaytonaSandbox[None]()
         ref = await capability.acquire_sandbox(_ctx())
+        sandbox = fake_daytona.sandboxes[0]
         await capability.release_sandbox(_ctx(), ref)
+        assert fake_daytona.get_calls[-1] == ref.sandbox_id
+        assert sandbox.start_calls == []
         assert fake_daytona.delete_calls == [(ref.sandbox_id, 60, True)]
 
     async def test_release_is_idempotent_when_sandbox_is_gone(self, fake_daytona: FakeDaytona) -> None:
@@ -79,6 +86,28 @@ class TestBackend:
         assert isinstance(backend, SupportsStart)
         assert backend.provider == 'daytona'
 
+    async def test_rejects_relative_working_dir(self, fake_daytona: FakeDaytona) -> None:
+        with pytest.raises(ValueError, match='workdir must be an absolute sandbox path'):
+            await DaytonaSandboxBackend.create(working_dir='repo')
+
+    async def test_rejects_relative_cwd(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+
+        with pytest.raises(ValueError, match='cwd must be an absolute sandbox path'):
+            await backend.run(['pwd'], cwd='repo')
+
+    async def test_attached_start_timeout_is_typed(self, fake_daytona: FakeDaytona) -> None:
+        sandbox = fake_daytona.sandbox()
+        sandbox.start_error = asyncio.TimeoutError()
+        with pytest.raises(DaytonaSandboxCommandTimeoutError, match='sandbox setup timed out'):
+            await DaytonaSandboxBackend.connect(sandbox.id)
+
+    async def test_process_setup_timeout_is_typed(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        fake_daytona.sandboxes[0].process_create_error = asyncio.TimeoutError()
+        with pytest.raises(DaytonaSandboxCommandTimeoutError, match='process setup timed out'):
+            await backend.start(['true'])
+
     async def test_argv_is_quoted_and_streams_stay_separate(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
         sandbox = fake_daytona.sandboxes[0]
@@ -94,7 +123,7 @@ class TestBackend:
         backend = await DaytonaSandboxBackend.create()
         sandbox = fake_daytona.sandboxes[0]
         sandbox.process_waits_for_input = True
-        with pytest.raises(TimeoutError, match='timed out and was killed'):
+        with pytest.raises(TimeoutError, match='timed out and cleanup was requested'):
             await backend.run(['sleep', '30'], timeout=0.01)
         assert sandbox.process_sessions == set()
 
@@ -133,6 +162,9 @@ class TestBackend:
         fake_daytona.delete_error = RuntimeError('delete failed')
         with pytest.raises(DaytonaSandboxError, match='delete failed'):
             await backend.close(terminate=True)
+        assert fake_daytona.closed_clients == 0
+        fake_daytona.delete_error = None
+        await backend.close(terminate=True)
         assert fake_daytona.closed_clients == 1
 
 
@@ -182,12 +214,14 @@ class TestConfiguration:
         assert capability.env == {'A': 'one'}
 
     def test_public_exports_are_narrow(self) -> None:
-        assert pydantic_ai_harness.DaytonaSandbox is DaytonaSandbox
+        assert not hasattr(pydantic_ai_harness, 'DaytonaSandbox')
         assert set(daytona_sandbox.__all__) == {
             'DaytonaSandbox',
             'DaytonaSandboxAuthError',
             'DaytonaSandboxBackend',
+            'DaytonaSandboxCommandTimeoutError',
             'DaytonaSandboxError',
+            'DaytonaSandboxTerminalError',
             'DaytonaSandboxUnavailableError',
         }
 

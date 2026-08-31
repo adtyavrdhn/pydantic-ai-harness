@@ -6,11 +6,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.mcp import MCPToolsetClient
 from pydantic_ai.tools import AgentDepsT
 
 from pydantic_ai_harness.stackone._toolset import (
     STACKONE_BASE_URL,
+    MCPToolsetClient,
     StackOneToolset,
     ToolMode,
     resolve_tool_mode,

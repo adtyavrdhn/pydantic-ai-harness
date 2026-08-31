@@ -43,11 +43,19 @@ class DaytonaSandboxError(RuntimeError):
     """A Daytona sandbox operation failed."""
 
 
-class DaytonaSandboxAuthError(DaytonaSandboxError):
+class DaytonaSandboxTerminalError(DaytonaSandboxError):
+    """A sandbox failure that retrying the same operation cannot fix."""
+
+
+class DaytonaSandboxCommandTimeoutError(TimeoutError):
+    """A Daytona command or its process setup exceeded its deadline."""
+
+
+class DaytonaSandboxAuthError(DaytonaSandboxTerminalError):
     """Daytona rejected the configured credentials."""
 
 
-class DaytonaSandboxUnavailableError(DaytonaSandboxError):
+class DaytonaSandboxUnavailableError(DaytonaSandboxTerminalError):
     """The requested Daytona sandbox no longer exists."""
 
 
@@ -76,6 +84,7 @@ class DaytonaSandboxProcess:
         self._on_stderr = on_stderr
         self._max_input_bytes = max_input_bytes
         self._io_timeout = io_timeout
+        self._created = False
         self._command_id: str | None = None
         self._logs: asyncio.Task[None] | None = None
 
@@ -85,15 +94,22 @@ class DaytonaSandboxProcess:
         return self._process_id
 
     async def __aenter__(self) -> DaytonaSandboxProcess:
-        if self._command_id is not None:
+        if self._created:
             raise DaytonaSandboxError('The Daytona process is already open.')
-        created = False
+
+        async def delete_cancelled_session(_: object) -> None:
+            try:
+                await self._process.delete_session(self._process_id, request_timeout=self._io_timeout)
+            except Exception:
+                self._created = True
+                raise
+
         try:
             await _finish_on_cancellation(
                 self._process.create_session(self._process_id, request_timeout=self._io_timeout),
-                on_cancel=lambda _: self._process.delete_session(self._process_id, request_timeout=self._io_timeout),
+                on_cancel=delete_cancelled_session,
             )
-            created = True
+            self._created = True
             from daytona import SessionExecuteRequest
 
             response = await self._process.execute_session_command(
@@ -106,8 +122,16 @@ class DaytonaSandboxProcess:
                 timeout=self._io_timeout,
             )
         except BaseException as error:
-            if created:
-                await _finish_cleanup(self._process.delete_session(self._process_id, request_timeout=self._io_timeout))
+            if self._created:
+                try:
+                    await _finish_cleanup(
+                        self._process.delete_session(self._process_id, request_timeout=self._io_timeout),
+                        then=self._clear,
+                    )
+                except Exception:
+                    pass
+            if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+                raise DaytonaSandboxCommandTimeoutError('Daytona process setup timed out.') from error
             if isinstance(error, Exception):
                 raise _translate_error(error, unavailable=True) from error
             raise
@@ -169,7 +193,7 @@ class DaytonaSandboxProcess:
 
     async def close(self) -> None:
         """Terminate the remote process session and its local log stream."""
-        if self._command_id is None:
+        if not self._created:
             return
         try:
             await _finish_cleanup(
@@ -183,6 +207,7 @@ class DaytonaSandboxProcess:
         logs = self._logs
         if logs is not None and not logs.done():
             logs.cancel()
+        self._created = False
         self._command_id = None
         self._logs = None
 
@@ -218,6 +243,10 @@ class DaytonaSandboxSession:
             raise ValueError(f'network_block_all must be a boolean, got {network_block_all!r}.')
         if sandbox_id is not None and network_block_all:
             raise ValueError('network_block_all cannot configure an attached sandbox.')
+        if workdir is not None:
+            if not posixpath.isabs(workdir):
+                raise ValueError(f'workdir must be an absolute sandbox path or None, got {workdir!r}.')
+            workdir = posixpath.normpath(workdir)
         self._requested_id = sandbox_id
         self._sandbox_name = sandbox_name
         self._snapshot = snapshot
@@ -249,9 +278,19 @@ class DaytonaSandboxSession:
 
         client = AsyncDaytona()
         self._client = client
+
+        async def delete_cancelled_sandbox(created: AsyncSandbox) -> None:
+            try:
+                await client.delete(created, timeout=60, wait=True)
+            except Exception:
+                # Retain the remote identity so cancellation cleanup can be retried explicitly.
+                self._sandbox = created
+                raise
+
         try:
             if self._requested_id is not None:
                 sandbox = await _finish_on_cancellation(client.get(self._requested_id))
+                await _finish_on_cancellation(sandbox.start(timeout=60))
             else:
                 params = CreateSandboxFromSnapshotParams(
                     name=self._sandbox_name,
@@ -263,14 +302,30 @@ class DaytonaSandboxSession:
                 )
                 sandbox = await _finish_on_cancellation(
                     client.create(params),
-                    on_cancel=lambda created: client.delete(created, timeout=60, wait=True),
+                    on_cancel=delete_cancelled_sandbox,
                 )
         except asyncio.CancelledError:
-            await _finish_cleanup(client.close(), then=self._clear)
+            if self._sandbox is None:
+                try:
+                    await _finish_cleanup(client.close(), then=self._clear)
+                except Exception:
+                    pass
             raise
+        except (TimeoutError, asyncio.TimeoutError) as error:
+            try:
+                await client.close()
+            except Exception:
+                pass
+            else:
+                self._client = None
+            raise DaytonaSandboxCommandTimeoutError('Daytona sandbox setup timed out.') from error
         except Exception as error:
-            await client.close()
-            self._client = None
+            try:
+                await client.close()
+            except Exception:
+                pass
+            else:
+                self._client = None
             raise _translate_error(error, unavailable=self._requested_id is not None) from error
 
         self._sandbox = sandbox
@@ -293,7 +348,6 @@ class DaytonaSandboxSession:
                 raise _translate_error(error, unavailable=False) from error
             return
 
-        failure: DaytonaSandboxError | None = None
         if terminate and not self._owned_sandbox_deleted:
             try:
                 await _finish_cleanup(
@@ -306,14 +360,12 @@ class DaytonaSandboxSession:
                 if isinstance(error, DaytonaNotFoundError):
                     self._mark_owned_sandbox_deleted()
                 else:
-                    failure = _translate_error(error, unavailable=False)
+                    # Keep the live client and sandbox handle so the caller can retry deletion.
+                    raise _translate_error(error, unavailable=False) from error
         try:
             await _finish_cleanup(client.close(), then=self._clear)
         except Exception as error:
-            if failure is None:
-                failure = _translate_error(error, unavailable=False)
-        if failure is not None:
-            raise failure
+            raise _translate_error(error, unavailable=False) from error
 
     def _mark_owned_sandbox_deleted(self) -> None:
         self._owned_sandbox_deleted = True
@@ -480,7 +532,10 @@ async def _finish_on_cancellation(
             pass
         else:
             if on_cancel is not None:
-                await _finish_cleanup(on_cancel(result))
+                try:
+                    await _finish_cleanup(on_cancel(result))
+                except Exception:
+                    pass
         raise
 
 
@@ -489,9 +544,13 @@ async def _finish_cleanup(operation: Awaitable[object], *, then: Callable[[], No
     try:
         await asyncio.shield(task)
     except asyncio.CancelledError:
-        await task
-        if then is not None:
-            then()
+        try:
+            await task
+        except Exception:
+            pass
+        else:
+            if then is not None:
+                then()
         raise
     if then is not None:
         then()

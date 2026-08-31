@@ -10,6 +10,7 @@ import shlex
 import time
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,7 @@ from typing_extensions import Self
 
 from pydantic_ai_harness.daytona_sandbox._session import (
     DEFAULT_AUTO_STOP_MINUTES,
+    DaytonaSandboxCommandTimeoutError,
     DaytonaSandboxError,
     DaytonaSandboxProcess,
     DaytonaSandboxSession,
@@ -36,6 +38,14 @@ if TYPE_CHECKING:
 PROVIDER = 'daytona'
 _INTERNAL_EXEC_TIMEOUT = 10.0
 _PROCESS_IO_TIMEOUT = 30
+
+
+def _absolute_path(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not posixpath.isabs(value):
+        raise ValueError(f'{name} must be an absolute sandbox path or None, got {value!r}.')
+    return posixpath.normpath(value)
 
 
 @dataclass(frozen=True)
@@ -108,13 +118,15 @@ class _DaytonaProcess:
     async def _settle(self) -> _DaytonaResult:
         remaining = None if self._deadline is None else self._deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
-            await self.kill()
-            raise TimeoutError('Daytona command timed out and was killed.')
+            with suppress(Exception):
+                await self.kill()
+            raise DaytonaSandboxCommandTimeoutError('Daytona command timed out and cleanup was requested.')
         try:
             exit_code = await self._process.wait(timeout=remaining)
         except TimeoutError as error:
-            await self.kill()
-            raise TimeoutError('Daytona command timed out and was killed.') from error
+            with suppress(Exception):
+                await self.kill()
+            raise DaytonaSandboxCommandTimeoutError('Daytona command timed out and cleanup was requested.') from error
         await self._process.close()
         return _DaytonaResult(exit_code=exit_code, stdout=''.join(self._stdout), stderr=''.join(self._stderr))
 
@@ -165,7 +177,7 @@ class DaytonaSandboxBackend:
             raise DaytonaSandboxError('The Daytona sandbox session is not open.')
         self._session = session
         self._sandbox_id = sandbox_id
-        self._working_dir = working_dir
+        self._working_dir = _absolute_path('working_dir', working_dir)
         self.fs = _DaytonaFilesystem(session)
 
     @property
@@ -263,7 +275,8 @@ class DaytonaSandboxBackend:
         try:
             return await process.wait()
         except BaseException:
-            await process.kill()
+            with suppress(Exception):
+                await process.kill()
             raise
 
     async def start(
@@ -277,6 +290,7 @@ class DaytonaSandboxBackend:
     ) -> _DaytonaProcess:
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
+        cwd = _absolute_path('cwd', cwd)
         started = time.monotonic()
         stdout: list[str] = []
         stderr: list[str] = []
@@ -293,8 +307,17 @@ class DaytonaSandboxBackend:
                 await inner.__aenter__()
             else:
                 await asyncio.wait_for(inner.__aenter__(), timeout)
+        except DaytonaSandboxCommandTimeoutError:
+            with suppress(Exception):
+                await inner.close()
+            raise
+        except (TimeoutError, asyncio.TimeoutError) as error:
+            with suppress(Exception):
+                await inner.close()
+            raise DaytonaSandboxCommandTimeoutError('Daytona command setup timed out.') from error
         except BaseException:
-            await inner.close()
+            with suppress(Exception):
+                await inner.close()
             raise
         deadline = None if timeout is None else started + timeout
         return _DaytonaProcess(inner, stdout=stdout, stderr=stderr, deadline=deadline)

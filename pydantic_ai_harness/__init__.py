@@ -22,7 +22,6 @@ if TYPE_CHECKING:
         WarnNearLimits,
     )
     from .conversation_search import ConversationSearch
-    from .daytona_sandbox import DaytonaSandbox
     from .dynamic_workflow import DynamicWorkflow
     from .exa import ExaAgent, ExaSearch
     from .filesystem import READ_ONLY_TOOL_NAMES, FileSystem
@@ -70,7 +69,6 @@ __all__ = [
     'DEFAULT_ALLOWED_COMMANDS',
     'DEFAULT_RESEARCHER_INSTRUCTIONS',
     'DeduplicateFileReads',
-    'DaytonaSandbox',
     'DynamicWorkflow',
     'ExaAgent',
     'ExaSearch',
@@ -127,7 +125,6 @@ _CAPABILITY_EXPORTS = {
     'Coder': 'coder',
     'ConversationSearch': 'conversation_search',
     'DeduplicateFileReads': 'compaction',
-    'DaytonaSandbox': 'daytona_sandbox',
     'DynamicWorkflow': 'dynamic_workflow',
     'ExaAgent': 'exa',
     'ExaSearch': 'exa',

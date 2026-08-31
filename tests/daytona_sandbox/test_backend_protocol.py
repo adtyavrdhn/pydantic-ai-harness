@@ -15,16 +15,14 @@ from daytona import (
     DaytonaNotFoundError,
 )
 
-from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxBackend
-from pydantic_ai_harness.daytona_sandbox._backend import _command_context, _command_line, _DaytonaResult
-from pydantic_ai_harness.daytona_sandbox._session import (
+from pydantic_ai_harness.daytona_sandbox import (
     DaytonaSandboxAuthError,
+    DaytonaSandboxBackend,
     DaytonaSandboxError,
-    DaytonaSandboxSession,
     DaytonaSandboxUnavailableError,
-    _finish_cleanup,
-    _finish_on_cancellation,
 )
+from pydantic_ai_harness.daytona_sandbox._backend import _command_context, _command_line, _DaytonaResult
+from pydantic_ai_harness.daytona_sandbox._session import DaytonaSandboxSession
 
 from .fake_daytona import FakeDaytona
 
@@ -170,7 +168,7 @@ class TestBackendLifecycle:
         process = await backend.start(['x'], timeout=5)
         process._deadline = 0
 
-        with pytest.raises(TimeoutError, match='timed out and was killed'):
+        with pytest.raises(TimeoutError, match='timed out and cleanup was requested'):
             await process.wait()
 
     async def test_filesystem_facade_delegates_all_operations(self, fake_daytona: FakeDaytona) -> None:
@@ -229,6 +227,8 @@ class TestSessionLifecycle:
         sandbox = fake_daytona.sandbox()
         async with DaytonaSandboxSession(sandbox_id=sandbox.id):
             pass
+        assert sandbox.started is True
+        assert sandbox.start_calls == [60]
         assert sandbox.deleted is False
 
     async def test_missing_attached_sandbox_is_unavailable(self, fake_daytona: FakeDaytona) -> None:
@@ -240,6 +240,27 @@ class TestSessionLifecycle:
         fake_daytona.get_error = DaytonaConnectionError('offline')
         with pytest.raises(DaytonaSandboxError, match='offline'):
             await DaytonaSandboxSession(sandbox_id='existing').__aenter__()
+
+    async def test_attached_resume_failure_is_translated(self, fake_daytona: FakeDaytona) -> None:
+        sandbox = fake_daytona.sandbox()
+        sandbox.start_error = DaytonaConnectionError('resume failed')
+
+        with pytest.raises(DaytonaSandboxError, match='resume failed'):
+            await DaytonaSandboxSession(sandbox_id=sandbox.id).__aenter__()
+        assert fake_daytona.closed_clients == 1
+
+    async def test_resume_failure_is_not_masked_by_close_failure(self, fake_daytona: FakeDaytona) -> None:
+        sandbox = fake_daytona.sandbox()
+        sandbox.start_error = DaytonaConnectionError('resume failed')
+        fake_daytona.close_error = DaytonaConnectionError('close failed')
+        session = DaytonaSandboxSession(sandbox_id=sandbox.id)
+
+        with pytest.raises(DaytonaSandboxError, match='resume failed'):
+            await session.__aenter__()
+
+        fake_daytona.close_error = None
+        await session.close(terminate=False)
+        assert fake_daytona.closed_clients == 1
 
     @pytest.mark.parametrize(
         ('error', 'error_type'),
@@ -268,6 +289,39 @@ class TestSessionLifecycle:
             await entering
         assert fake_daytona.sandboxes[0].deleted is True
         assert session.sandbox_id is None
+
+    async def test_cancelled_creation_is_not_masked_by_close_failure(self, fake_daytona: FakeDaytona) -> None:
+        fake_daytona.create_gate = asyncio.Event()
+        fake_daytona.close_error = DaytonaConnectionError('close failed')
+        session = DaytonaSandboxSession()
+        entering = asyncio.create_task(session.__aenter__())
+        await fake_daytona.create_started.wait()
+        entering.cancel()
+        fake_daytona.create_gate.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await entering
+
+        fake_daytona.close_error = None
+        await session.close(terminate=False)
+        assert fake_daytona.closed_clients == 1
+
+    async def test_cancelled_creation_retains_identity_when_delete_fails(self, fake_daytona: FakeDaytona) -> None:
+        fake_daytona.create_gate = asyncio.Event()
+        fake_daytona.delete_error = DaytonaConnectionError('delete failed')
+        session = DaytonaSandboxSession()
+        entering = asyncio.create_task(session.__aenter__())
+        await fake_daytona.create_started.wait()
+        entering.cancel()
+        fake_daytona.create_gate.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await entering
+        assert session.sandbox_id == fake_daytona.sandboxes[0].id
+
+        fake_daytona.delete_error = None
+        await session.close(terminate=True)
+        assert fake_daytona.sandboxes[0].deleted is True
 
     async def test_already_deleted_owned_sandbox_is_cleanup_success(self, fake_daytona: FakeDaytona) -> None:
         session = DaytonaSandboxSession()
@@ -310,6 +364,11 @@ class TestSessionLifecycle:
 
         with pytest.raises(DaytonaSandboxError, match='delete failed'):
             await session.close(terminate=True)
+
+        fake_daytona.delete_error = None
+        fake_daytona.close_error = None
+        await session.close(terminate=True)
+        assert fake_daytona.delete_calls[-1][0] == fake_daytona.sandboxes[0].id
 
 
 class TestManagedProcess:
@@ -372,6 +431,24 @@ class TestManagedProcess:
             sandbox.process_create_gate.set()
             with pytest.raises(asyncio.CancelledError):
                 await entering
+            assert sandbox.process_sessions == set()
+
+    async def test_cancelled_process_start_can_retry_failed_cleanup(self, fake_daytona: FakeDaytona) -> None:
+        async with DaytonaSandboxSession() as session:
+            sandbox = fake_daytona.sandboxes[0]
+            sandbox.process_create_gate = asyncio.Event()
+            sandbox.process_delete_error = DaytonaConnectionError('delete failed')
+            process = session.process('id', 'x', on_stdout=lambda _: None, on_stderr=lambda _: None, max_input_bytes=1)
+            entering = asyncio.create_task(process.__aenter__())
+            await sandbox.process_create_started.wait()
+            entering.cancel()
+            sandbox.process_create_gate.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await entering
+
+            sandbox.process_delete_error = None
+            await process.close()
             assert sandbox.process_sessions == set()
 
     async def test_async_output_handlers_are_awaited(self, fake_daytona: FakeDaytona) -> None:
@@ -494,63 +571,3 @@ class TestFilesystem:
             fake_daytona.sandboxes[0].exec_error = DaytonaConnectionError('offline')
             with pytest.raises(DaytonaSandboxError, match='offline'):
                 await session.write_bytes('pkg/a.py', b'x')
-
-
-class TestCancellationHelpers:
-    async def test_cancelled_operation_with_failed_result_preserves_cancellation(self) -> None:
-        gate = asyncio.Event()
-
-        async def fail_after_release() -> object:
-            await gate.wait()
-            raise RuntimeError('operation failed')
-
-        task = asyncio.create_task(_finish_on_cancellation(fail_after_release()))
-        await asyncio.sleep(0)
-        task.cancel()
-        gate.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    async def test_cancelled_cleanup_finishes_and_runs_callback(self) -> None:
-        gate = asyncio.Event()
-        completed: list[bool] = []
-
-        async def cleanup() -> object:
-            await gate.wait()
-            return None
-
-        task = asyncio.create_task(_finish_cleanup(cleanup(), then=lambda: completed.append(True)))
-        await asyncio.sleep(0)
-        task.cancel()
-        gate.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert completed == [True]
-
-    async def test_cancelled_operation_without_callback_still_finishes(self) -> None:
-        gate = asyncio.Event()
-
-        async def finish() -> object:
-            await gate.wait()
-            return object()
-
-        task = asyncio.create_task(_finish_on_cancellation(finish()))
-        await asyncio.sleep(0)
-        task.cancel()
-        gate.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    async def test_cancelled_cleanup_without_callback_still_finishes(self) -> None:
-        gate = asyncio.Event()
-
-        async def finish() -> object:
-            await gate.wait()
-            return object()
-
-        task = asyncio.create_task(_finish_cleanup(finish()))
-        await asyncio.sleep(0)
-        task.cancel()
-        gate.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task

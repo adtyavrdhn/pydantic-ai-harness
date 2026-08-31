@@ -17,7 +17,7 @@ export DAYTONA_API_KEY=...
 
 ```python
 from pydantic_ai import Agent, RunContext
-from pydantic_ai_harness import DaytonaSandbox
+from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -42,7 +42,7 @@ retry first reconnects by that name. If creation races, a failed create is
 followed by one reconnect to the winner. The serialized `SandboxRef` contains the
 provider and sandbox ID; later workers reconnect by ID and never create from
 `get_sandbox`. Acquisition closes its SDK client after recording the ref, and
-release opens a fresh client, deletes by ID, and closes it again.
+release opens a fresh client, resolves the sandbox by ID without starting it, deletes it, and closes the client again.
 
 An already missing sandbox counts as successfully released. Unexpected delete or
 client-close failures are surfaced. `auto_stop_minutes` is an idle backstop, not
@@ -97,11 +97,12 @@ output should bound it at the source.
 The public error surface is deliberately narrow:
 
 - `DaytonaSandboxError` for provider operations that fail.
+- `DaytonaSandboxTerminalError` as the catchable base for failures a retry cannot fix.
 - `DaytonaSandboxAuthError` when credentials are rejected.
 - `DaytonaSandboxUnavailableError` when the referenced sandbox is missing.
+- `DaytonaSandboxCommandTimeoutError` for command deadlines, also a built-in `TimeoutError`.
 
-Filesystem misses use the built-in `FileNotFoundError`, and command deadlines use
-the built-in `TimeoutError` contract.
+Filesystem misses use the built-in `FileNotFoundError` contract.
 
 ## Configuration
 

@@ -49,6 +49,8 @@ class FakeProcess:
     async def create_session(self, session_id: str, request_timeout: float | None = None) -> None:
         self.owner.process_calls.append(('create', session_id, request_timeout))
         self.owner.process_create_started.set()
+        if self.owner.process_create_error is not None:
+            raise self.owner.process_create_error
         if self.owner.process_create_gate is not None:
             await self.owner.process_create_gate.wait()
         self.owner.process_sessions.add(session_id)
@@ -204,6 +206,9 @@ class FakeSandbox:
         self.id = sandbox_id
         self.name = name or sandbox_id
         self.deleted = False
+        self.started = False
+        self.start_calls: list[float | None] = []
+        self.start_error: Exception | None = None
         self.files: dict[str, bytes] = {}
         self.directories: set[str] = set()
         self.reported_sizes: dict[str, int] = {}
@@ -225,12 +230,19 @@ class FakeSandbox:
         self.process_input_event = asyncio.Event()
         self.process_exit_code: int | None = 0
         self.process_delete_error: Exception | None = None
+        self.process_create_error: Exception | None = None
         self.process_input_error: Exception | None = None
         self.process_status_error: Exception | None = None
         self.process_create_gate: asyncio.Event | None = None
         self.process_create_started = asyncio.Event()
         self.process = FakeProcess(self)
         self.fs = FakeFileSystem(self)
+
+    async def start(self, timeout: float | None = 60) -> None:
+        self.start_calls.append(timeout)
+        if self.start_error is not None:
+            raise self.start_error
+        self.started = True
 
 
 class FakeClient:
@@ -250,6 +262,7 @@ class FakeClient:
         return sandbox
 
     async def get(self, sandbox_id: str) -> FakeSandbox:
+        self.owner.get_calls.append(sandbox_id)
         if self.owner.get_error is not None:
             raise self.owner.get_error
         for sandbox in self.owner.sandboxes:
@@ -275,6 +288,7 @@ class FakeDaytona:
         self.sandboxes: list[FakeSandbox] = []
         self.create_params: list[CreateParams] = []
         self.delete_calls: list[tuple[str, float, bool]] = []
+        self.get_calls: list[str] = []
         self.closed_clients = 0
         self.create_error: Exception | None = None
         self.get_error: Exception | None = None
