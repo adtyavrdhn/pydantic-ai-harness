@@ -10,7 +10,7 @@ into the agent's instructions (including template rendering) and the resolution 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import logfire
@@ -324,3 +324,12 @@ def test_logfire_instance_with_prebuilt_variable_warns() -> None:
     var = logfire.var(name='prompt__instance_conflict', type=str, default=DEFAULT)
     with pytest.warns(UserWarning, match='is ignored when `name` is a `Variable`'):
         ManagedPrompt(var, logfire_instance=logfire.DEFAULT_LOGFIRE_INSTANCE)
+
+
+def test_third_positional_argument_is_rejected() -> None:
+    # `label` was the third positional argument before this capability moved onto
+    # `ManagedVariableCapability`, which made it (and `targeting_key`, `attributes`,
+    # `logfire_instance`) keyword-only. Leaving `render_template` positional would have bound a label
+    # to it and quietly switched on Handlebars rendering; it is keyword-only so the call says so.
+    with pytest.raises(TypeError, match='positional argument'):
+        ManagedPrompt('support_agent', 'fallback', cast(Any, 'production'))  # type: ignore[misc]

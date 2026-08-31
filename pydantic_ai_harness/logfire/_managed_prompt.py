@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from logfire.variables import Variable
 from pydantic_ai import TemplateStr
@@ -83,11 +83,16 @@ class ManagedPrompt(ManagedVariableCapability[AgentDepsT, str]):
     """Code-default prompt text. Required when `name` is a prompt name (or omitted); ignored when
     `name` is a `Variable`."""
 
-    render_template: bool = False
+    render_template: bool = field(default=False, kw_only=True)
     """When `True`, render the resolved prompt as a Handlebars template against the agent's
     `deps` (the same mechanism as [`TemplateStr`][pydantic_ai.TemplateStr]); `{{field}}` is
     filled from `deps`. Requires `pydantic-handlebars` (install `pydantic-ai-slim[spec]`).
-    Defaults to `False`, so the resolved prompt is used verbatim."""
+    Defaults to `False`, so the resolved prompt is used verbatim.
+
+    Keyword-only: this capability's other options moved to keyword-only when it was refactored onto
+    [`ManagedVariableCapability`][pydantic_ai_harness.logfire.ManagedVariableCapability], and a third
+    positional argument used to be `label`. Binding one here instead would silently turn a label into
+    template rendering, so a call that passes one raises `TypeError` and says so."""
 
     def __post_init__(self) -> None:
         # A prompt name (given or derived from the agent) needs a code default; only a pre-built
