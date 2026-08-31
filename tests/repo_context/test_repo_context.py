@@ -30,7 +30,6 @@ from pydantic_ai_harness.repo_context._loader import (
 pytestmark = pytest.mark.anyio
 
 
-# LocalSandbox in the sandbox-concept branch is asyncio-only.
 @pytest.fixture
 def anyio_backend() -> str:
     return 'asyncio'
@@ -151,7 +150,7 @@ class TestInstructions:
         _write(tmp_path / 'CLAUDE.md', 'be nice')
         cap = RepoContext[object](workspace_dir=tmp_path)
         await cap.before_run(_run_context(sandbox=sandbox))
-        instructions = cap.get_instructions()
+        instructions = cap._render_instructions()
         assert isinstance(instructions, str)
         assert 'be nice' in instructions
         assert 'inventory_agent_context' in instructions
@@ -171,18 +170,18 @@ class TestInstructions:
 
     def test_no_files_no_inventory_is_none(self, tmp_path: Path) -> None:
         cap = RepoContext[object](workspace_dir=tmp_path, expose_inventory_tool=False)
-        assert cap.get_instructions() is None
+        assert cap._render_instructions() is None
 
     async def test_files_cached_across_calls(self, tmp_path: Path, sandbox: Sandbox) -> None:
         _write(tmp_path / 'CLAUDE.md', 'first')
         cap = RepoContext[object](workspace_dir=tmp_path)
         await cap.before_run(_run_context(sandbox=sandbox))
-        first = cap.get_instructions()
-        assert first is not None and 'first' in first  # type: ignore[operator]
+        first = cap._render_instructions()
+        assert first is not None and 'first' in first
         _write(tmp_path / 'CLAUDE.md', 'second')
-        second = cap.get_instructions()
+        second = cap._render_instructions()
         # Read-once: `before_run` loaded the file, so subsequent edits are not picked up.
-        assert second is not None and 'second' not in second  # type: ignore[operator]
+        assert second is not None and 'second' not in second
 
 
 class TestToolset:
@@ -204,11 +203,11 @@ class TestToolset:
 
 
 class TestScanAssets:
-    def test_full_shape(self, tmp_path: Path) -> None:
+    async def test_full_shape(self, tmp_path: Path, sandbox: Sandbox) -> None:
         _write(tmp_path / '.claude' / 'skills' / 'foo' / 'SKILL.md', 's')
         _write(tmp_path / '.claude' / 'agents' / 'bar.md', 'a')
         _write(tmp_path / '.claude' / 'settings.json', '{}')
-        inv = scan_assets(tmp_path, ('.claude', '.agents', '.codex', '.grok'))
+        inv = await scan_assets(sandbox, tmp_path, ('.claude', '.agents', '.codex', '.grok'))
         by_root = {r.root: r for r in inv.roots}
         claude = by_root['.claude']
         assert claude.exists
@@ -219,23 +218,23 @@ class TestScanAssets:
         assert by_root['.codex'].notes is not None
         assert by_root['.grok'].notes is not None
 
-    def test_existing_root_without_settings(self, tmp_path: Path) -> None:
+    async def test_existing_root_without_settings(self, tmp_path: Path, sandbox: Sandbox) -> None:
         _write(tmp_path / '.claude' / 'skills' / 'foo' / 'SKILL.md', 's')
-        inv = scan_assets(tmp_path, ('.claude',))
+        inv = await scan_assets(sandbox, tmp_path, ('.claude',))
         assert inv.roots[0].settings is None
         assert inv.roots[0].notes is None
 
-    def test_returns_model(self, tmp_path: Path) -> None:
-        assert isinstance(scan_assets(tmp_path, ()), AgentContextInventory)
+    async def test_returns_model(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        assert isinstance(await scan_assets(sandbox, tmp_path, ()), AgentContextInventory)
 
     @pytest.mark.skipif(sys.platform == 'win32', reason='symlinks need privileges on Windows')
-    def test_symlinked_asset_escaping_workspace(self, tmp_path: Path) -> None:
+    async def test_symlinked_asset_escaping_workspace(self, tmp_path: Path, sandbox: Sandbox) -> None:
         workspace = tmp_path / 'ws'
         outside = _write(tmp_path / 'outside' / 'foo' / 'SKILL.md', 's')
         link = workspace / '.claude' / 'skills' / 'foo' / 'SKILL.md'
         link.parent.mkdir(parents=True)
         link.symlink_to(outside)
-        inv = scan_assets(workspace, ('.claude',))
+        inv = await scan_assets(sandbox, workspace, ('.claude',))
         claude = inv.roots[0]
         assert claude.exists
         assert len(claude.skills) == 1

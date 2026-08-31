@@ -200,8 +200,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             session_config: Optional factory called once per session with the client's
                 [`AcpSession`][pydantic_ai_harness.experimental.acp.AcpSession] setup (its `cwd`, MCP servers,
                 and capabilities). It returns an
-                [`AcpSessionConfig`][pydantic_ai_harness.experimental.acp.AcpSessionConfig] whose `deps` and
-                `toolsets` are applied to every run in that session. May be sync or async.
+                [`AcpSessionConfig`][pydantic_ai_harness.experimental.acp.AcpSessionConfig] whose `deps`,
+                `toolsets`, and optional `sandbox` are applied to every run in that session. May be sync or async.
             permission_policy: Optional function deciding the scope under which an "always
                 allow"/"always reject" decision is remembered. Defaults to the exact call (tool
                 name plus arguments).

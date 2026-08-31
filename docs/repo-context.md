@@ -27,18 +27,22 @@ from pydantic_ai_harness import RepoContext
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
-    capabilities=[RepoContext(workspace_dir=Path('.'), home_dir=Path.home())],
+    capabilities=[RepoContext(workspace_dir=Path('/workspace'), home_dir=Path('/home/agent'))],
 )
 
 result = agent.run_sync('Summarize the coding-assistant setup in this repo.')
 print(result.output)
 ```
 
+All configured paths and discovered files refer to the run sandbox. Relative paths use its working directory.
+
+When no sandbox is attached, `RepoContext` continues to inspect the agent process's filesystem for backward compatibility.
+
 ### 1. Walk-up instruction autoload (on by default)
 
-Loads `CLAUDE.md`/`AGENTS.md` from `workspace_dir` and every ancestor up to `home_dir` (inclusive). Precedence is ancestor-first, workspace-last: broadest context first, most specific last. Files are deduped by resolved real path and by content hash, so a symlinked `AGENTS.md -> CLAUDE.md` or two ancestors sharing identical content load once.
+Loads `CLAUDE.md`/`AGENTS.md` from `workspace_dir` and every ancestor up to `home_dir` (inclusive). Precedence is ancestor-first, workspace-last: broadest context first, most specific last. Files are deduped by visited path and by content hash, so a symlinked `AGENTS.md -> CLAUDE.md` or two ancestors sharing identical content load once.
 
-When `home_dir` is `None` (the default), only `workspace_dir` is scanned -- no walk-up. Pass `home_dir=Path.home()` to walk up to your home directory.
+When `home_dir` is `None` (the default), only `workspace_dir` is scanned -- no walk-up. Pass the sandbox home path explicitly to walk up to it.
 
 ### 2. Asset inventory (on by default)
 

@@ -5,7 +5,7 @@ description: Give an agent a tool that locates and returns Pydantic AI documenta
 
 # Pydantic AI Docs
 
-`PydanticAIDocs` gives an agent a single tool, `read_pyai_docs(topic)`, that locates a Pydantic AI documentation page and returns it verbatim. Nothing is bundled into context up front. Each call resolves the topic from a configured local checkout first, then falls back to fetching the page from `pydantic/pydantic-ai:main`, so it works whether or not you have a local checkout (the remote fallback needs network access).
+`PydanticAIDocs` gives an agent a single tool, `read_pyai_docs(topic)`, that locates a Pydantic AI documentation page and returns it verbatim. Nothing is bundled into context up front. Each call resolves the topic from a configured checkout inside the run sandbox first, then falls back to fetching the page from `pydantic/pydantic-ai:main` (the remote fallback needs network access).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/pydantic_ai_docs/)
 
@@ -17,13 +17,13 @@ An agent that authors Pydantic AI capabilities, hooks, tools, or toolsets needs 
 
 ## The solution
 
-`PydanticAIDocs` exposes one tool, `read_pyai_docs(topic)`, that locates the requested page and returns it verbatim. Each call resolves the topic from a configured local checkout first, then falls back to fetching the page from `pydantic/pydantic-ai:main`, so it works whether or not you have a local checkout (the remote fallback needs network access).
+`PydanticAIDocs` exposes one tool, `read_pyai_docs(topic)`, that locates the requested page and returns it verbatim. Each call resolves the topic from a configured checkout inside the run sandbox first, then falls back to fetching the page from `pydantic/pydantic-ai:main` (the remote fallback needs network access).
 
 The available topics are `capabilities`, `hooks`, `tools`, `tools-advanced`, `toolsets`, and `agent`.
 
 ## Usage
 
-Construct an `Agent` with `PydanticAIDocs()` in its `capabilities`. Point `local_docs_path` at a local Pydantic AI docs checkout to read from disk first, or omit it to always fetch from the remote source:
+Construct an `Agent` with `PydanticAIDocs()` in its `capabilities`. Point `local_docs_path` at a Pydantic AI docs checkout inside the run sandbox, or omit it to always fetch from the remote source. Relative paths use the sandbox working directory:
 
 ```python
 from pathlib import Path
@@ -33,12 +33,14 @@ from pydantic_ai_harness import PydanticAIDocs
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
-    capabilities=[PydanticAIDocs(local_docs_path=Path('~/pydantic/ai/base/docs').expanduser())],
+    capabilities=[PydanticAIDocs(local_docs_path=Path('/workspace/pydantic-ai/docs'))],
 )
 
 result = agent.run_sync('Read the toolsets docs, then explain how to build a FunctionToolset.')
 print(result.output)
 ```
+
+When no sandbox is attached, the local checkout continues to use the agent process's filesystem for backward compatibility.
 
 The capability also adds a short static instruction telling the model that the `read_pyai_docs` tool exists and to read the relevant topic before authoring or modifying a Pydantic AI capability, hook, tool, or toolset, rather than relying on memory. The instruction is cache-stable, so it does not invalidate the prompt-cache prefix between turns.
 

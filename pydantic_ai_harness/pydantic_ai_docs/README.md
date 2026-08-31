@@ -28,14 +28,16 @@ from pydantic_ai_harness import PydanticAIDocs
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
-    capabilities=[PydanticAIDocs(local_docs_path=Path('~/pydantic/ai/base/docs').expanduser())],
+    capabilities=[PydanticAIDocs(local_docs_path=Path('/workspace/pydantic-ai/docs'))],
 )
 ```
 
+When no sandbox is attached, the checkout continues to use the agent process's filesystem for backward compatibility.
+
 ## Resolution order
 
-1. **Local checkout** -- when `local_docs_path` (or the `PYDANTIC_AI_HARNESS_DOCS_PATH`
-   env var) is set and `{path}/{topic}.md` exists, that file is read and returned.
+1. **Sandbox checkout** -- when `local_docs_path` (or the `PYDANTIC_AI_HARNESS_DOCS_PATH`
+   env var) is set and `{path}/{topic}.md` exists inside the run sandbox, that file is read and returned.
 2. **Remote fetch** -- otherwise the page is fetched from
    `https://raw.githubusercontent.com/pydantic/pydantic-ai/main/docs/{topic}.md`.
 3. **Neither resolves** -- a descriptive error naming the local path tried and the URL.
@@ -47,5 +49,5 @@ always reads `main`, so it is the fresh fallback.
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `local_docs_path` | `None` | Local pyai docs checkout to read first. Falls back to the `PYDANTIC_AI_HARNESS_DOCS_PATH` env var, then to the remote source. |
+| `local_docs_path` | `None` | Pyai docs checkout inside the run sandbox. Relative paths use the sandbox working directory. Falls back to the `PYDANTIC_AI_HARNESS_DOCS_PATH` env var, then to the remote source. |
 | `cache` | `True` | Memoize each returned doc in-process for the capability's lifetime, so a topic is read or fetched at most once. |

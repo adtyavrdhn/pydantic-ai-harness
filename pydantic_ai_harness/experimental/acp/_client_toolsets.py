@@ -31,7 +31,7 @@ from typing import Protocol
 
 import anyio
 from acp import Client, schema
-from pydantic_ai.tools import AgentDepsT, RunContext
+from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai_harness.experimental.acp._session import AcpSession
@@ -41,9 +41,7 @@ from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
 class _LocalFileWriter(Protocol):
     """Something that can write a file on the local disk -- structurally satisfied by `FileSystemToolset`."""
 
-    def write_file(  # pragma: no cover - structural protocol
-        self, ctx: RunContext[AgentDepsT], path: str, content: str
-    ) -> Awaitable[str]: ...
+    def write_file(self, path: str, content: str) -> Awaitable[str]: ...  # pragma: no cover - structural protocol
 
 
 class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
@@ -87,7 +85,7 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
         response = await self._client.read_text_file(path=self._absolute(path), session_id=self._session_id)
         return response.content
 
-    async def write_file(self, ctx: RunContext[AgentDepsT], path: str, content: str) -> str:  # noqa: D417
+    async def write_file(self, path: str, content: str) -> str:
         """Write a text file's full contents through the editor.
 
         Args:
@@ -96,7 +94,7 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
         """
         path = self._absolute(path)
         if self._local_writer is not None:
-            return await self._local_writer.write_file(ctx, path, content)
+            return await self._local_writer.write_file(path, content)
         await self._client.write_text_file(content=content, path=path, session_id=self._session_id)
         return f'Wrote {path} ({len(content)} characters).'
 

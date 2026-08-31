@@ -106,6 +106,14 @@ class TestPydanticAIDocsToolset:
             == '# Hooks local'
         )
 
+    async def test_local_hit_without_attached_sandbox_uses_host(self, tmp_path: Path) -> None:
+        (tmp_path / 'hooks.md').write_text('# Hooks local', encoding='utf-8')
+        toolset = PydanticAIDocsToolset[object](local_docs_path=tmp_path, cache=None)
+
+        assert (
+            await _call_docs_tool(toolset, None, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks) == '# Hooks local'
+        )
+
     async def test_remote_fallback_without_local_and_caching_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_fake_httpx(monkeypatch, text='# Capabilities remote')
         toolset = PydanticAIDocsToolset[object](local_docs_path=None, cache=None)
@@ -159,12 +167,9 @@ class TestPydanticAIDocsToolset:
             == '# Tools advanced local'
         )
 
-    async def test_local_path_expands_user(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sandbox: Sandbox
-    ) -> None:
-        monkeypatch.setenv('HOME', str(tmp_path))
+    async def test_relative_local_path_uses_sandbox_working_dir(self, tmp_path: Path, sandbox: Sandbox) -> None:
         (tmp_path / 'hooks.md').write_text('# Hooks home', encoding='utf-8')
-        toolset = PydanticAIDocsToolset[object](local_docs_path=Path('~'), cache=None)
+        toolset = PydanticAIDocsToolset[object](local_docs_path=Path('.'), cache=None)
 
         assert (
             await _call_docs_tool(toolset, sandbox, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks) == '# Hooks home'

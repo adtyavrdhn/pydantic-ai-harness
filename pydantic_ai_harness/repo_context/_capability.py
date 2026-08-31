@@ -13,6 +13,7 @@ from pydantic_ai.sandboxes import Sandbox
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 from pydantic_ai.toolsets import AgentToolset
 
+from pydantic_ai_harness._sandbox import sandbox_or_local
 from pydantic_ai_harness.repo_context._loader import (
     ContextFile,
     discover_instruction_files,
@@ -67,18 +68,18 @@ class RepoContext(AbstractCapability[AgentDepsT]):
 
     agent = Agent(
         'anthropic:claude-sonnet-4-6',
-        capabilities=[RepoContext(workspace_dir=Path('.'), home_dir=Path.home())],
+        capabilities=[RepoContext(workspace_dir=Path('/workspace'), home_dir=Path('/home/agent'))],
     )
     ```
     """
 
     workspace_dir: Path
-    """The deepest directory the agent works in. The walk-up and asset scan are
-    anchored here."""
+    """The deepest directory the agent works in inside the run sandbox. Relative
+    paths use the sandbox working directory. The walk-up and asset scan are anchored here."""
 
     home_dir: Path | None = None
-    """The shallowest directory to stop the walk-up at, inclusive. `None` (the
-    default) scans only `workspace_dir` -- no walk-up."""
+    """The shallowest sandbox directory to stop the walk-up at, inclusive. `None`
+    (the default) scans only `workspace_dir` -- no walk-up."""
 
     filenames: Sequence[str] = ('CLAUDE.md', 'AGENTS.md')
     """Instruction filenames to look for, in within-directory precedence order."""
@@ -115,23 +116,39 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     _seen_dirs: set[str] = field(default_factory=set[str], init=False, repr=False, compare=False)
     """Run-scoped set of directories already surfaced by Strategy 3."""
 
+    _resolved_workspace_dir: Path | None = field(default=None, init=False, repr=False, compare=False)
+    """Absolute sandbox path used for this run."""
+
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> RepoContext[AgentDepsT]:
         """Return a fresh per-run instance with isolated traversal/cache state."""
         return replace(self)
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Load walk-up instruction files through `ctx.sandbox` so `get_instructions` is sync."""
-        if not self.autoload_instructions:
-            return
-        self._context_files = await discover_instruction_files(
-            ctx.sandbox, self.workspace_dir, self.home_dir, self.filenames
-        )
+        sandbox = sandbox_or_local(ctx.sandbox)
+        workspace = await self._workspace(sandbox)
+        if self.autoload_instructions:
+            home = Path(await sandbox.resolve(self.home_dir.as_posix())) if self.home_dir is not None else None
+            self._context_files = await discover_instruction_files(sandbox, workspace, home, self.filenames)
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
-        """Static, cache-stable instructions: loaded files plus the inventory hint."""
+        """Cache-stable instructions resolved after `before_run` loads sandbox files."""
+        if not self.autoload_instructions:
+            return _INVENTORY_HINT.format(tool_name=self.inventory_tool_name) if self.expose_inventory_tool else None
+
+        def instructions(_ctx: RunContext[AgentDepsT]) -> str | None:
+            return self._render_instructions()
+
+        return instructions
+
+    def _render_instructions(self) -> str | None:
         parts: list[str] = []
-        if self.autoload_instructions and self._context_files:
-            parts.append(render_context_files(self._context_files, relative_to=self.workspace_dir))
+        if self._context_files:
+            parts.append(
+                render_context_files(
+                    self._context_files, relative_to=self._resolved_workspace_dir or self.workspace_dir
+                )
+            )
         if self.expose_inventory_tool:
             parts.append(_INVENTORY_HINT.format(tool_name=self.inventory_tool_name))
         return '\n\n'.join(parts) or None
@@ -157,8 +174,9 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         raw_path = args.get(self.traversal_path_arg)
         if not isinstance(raw_path, str):
             return result
-        directory = await self._resolve_directory(ctx.sandbox, raw_path)
-        context_file = await find_dir_context_file(ctx.sandbox, directory, self.filenames)
+        sandbox = sandbox_or_local(ctx.sandbox)
+        directory = await self._resolve_directory(sandbox, raw_path)
+        context_file = await find_dir_context_file(sandbox, directory, self.filenames)
         if context_file is None:
             return result
         key = str(directory)
@@ -171,10 +189,9 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         return f'{result}\n\n{note}'
 
     async def _resolve_directory(self, sandbox: Sandbox, raw_path: str) -> Path:
-        candidate = Path(raw_path)
-        if not candidate.is_absolute():
-            candidate = self.workspace_dir / candidate
-        text = str(candidate)
+        workspace = await self._workspace(sandbox)
+        text = await sandbox.resolve(raw_path, base=workspace.as_posix())
+        candidate = Path(text)
         if not await sandbox.fs.exists(text):
             return candidate
         try:
@@ -194,9 +211,14 @@ class RepoContext(AbstractCapability[AgentDepsT]):
 
     def _label(self, path: Path) -> str:
         try:
-            return path.relative_to(self.workspace_dir).as_posix()
+            return path.relative_to(self._resolved_workspace_dir or self.workspace_dir).as_posix()
         except ValueError:
             return path.as_posix()
+
+    async def _workspace(self, sandbox: Sandbox) -> Path:
+        if self._resolved_workspace_dir is None:
+            self._resolved_workspace_dir = Path(await sandbox.resolve(self.workspace_dir.as_posix()))
+        return self._resolved_workspace_dir
 
     @classmethod
     def get_serialization_name(cls) -> str | None:

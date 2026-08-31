@@ -50,13 +50,14 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
 
     agent = Agent(
         'anthropic:claude-sonnet-4-6',
-        capabilities=[PydanticAIDocs(local_docs_path=Path('~/pydantic/ai/base/docs').expanduser())],
+        capabilities=[PydanticAIDocs(local_docs_path=Path('/workspace/pydantic-ai/docs'))],
     )
     ```
     """
 
     local_docs_path: Path | None = None
-    """Local pyai docs checkout to read first. When `None`, falls back to the
+    """Pyai docs checkout inside the run sandbox. Relative paths use the sandbox
+    working directory. When `None`, falls back to the
     `PYDANTIC_AI_HARNESS_DOCS_PATH` env var, then to the remote source."""
 
     cache: bool = True
@@ -72,13 +73,13 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
     def _resolved_local_path(self) -> Path | None:
         """The local checkout path: `local_docs_path`, else the env var, else `None`.
 
-        `~` is expanded so a raw `~/...` path resolves to the local checkout
-        instead of silently falling through to the remote source.
+        Paths identify files inside the run sandbox. Relative paths are resolved
+        from its working directory.
         """
         if self.local_docs_path is not None:
-            return self.local_docs_path.expanduser()
+            return self.local_docs_path
         env_path = os.environ.get(_DOCS_PATH_ENV)
-        return Path(env_path).expanduser() if env_path else None
+        return Path(env_path) if env_path else None
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
         """Static, cache-stable guidance on using the docs tool."""

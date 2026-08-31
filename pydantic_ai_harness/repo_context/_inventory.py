@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import posixpath
 from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+from pydantic_ai.sandboxes import Sandbox
 
 _ROOT_NOTES = {
     '.codex': 'Codex uses TOML config; assets are derived from the .claude/.agents setup.',
@@ -30,30 +32,61 @@ class AgentContextInventory(BaseModel):
     roots: list[AssetRoot] = Field(default_factory=list[AssetRoot], description='One entry per scanned root directory.')
 
 
-def _relposix(path: Path, workspace: Path) -> str:
-    try:
-        return path.resolve().relative_to(workspace).as_posix()
-    except ValueError:
-        return path.as_posix()
-
-
-def scan_assets(workspace_dir: Path, asset_roots: Sequence[str]) -> AgentContextInventory:
+async def scan_assets(sandbox: Sandbox, workspace_dir: Path, asset_roots: Sequence[str]) -> AgentContextInventory:
     """Scan `asset_roots` under `workspace_dir`, locating skills, agents, and hooks.
 
     This locates assets only; it does not open or parse SKILL.md, agent `.md`, or
     `settings.json` contents.
     """
-    workspace = workspace_dir.resolve()
+    workspace = await sandbox.resolve(workspace_dir.as_posix())
     roots: list[AssetRoot] = []
     for name in asset_roots:
-        directory = workspace / name
+        directory = posixpath.normpath(posixpath.join(workspace, name))
         notes = _ROOT_NOTES.get(name)
-        if not directory.is_dir():
+        try:
+            entry = await sandbox.fs.stat(directory)
+        except FileNotFoundError:
             roots.append(AssetRoot(root=name, exists=False, notes=notes))
             continue
-        skills = sorted(_relposix(p, workspace) for p in directory.glob('skills/**/SKILL.md') if p.is_file())
-        agents = sorted(_relposix(p, workspace) for p in directory.glob('agents/*.md') if p.is_file())
-        settings_path = directory / 'settings.json'
-        settings = _relposix(settings_path, workspace) if settings_path.is_file() else None
+        if not entry.is_dir:
+            roots.append(AssetRoot(root=name, exists=False, notes=notes))
+            continue
+
+        result = await sandbox.run(
+            [
+                'find',
+                '-L',
+                directory,
+                '-type',
+                'f',
+                '(',
+                '-name',
+                'SKILL.md',
+                '-o',
+                '-name',
+                '*.md',
+                '-o',
+                '-name',
+                'settings.json',
+                ')',
+            ]
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(f'Could not inventory {directory}: {result.stderr.strip()}')
+        skills: list[str] = []
+        agents: list[str] = []
+        settings: str | None = None
+        prefix = f'{workspace.rstrip("/")}/'
+        for absolute in result.stdout.splitlines():
+            relative = absolute.removeprefix(prefix)
+            parts = relative.split('/')
+            if len(parts) >= 4 and parts[1] == 'skills' and parts[-1] == 'SKILL.md':
+                skills.append(relative)
+            elif len(parts) == 3 and parts[1] == 'agents' and parts[-1].endswith('.md'):
+                agents.append(relative)
+            elif len(parts) == 2 and parts[1] == 'settings.json':
+                settings = relative
+        skills.sort()
+        agents.sort()
         roots.append(AssetRoot(root=name, exists=True, skills=skills, agents=agents, settings=settings, notes=notes))
     return AgentContextInventory(roots=roots)
