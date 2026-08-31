@@ -88,7 +88,7 @@ backend preserves that separation and joins each stream once when the complete
 result is requested. Command setup, log collection, and the final exit-status RPC
 share one absolute deadline. Timeout or caller cancellation attempts to delete
 the remote process session before returning. If deletion fails, the backend
-retains the session identity so `close()` can retry it.
+retains the session identity so `close(terminate=False)` can retry it.
 
 Complete command output is buffered in memory. The backend does not add a second
 presentation policy or claim that transport is bounded. Model-facing tools should

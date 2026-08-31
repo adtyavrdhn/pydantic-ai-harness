@@ -174,9 +174,13 @@ class TestBackendLifecycle:
         backend = await DaytonaSandboxBackend.create()
         process = await backend.start(['x'], timeout=5)
         process._deadline = 0
+        fake_daytona.sandboxes[0].process_delete_error = RuntimeError('delete failed')
 
         with pytest.raises(TimeoutError, match='timed out and cleanup was requested'):
             await process.wait()
+
+        fake_daytona.sandboxes[0].process_delete_error = None
+        await backend.close(terminate=False)
 
     async def test_filesystem_facade_delegates_all_operations(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create(working_dir='/work')

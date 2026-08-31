@@ -117,12 +117,18 @@ class _DaytonaProcess:
     async def _settle(self) -> _DaytonaResult:
         remaining = None if self._deadline is None else self._deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
-            await self.kill()
+            try:
+                await self.kill()
+            except Exception:
+                pass
             raise DaytonaSandboxCommandTimeoutError('Daytona command timed out and cleanup was requested.')
         try:
             exit_code = await self._process.wait(timeout=remaining)
         except TimeoutError as error:
-            await self.kill()
+            try:
+                await self.kill()
+            except Exception:
+                pass
             raise DaytonaSandboxCommandTimeoutError('Daytona command timed out and cleanup was requested.') from error
         await self.kill()
         return _DaytonaResult(exit_code=exit_code, stdout=''.join(self._stdout), stderr=''.join(self._stderr))
@@ -291,7 +297,7 @@ class DaytonaSandboxBackend:
             try:
                 await process.kill()
             except Exception as cleanup_error:
-                if isinstance(error, asyncio.CancelledError):
+                if isinstance(error, (asyncio.CancelledError, DaytonaSandboxCommandTimeoutError)):
                     raise error
                 raise cleanup_error from error
             raise

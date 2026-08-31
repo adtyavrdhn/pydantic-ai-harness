@@ -226,13 +226,13 @@ class TestBackend:
             await backend.run(['sleep', '30'], timeout=0.01)
         assert sandbox.process_sessions == set()
 
-    async def test_failed_timeout_cleanup_is_visible_and_retried_on_close(self, fake_daytona: FakeDaytona) -> None:
+    async def test_failed_timeout_cleanup_is_retried_without_masking_timeout(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
         sandbox = fake_daytona.sandboxes[0]
         sandbox.process_waits_for_input = True
         sandbox.process_delete_error = RuntimeError('delete failed')
 
-        with pytest.raises(DaytonaSandboxError, match='delete failed'):
+        with pytest.raises(DaytonaSandboxCommandTimeoutError, match='timed out and cleanup was requested'):
             await backend.run(['sleep', '30'], timeout=0.01)
         assert sandbox.process_sessions
 
@@ -242,6 +242,19 @@ class TestBackend:
         sandbox.process_delete_error = None
         await backend.close(terminate=False)
         assert sandbox.process_sessions == set()
+
+    async def test_non_timeout_failure_surfaces_persistent_cleanup_failure(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_status_error = RuntimeError('status failed')
+        sandbox.process_delete_error = RuntimeError('delete failed')
+
+        with pytest.raises(DaytonaSandboxError, match='delete failed'):
+            await backend.run(['false'])
+        assert sandbox.process_sessions
+
+        sandbox.process_delete_error = None
+        await backend.close(terminate=False)
 
     async def test_cancellation_kills_process(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
