@@ -136,7 +136,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     streaming mode, and has no effect under Temporal durable execution.
 
     Pass `'declared'` instead of a list to trust the tools' own definitions as evidence:
-    first-party tools marked `Tool(..., metadata={'side_effect_free': True})` (or
+    first-party tools marked `Tool(..., metadata={'read_only': True})` (or
     `'idempotent'`), and MCP tools whose server publishes the `readOnlyHint` or
     `idempotentHint` annotation.
     """

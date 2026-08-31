@@ -273,7 +273,7 @@ Aggregate counters are exposed on `CodeMode.speculation_stats` (`launched`, `ado
 `evicted`).
 
 Instead of naming tools, pass `speculate='declared'` to trust evidence the tools carry
-themselves: first-party tools marked `Tool(..., metadata={'side_effect_free': True})` (or
+themselves: first-party tools marked `Tool(..., metadata={'read_only': True})` (or
 `'idempotent'`), and MCP tools whose server publishes the `readOnlyHint` or `idempotentHint`
 tool annotation. A declaration is the tool author's claim, not a proof; `'declared'` extends
 the same trust to authors that an explicit list places in you.
@@ -282,7 +282,7 @@ the same trust to authors that an explicit list places in you.
 agent = Agent(
     'openai:gpt-5',
     capabilities=[CodeMode(speculate='declared')],
-    tools=[Tool(search, metadata={'side_effect_free': True})],
+    tools=[Tool(search, metadata={'read_only': True})],
 )
 ```
 

@@ -911,13 +911,13 @@ class TestDeclaredSpeculation:
 
         toolset = FunctionToolset[None](
             tools=[
-                Tool(free, metadata={'side_effect_free': True}),
+                Tool(free, metadata={'read_only': True}),
                 Tool(idem, metadata={'idempotent': True}),
                 Tool(readonly, metadata={'annotations': {'readOnlyHint': True, 'title': 'Read'}}),
                 Tool(malformed, metadata={'annotations': 'not-a-mapping'}),
                 Tool(hintless, metadata={'annotations': {'title': 'No hints'}}),
                 Tool(plain),
-                Tool(ordered, sequential=True, metadata={'side_effect_free': True}),
+                Tool(ordered, sequential=True, metadata={'read_only': True}),
             ]
         )
         ctx = build_run_context(None)
@@ -973,7 +973,7 @@ class TestDeclaredSpeculation:
             FunctionModel(stream_function=stream_code),
             deps_type=type(None),
             capabilities=[capability],
-            tools=[Tool(search, metadata={'side_effect_free': True}), Tool(fetch)],
+            tools=[Tool(search, metadata={'read_only': True}), Tool(fetch)],
         )
 
         result = await agent.run('go')

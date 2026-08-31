@@ -182,18 +182,23 @@ def _canonical_key(sandbox_name: str, kwargs: dict[str, Any]) -> str:
     return json.dumps([sandbox_name, kwargs], sort_keys=True, default=repr)
 
 
-_DECLARED_SAFETY_KEYS = ('side_effect_free', 'idempotent')
+_DECLARED_SAFETY_KEYS = ('read_only', 'idempotent')
 _MCP_SAFETY_HINTS = ('readOnlyHint', 'idempotentHint')
 
 
 def _declares_speculation_safety(tool_def: ToolDefinition) -> bool:
     """Whether a tool's own definition presents evidence that early execution is safe.
 
-    Two channels: first-party tools set `metadata={'side_effect_free': True}` (or
+    Two channels: first-party tools set `metadata={'read_only': True}` (or
     `'idempotent'`) on the `Tool`, and MCP servers publish `readOnlyHint` or
     `idempotentHint` tool annotations, which arrive under `metadata['annotations']`.
     Hints are the server's claim, not a proof; `speculate='declared'` extends the same
     trust to them that an explicit allowlist places in the user.
+
+    The key vocabulary tracks pydantic-ai's tool behavior annotations
+    (pydantic/pydantic-ai#6344, catalogued in pydantic/pydantic-ai#7955): plain metadata
+    is the v1 contract, and if those names become first-class `ToolDefinition` fields the
+    same words will already be in use here.
     """
     metadata = tool_def.metadata or {}
     if any(metadata.get(key) is True for key in _DECLARED_SAFETY_KEYS):
