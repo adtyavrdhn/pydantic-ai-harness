@@ -289,6 +289,7 @@ class TestSlackChannel:
             {
                 'channel': 'C1',
                 'text': 'reply',
+                'mrkdwn': False,
                 'unfurl_links': False,
                 'unfurl_media': False,
                 'thread_ts': '123.45',
@@ -296,6 +297,7 @@ class TestSlackChannel:
             {
                 'channel': 'D1',
                 'text': 'dm reply',
+                'mrkdwn': False,
                 'unfurl_links': False,
                 'unfurl_media': False,
                 'thread_ts': '110.00',
@@ -334,6 +336,7 @@ class TestSlackChannel:
             {
                 'channel': 'D1',
                 'text': 'success (no tool calls)',
+                'mrkdwn': False,
                 'unfurl_links': False,
                 'unfurl_media': False,
             }
@@ -361,9 +364,9 @@ class TestSlackChannel:
             await channel.send_text('dm:D1', 'a' * 4001)
 
         assert posts == [
-            {'channel': 'D1', 'text': 'a' * 4000, 'unfurl_links': False, 'unfurl_media': False},
-            {'channel': 'D1', 'text': 'a' * 4000, 'unfurl_links': False, 'unfurl_media': False},
-            {'channel': 'D1', 'text': 'a', 'unfurl_links': False, 'unfurl_media': False},
+            {'channel': 'D1', 'text': 'a' * 4000, 'mrkdwn': False, 'unfurl_links': False, 'unfurl_media': False},
+            {'channel': 'D1', 'text': 'a' * 4000, 'mrkdwn': False, 'unfurl_links': False, 'unfurl_media': False},
+            {'channel': 'D1', 'text': 'a', 'mrkdwn': False, 'unfurl_links': False, 'unfurl_media': False},
         ]
         await client.aclose()
 
