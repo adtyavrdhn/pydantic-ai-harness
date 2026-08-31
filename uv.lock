@@ -3979,16 +3979,16 @@ requires-dist = [
     { name = "logfire", marker = "extra == 'logfire'", specifier = ">=4.31.0" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.0" },
     { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.61.0" },
-    { name = "pydantic-ai-slim", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'anthropic'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["cli"], marker = "extra == 'cli'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'code-mode'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'codemode'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["duckduckgo", "web-fetch"], marker = "extra == 'researcher'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'stackone'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["spec"], marker = "extra == 'logfire'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
+    { name = "pydantic-ai-slim", specifier = ">=2.33.0" },
+    { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'anthropic'", specifier = ">=2.33.0" },
+    { name = "pydantic-ai-slim", extras = ["cli"], marker = "extra == 'cli'", specifier = ">=2.33.0" },
+    { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'" },
+    { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'code-mode'", specifier = ">=2.33.0" },
+    { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'codemode'", specifier = ">=2.33.0" },
+    { name = "pydantic-ai-slim", extras = ["duckduckgo", "web-fetch"], marker = "extra == 'researcher'", specifier = ">=2.33.0" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'stackone'", specifier = ">=2.18.0" },
+    { name = "pydantic-ai-slim", extras = ["spec"], marker = "extra == 'logfire'", specifier = ">=2.36.0" },
+    { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'" },
     { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.19" },
     { name = "pydantic-monty", marker = "extra == 'codemode'", specifier = ">=0.0.19" },
     { name = "pydantic-monty", marker = "extra == 'dynamic-workflow'", specifier = ">=0.0.19" },
@@ -4009,9 +4009,9 @@ dev = [
     { name = "logfire", extras = ["httpx"], specifier = ">=4.31.0" },
     { name = "mongomock-motor", specifier = ">=0.0.36" },
     { name = "pydantic-ai-harness", extras = ["code-mode"] },
-    { name = "pydantic-ai-slim", extras = ["anthropic"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["openai"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["spec"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
+    { name = "pydantic-ai-slim", extras = ["anthropic"] },
+    { name = "pydantic-ai-slim", extras = ["openai"] },
+    { name = "pydantic-ai-slim", extras = ["spec"], specifier = ">=2.18.0" },
     { name = "pytest", specifier = ">=9.0.0" },
     { name = "pytest-anyio" },
     { name = "pytest-examples", specifier = ">=0.0.18" },
@@ -4025,8 +4025,8 @@ lint = [
 
 [[package]]
 name = "pydantic-ai-slim"
-version = "2.35.4.dev21+ebad0a02"
-source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main#ebad0a022229f8fb967b7629b76480dfc2a069ce" }
+version = "2.36.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio", version = "4.12.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "anyio", version = "4.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -4039,6 +4039,10 @@ dependencies = [
     { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pydantic-graph" },
     { name = "typing-inspection" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/af/ad/a1db6a8ea93d4f8b7a9adaab64204ccd40d236933285c564fcd4b9037173/pydantic_ai_slim-2.36.0.tar.gz", hash = "sha256:43b53401099352bbb0d1a1ecbcf8855bb7c3d0c680311ba006c5549ed6d61039", size = 1313875, upload-time = "2026-08-29T01:39:37.069Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e4/0c/433c49819fa099700d69078586327b9dfad2c11492f96f51a13fa30208ad/pydantic_ai_slim-2.36.0-py3-none-any.whl", hash = "sha256:90957c37c99d3bfbfab4be632b733bf50d563686fbfbf8a2e42b6c91a4fca877", size = 1548738, upload-time = "2026-08-29T01:39:28.524Z" },
 ]
 
 [package.optional-dependencies]
@@ -4322,8 +4326,8 @@ wheels = [
 
 [[package]]
 name = "pydantic-graph"
-version = "2.35.4.dev21+ebad0a02"
-source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_graph&branch=main#ebad0a022229f8fb967b7629b76480dfc2a069ce" }
+version = "2.36.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio", version = "4.12.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "anyio", version = "4.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -4331,6 +4335,10 @@ dependencies = [
     { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "typing-inspection" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6d/79/af5579c790ee5f670c270e4183d4c8411a6392c9b267022ea467e9e1c831/pydantic_graph-2.36.0.tar.gz", hash = "sha256:1222b50a141f88bca299dc21e94694277e6ef60d6f1bbbf490f2f2796851594a", size = 45191, upload-time = "2026-08-29T01:39:39.748Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4f/f4/7b43affa018fa14ba0d8169fb2460ec496d4cb974c64bfc1f8e85fc4da44/pydantic_graph-2.36.0-py3-none-any.whl", hash = "sha256:c0c7cddb87038298b367036d799b4b605b2a23858869b2b661706df6e1b811f2", size = 52700, upload-time = "2026-08-29T01:39:32.131Z" },
 ]
 
 [[package]]
