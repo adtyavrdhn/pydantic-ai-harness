@@ -82,7 +82,7 @@ Save this as `app.py`, run `uvicorn app:app`, and point Slack's Events API URL
 at `/slack/events`.
 For GovSlack, pass `api_base_url='https://slack-gov.com/api'` to `SlackChannel`.
 
-The task group owns the channel service and waits for its turns during shutdown.
+The task group owns the channel service and waits for cancellation and cleanup during shutdown.
 The lifespan and route must use the same process and async event-loop thread.
 Multi-worker deployments need external ingress routing and storage.
 
