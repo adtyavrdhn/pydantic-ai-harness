@@ -41,9 +41,9 @@ from pydantic_ai.sandboxes import Sandbox
 
 from pydantic_ai_harness.modal_sandbox import (
     ModalSandboxBackend,
-    ModalSandboxCommandTimeoutError,
     ModalSandboxUnavailableError,
 )
+from pydantic_ai_harness.modal_sandbox._backend import ModalSandboxCommandTimeoutError
 
 
 def _has_modal_credentials() -> bool:

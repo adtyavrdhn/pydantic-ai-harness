@@ -13,10 +13,12 @@ from pydantic_ai.sandboxes import Sandbox, SandboxBackend, SupportsFilesystem, S
 
 from pydantic_ai_harness.modal_sandbox import (
     ModalSandboxBackend,
-    ModalSandboxCommandTimeoutError,
     ModalSandboxError,
-    ModalSandboxTerminalError,
     ModalSandboxUnavailableError,
+)
+from pydantic_ai_harness.modal_sandbox._backend import (
+    ModalSandboxCommandTimeoutError,
+    ModalSandboxTerminalError,
 )
 
 from .fake_modal import FakeModal, FileInfo, _AioCallable
@@ -177,11 +179,10 @@ class TestClose:
         assert fake_modal.sandboxes[0].detached is True
 
     async def test_terminate_failure_still_detaches(self, fake_modal: FakeModal) -> None:
-        # Termination is best-effort: a teardown failure must not replace the exception
-        # unwinding through the caller, and `sandbox_timeout` reaps the sandbox regardless.
         backend = await ModalSandboxBackend.create()
         fake_modal.sandboxes[0].terminate_error = RuntimeError('terminate boom')
-        await backend.close(terminate=True)
+        with pytest.raises(ModalSandboxError, match='terminate boom'):
+            await backend.close(terminate=True)
         assert fake_modal.sandboxes[0].detached is True
 
     async def test_already_gone_sandbox_is_not_an_error(self, fake_modal: FakeModal) -> None:
@@ -192,10 +193,11 @@ class TestClose:
         await backend.close(terminate=True)
         assert fake_modal.sandboxes[0].detached is True
 
-    async def test_detach_failure_does_not_raise(self, fake_modal: FakeModal) -> None:
+    async def test_detach_failure_is_visible(self, fake_modal: FakeModal) -> None:
         backend = await ModalSandboxBackend.create()
         fake_modal.sandboxes[0].detach_error = RuntimeError('detach boom')
-        await backend.close(terminate=True)
+        with pytest.raises(ModalSandboxError, match='detach boom'):
+            await backend.close(terminate=True)
         assert fake_modal.sandboxes[0].terminated is True
 
     async def test_hanging_terminate_is_bounded_and_detach_still_runs(
@@ -205,7 +207,8 @@ class TestClose:
         backend = await ModalSandboxBackend.create()
         fake_modal.sandboxes[0].terminate = _HangingCall()
         with anyio.fail_after(5):
-            await backend.close(terminate=True)
+            with pytest.raises(ModalSandboxError, match='Timed out'):
+                await backend.close(terminate=True)
         assert fake_modal.sandboxes[0].detached is True
 
     async def test_hanging_detach_is_bounded(self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,7 +218,8 @@ class TestClose:
         backend = await ModalSandboxBackend.create()
         fake_modal.sandboxes[0].detach = _HangingCall()
         with anyio.fail_after(5):
-            await backend.close(terminate=True)
+            with pytest.raises(ModalSandboxError, match='Timed out'):
+                await backend.close(terminate=True)
         assert fake_modal.sandboxes[0].terminated is True
 
 
@@ -469,6 +473,16 @@ class TestProcess:
         backend = await ModalSandboxBackend.create()
         process = await backend.start(['x'])
         assert [(chunk.stream, chunk.data) async for chunk in process.stream()] == [('stdout', 'hello')]
+
+    async def test_stream_preserves_utf8_split_between_chunks(self, fake_modal: FakeModal) -> None:
+        _skip_without_asyncio()
+        fake_modal.output_chunk_size = 1
+        fake_modal.responder = lambda argv, timeout: ('é', '', 0)
+        backend = await ModalSandboxBackend.create()
+
+        process = await backend.start(['x'])
+
+        assert [(chunk.stream, chunk.data) async for chunk in process.stream()] == [('stdout', 'é')]
 
     async def test_wait_after_streaming_still_returns_the_whole_output(self, fake_modal: FakeModal) -> None:
         _skip_without_asyncio()

@@ -2,13 +2,14 @@
 
 This is the mechanism layer: every Modal-specific operation (create, connect, exec, file
 access, working-directory discovery, teardown) lives here, behind the protocol the rest of
-Pydantic AI already speaks. The capability in `_capability.py` owns the lifecycle and the
-toolset in `_toolset.py` only ever sees `ctx.sandbox`.
+Pydantic AI already speaks. The capability in `_capability.py` owns the lifecycle; tools and
+other capabilities consume the resulting `ctx.sandbox`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import codecs
 import functools
 import itertools
 import math
@@ -90,21 +91,11 @@ _SIGKILL_EXIT = 137
 
 
 class ModalSandboxError(RuntimeError):
-    """Base class for failures reported by the Modal sandbox integration.
-
-    The toolset turns direct instances into `ModelRetry`. Terminal subclasses
-    propagate because retrying cannot restore a missing sandbox or credentials.
-    """
+    """Base class for failures reported by the Modal sandbox integration."""
 
 
 class ModalSandboxTerminalError(ModalSandboxError):
-    """A sandbox failure that retrying cannot fix, so the run should end, not loop.
-
-    The toolset lets this propagate out of the tool (ending the run) instead of
-    turning it into a `ModelRetry`: re-issuing the command would hit the same wall.
-    Raised as `ModalSandboxUnavailableError` for a sandbox that no longer exists
-    and `ModalSandboxAuthError` for rejected credentials.
-    """
+    """A sandbox failure that retrying the same operation cannot fix."""
 
 
 class ModalSandboxUnavailableError(ModalSandboxTerminalError):
@@ -226,9 +217,8 @@ class _ModalProcess:
     def stream(self) -> AsyncGenerator[_ModalOutputChunk]:
         """Iterate over the command's output as Modal produces it.
 
-        Chunks from the two streams are interleaved in arrival order and decoded per chunk, so
-        a multi-byte character split across two transport chunks decodes to replacement
-        characters here (`wait()` decodes the whole stream and does not have that seam).
+        Chunks from the two streams are interleaved in arrival order. Each stream has an
+        incremental UTF-8 decoder, so a character split across transport chunks stays intact.
         Modal's readers have a single consumer, so a second `stream()` call raises. Nothing
         here is load-bearing for `wait()`, which asks Modal for the output in full.
 
@@ -249,6 +239,7 @@ class _ModalProcess:
             'stdout': aiter(self._process.stdout),
             'stderr': aiter(self._process.stderr),
         }
+        decoders = {name: codecs.getincrementaldecoder('utf-8')(errors='replace') for name in iterators}
         arrival = itertools.count()
 
         async def read_one(name: _Stream) -> tuple[int, _Stream, bytes | None]:
@@ -270,9 +261,14 @@ class _ModalProcess:
                     raise await self._classify(error, 'Could not read the command output') from error
                 for _, name, chunk in chunks:
                     if chunk is None:  # that stream reached EOF and is not re-armed
+                        final = decoders[name].decode(b'', final=True)
+                        if final:
+                            yield _ModalOutputChunk(stream=name, data=final)
                         continue
                     pending.add(asyncio.ensure_future(read_one(name)))
-                    yield _ModalOutputChunk(stream=name, data=chunk.decode('utf-8', errors='replace'))
+                    text = decoders[name].decode(chunk)
+                    if text:
+                        yield _ModalOutputChunk(stream=name, data=text)
         finally:
             # Reaped, not just cancelled: an abandoned read would otherwise keep retrying
             # against the worker long after the consumer walked away.
@@ -507,6 +503,7 @@ class ModalSandboxBackend:
         sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
         workdir: str | None = None,
         env: Mapping[str, str] | None = None,
+        name: str | None = None,
     ) -> Self:
         """Provision a fresh Modal sandbox. The caller owns terminating it with `close`.
 
@@ -517,6 +514,7 @@ class ModalSandboxBackend:
             sandbox_timeout: How long Modal keeps the sandbox alive, in seconds.
             workdir: Absolute directory commands start in; Modal's default when `None`.
             env: Environment variables set for the whole sandbox.
+            name: Optional Modal name, unique among running sandboxes in the app.
         """
         try:
             import modal
@@ -543,8 +541,10 @@ class ModalSandboxBackend:
                     variables: dict[str, str | None] | None = dict(env) if env is not None else None
                     # `create.aio` is typed with a partially-`Any` coroutine return.
                     sandbox = await modal.Sandbox.create.aio(  # pyright: ignore[reportUnknownMemberType]
-                        app=app, image=built, timeout=sandbox_timeout, workdir=workdir, env=variables
+                        app=app, image=built, timeout=sandbox_timeout, workdir=workdir, env=variables, name=name
                     )
+        except modal.exception.AlreadyExistsError:
+            raise
         except modal.exception.AuthError as e:
             raise ModalSandboxAuthError(_AUTH_MESSAGE) from e
         except modal.exception.Error as e:
@@ -566,6 +566,43 @@ class ModalSandboxBackend:
             await backend.close(terminate=True)
             raise
         return backend
+
+    @classmethod
+    async def create_or_connect(
+        cls,
+        *,
+        name: str,
+        image: str = DEFAULT_IMAGE,
+        app_name: str = DEFAULT_APP_NAME,
+        create_app_if_missing: bool = True,
+        sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
+        workdir: str | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> Self:
+        """Connect to the running named sandbox, or create it once.
+
+        A concurrent retry may win the create race. In that case, reconnect by
+        name rather than provisioning another environment.
+        """
+        try:
+            return await cls.connect_name(app_name, name)
+        except ModalSandboxUnavailableError:
+            pass
+        import modal
+
+        try:
+            return await cls.create(
+                image=image,
+                app_name=app_name,
+                create_app_if_missing=create_app_if_missing,
+                sandbox_timeout=sandbox_timeout,
+                workdir=workdir,
+                env=env,
+                name=name,
+            )
+        except modal.exception.AlreadyExistsError:
+            pass
+        return await cls.connect_name(app_name, name)
 
     @classmethod
     async def connect(cls, sandbox_id: str) -> Self:
@@ -590,6 +627,26 @@ class ModalSandboxBackend:
             raise ModalSandboxUnavailableError(_attached_gone_message(sandbox_id))
         return cls(sandbox)
 
+    @classmethod
+    async def connect_name(cls, app_name: str, name: str) -> Self:
+        """Connect to a running named sandbox without creating one."""
+        try:
+            import modal
+        except ImportError as error:
+            raise ModalSandboxError(_MISSING_MODAL) from error
+        try:
+            sandbox = await modal.Sandbox.from_name.aio(app_name, name)
+            finished = await sandbox.poll.aio()
+        except modal.exception.AuthError as error:
+            raise ModalSandboxAuthError(_AUTH_MESSAGE) from error
+        except _unavailable_sandbox_exc_types() as error:
+            raise ModalSandboxUnavailableError(
+                f'Modal sandbox named {name!r} in app {app_name!r} is not running.'
+            ) from error
+        if finished is not None:
+            raise ModalSandboxUnavailableError(f'Modal sandbox named {name!r} in app {app_name!r} is not running.')
+        return cls(sandbox)
+
     async def close(self, *, terminate: bool) -> None:
         """Release this handle, terminating the sandbox with it when we own its lifetime.
 
@@ -597,28 +654,38 @@ class ModalSandboxBackend:
         termination request out, with each RPC bounded so a stalled control plane cannot wedge
         the caller.
         """
+        errors: list[ModalSandboxError] = []
         with anyio.CancelScope(shield=True):
+            if terminate:
+                error = await self._close_call(self.sandbox.terminate.aio(wait=True), operation='terminate')
+                if error is not None:
+                    errors.append(error)
+            error = await self._close_call(
+                self.sandbox.detach.aio(),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                operation='detach',
+            )
+            if error is not None:
+                errors.append(error)
+        if errors:
+            raise errors[0]
+
+    async def _close_call(self, call: Awaitable[object], *, operation: str) -> ModalSandboxError | None:
+        import modal
+
+        with anyio.move_on_after(_TEARDOWN_TIMEOUT) as scope:
             try:
-                if terminate:
-                    # Bound each RPC independently so a stalled terminate still lets detach run;
-                    # a single shared deadline would cancel the detach the moment terminate hung.
-                    with anyio.move_on_after(_TEARDOWN_TIMEOUT):
-                        try:
-                            await self.sandbox.terminate.aio(wait=True)
-                        except Exception:
-                            # Termination is best-effort. A sandbox that no longer exists is
-                            # success, not an error. Any other failure must not replace the
-                            # exception unwinding through the caller, and the server-side
-                            # `sandbox_timeout` reaps the sandbox regardless.
-                            pass
-            finally:
-                with anyio.move_on_after(_TEARDOWN_TIMEOUT):
-                    try:
-                        await self.sandbox.detach.aio()  # pyright: ignore[reportUnknownMemberType]
-                    except Exception:
-                        # Best-effort like terminate: a failed local detach must not replace the
-                        # exception unwinding through the caller.
-                        pass
+                await call
+            except _unavailable_sandbox_exc_types():
+                return None
+            except modal.exception.AuthError:
+                return ModalSandboxAuthError(_AUTH_MESSAGE)
+            except Exception as error:
+                return ModalSandboxError(f'Could not {operation} Modal sandbox {self.sandbox_id!r}: {error}')
+        if scope.cancel_called:
+            return ModalSandboxError(
+                f'Timed out after {_TEARDOWN_TIMEOUT}s while trying to {operation} Modal sandbox {self.sandbox_id!r}.'
+            )
+        return None
 
     @functools.cached_property
     def _working_dir_lock(self) -> anyio.Lock:

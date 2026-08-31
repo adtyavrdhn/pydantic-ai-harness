@@ -146,6 +146,10 @@ class FakeNotFoundError(FakeModalError):
     """Stand-in for `modal.exception.NotFoundError` (the sandbox itself is missing/gone)."""
 
 
+class FakeAlreadyExistsError(FakeModalError):
+    """Stand-in for `modal.exception.AlreadyExistsError`."""
+
+
 class FakeAuthError(FakeModalError):
     """Stand-in for `modal.exception.AuthError`."""
 
@@ -305,6 +309,9 @@ class FakeSandbox:
         if self.terminate_error is not None:
             raise self.terminate_error
         self.terminated = True
+        self._control.named_sandboxes = {
+            key: sandbox for key, sandbox in self._control.named_sandboxes.items() if sandbox is not self
+        }
         return 0 if wait else None
 
     def _detach(self) -> None:
@@ -335,6 +342,9 @@ class FakeModal:
         self.apps: list[object] = []
         self.image_tags: list[str] = []
         self.attach_ids: list[str] = []
+        self.name_lookups: list[tuple[str, str]] = []
+        self.named_sandboxes: dict[tuple[str, str], FakeSandbox] = {}
+        self.name_lookup_misses = 0
         self.create_error: Exception | None = None
         self.attach_error: Exception | None = None
         self.attach_poll_result: int | None = None
@@ -401,14 +411,21 @@ class FakeModal:
             timeout: int | None = None,
             workdir: str | None = None,
             env: dict[str, str | None] | None = None,
+            name: str | None = None,
         ) -> FakeSandbox:
             if control.create_error is not None:
                 raise control.create_error
             control.create_kwargs.append(
-                {'app': app, 'image': image, 'timeout': timeout, 'workdir': workdir, 'env': env}
+                {'app': app, 'image': image, 'timeout': timeout, 'workdir': workdir, 'env': env, 'name': name}
             )
             sandbox = FakeSandbox(control, 'sb-owned')
             control.sandboxes.append(sandbox)
+            if name is not None:
+                app_name = str(control.app_lookups[-1]['name'])
+                key = (app_name, name)
+                if key in control.named_sandboxes:
+                    raise FakeAlreadyExistsError(name)
+                control.named_sandboxes[key] = sandbox
             return sandbox
 
         def sandbox_from_id(sandbox_id: str) -> FakeSandbox:
@@ -420,6 +437,18 @@ class FakeModal:
             control.sandboxes.append(sandbox)
             return sandbox
 
+        def sandbox_from_name(app_name: str, name: str) -> FakeSandbox:
+            control.name_lookups.append((app_name, name))
+            if control.attach_error is not None:
+                raise control.attach_error
+            if control.name_lookup_misses:
+                control.name_lookup_misses -= 1
+                raise FakeNotFoundError(name)
+            try:
+                return control.named_sandboxes[(app_name, name)]
+            except KeyError as error:
+                raise FakeNotFoundError(name) from error
+
         class App:
             lookup = _AioCallable(app_lookup)
 
@@ -429,12 +458,14 @@ class FakeModal:
         class Sandbox:
             create = _AioCallable(sandbox_create)
             from_id = _AioCallable(sandbox_from_id)
+            from_name = _AioCallable(sandbox_from_name)
 
         module.App = App  # type: ignore[attr-defined]
         module.Image = Image  # type: ignore[attr-defined]
         module.Sandbox = Sandbox  # type: ignore[attr-defined]
         module.exception = types.SimpleNamespace(  # type: ignore[attr-defined]
             Error=FakeModalError,
+            AlreadyExistsError=FakeAlreadyExistsError,
             NotFoundError=FakeNotFoundError,
             AuthError=FakeAuthError,
             ConflictError=FakeConflictError,
