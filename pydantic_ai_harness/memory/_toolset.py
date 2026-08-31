@@ -286,8 +286,11 @@ def memory_toolset_id(agent_name: str) -> str:
     `agent_name` is already the scope key that separates their stored files, and the store's path
     validation confines it to characters an ID segment allows.
 
-    The default scope keeps the bare `memory`, so the single-memory case — every existing one —
-    keeps the workflow step names its histories were recorded with.
+    The default scope keeps the bare `memory`, so an agent that never set `agent_name` keeps the
+    workflow step names its histories were recorded with. One that did set it does not: `agent_name`
+    predates this, so a deployment already running a single `Memory(agent_name='support')` moves its
+    step from `memory` to `memory-support`, and Temporal reports nondeterminism until the workflows
+    recorded against the old name drain.
     """
     return 'memory' if agent_name == DEFAULT_AGENT_NAME else f'memory-{agent_name}'
 
