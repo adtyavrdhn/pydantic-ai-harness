@@ -1,186 +1,122 @@
 ---
 title: Daytona Sandbox
-description: Give a Pydantic AI agent a per-run Daytona sandbox with command and file tools.
+description: Supply a Daytona environment through ctx.sandbox.
 ---
 
 # Daytona Sandbox
 
-`DaytonaSandbox` gives an agent an isolated cloud computer for running commands
-and working with files. Use it when model-generated code should not run on the
-application host.
+`DaytonaSandbox` supplies a Daytona sandbox as the run's `ctx.sandbox`. It owns
+only provider connection and lifecycle behavior. Add tools or capabilities that
+consume `ctx.sandbox` for the model-facing interface you want.
 
-Each agent run gets a fresh [Daytona sandbox](https://www.daytona.io/docs/en/)
-that is deleted when the run ends. You can instead attach a sandbox you manage.
+[Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/daytona_sandbox/)
 
-> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
-
-## Quick start
-
-Install the extra and set a Daytona API key:
+## Install and authenticate
 
 ```bash
 uv add "pydantic-ai-harness[daytona]"
 export DAYTONA_API_KEY=...
 ```
 
-Add the capability:
+## Use with an agent
 
 ```python
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
 from pydantic_ai_harness import DaytonaSandbox
 
 agent = Agent(
-    'openai:gpt-5.6-sol',
-    capabilities=[DaytonaSandbox()],
+    'anthropic:claude-sonnet-4-6',
+    capabilities=[DaytonaSandbox(snapshot='base')],
 )
 
-result = agent.run_sync('Create a Python script and run its tests.')
-print(result.output)
+
+@agent.tool
+async def run_command(ctx: RunContext[None], argv: list[str]) -> str:
+    result = await ctx.sandbox.run(argv, timeout=60)
+    return result.stdout
 ```
 
-## Tools
-
-| Tool | Purpose |
-| --- | --- |
-| `run_command` | Run a shell command with a bounded timeout and output. |
-| `read_file` | Read UTF-8 text with line paging. |
-| `write_file` | Write UTF-8 text and create parent directories. |
-| `list_directory` | List entries, marking directories with `/`. |
-
-Non-zero command exits are returned to the model. File errors become retryable
-tool errors. Missing sandboxes and rejected credentials raise
-`DaytonaSandboxUnavailableError` and `DaytonaSandboxAuthError`.
+The example deliberately uses argv, which the backend safely quotes into the
+shell command Daytona accepts. Use `shell=True` only when the tool deliberately
+exposes shell syntax.
 
 ## Lifecycle
 
-The default creates one sandbox per run and deletes it on exit. Daytona also
-stops it after `auto_stop_minutes` of inactivity and deletes it immediately
-after stopping, which bounds an orphan if teardown cannot reach the control
-plane.
+Owned acquisition derives a Daytona-safe name from the logical run ID. A durable
+retry first reconnects by that name. If creation races, a failed create is
+followed by one reconnect to the winner. The serialized `SandboxRef` contains the
+provider and sandbox ID; later workers reconnect by ID and never create from
+`get_sandbox`. Acquisition closes its SDK client after recording the ref, and
+release opens a fresh client, deletes by ID, and closes it again.
 
-Set `sandbox_id` to attach an existing sandbox. Attached sandboxes are not
-deleted. `snapshot` selects the snapshot for a fresh sandbox and cannot be used
-with `sandbox_id`.
+An already missing sandbox counts as successfully released. Unexpected delete or
+client-close failures are surfaced. `auto_stop_minutes` is an idle backstop, not
+a substitute for release.
 
-```python
-DaytonaSandbox(sandbox_id='sandbox-id')
-```
-
-`workdir` applies to commands and relative file paths. `env` is passed when the
-sandbox is created and on every command. Set `network_block_all=True` on a fresh
-sandbox or session to block outbound traffic:
+Attach to a sandbox managed elsewhere by ID or name when the capability must not
+own its lifetime:
 
 ```python
-DaytonaSandbox(network_block_all=True)
+DaytonaSandbox(sandbox_id='existing', workdir='/workspace')
 ```
 
-To reuse one sandbox across sequential runs while controlling its lifetime,
-open a `DaytonaSandboxSession` and pass it to the capability:
+Creation-only settings cannot be combined with `sandbox_id`. Attached sandboxes
+are not deleted at run end, and concurrent runs share their filesystem and
+process space.
+
+## Direct backend use
+
+`DaytonaSandboxBackend` implements Pydantic AI's `SandboxBackend` protocol and
+its filesystem and process-start opt-ins:
 
 ```python
-import asyncio
+from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxBackend
 
-from pydantic_ai import Agent
-from pydantic_ai_harness import DaytonaSandbox
-from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxSession
-
-
-async def main() -> None:
-    async with DaytonaSandboxSession() as session:
-        agent = Agent(
-            'openai:gpt-5.6-sol',
-            capabilities=[DaytonaSandbox(session=session)],
-        )
-        await agent.run('Install the project dependencies.')
-        await agent.run('Run the tests in the same sandbox.')
-
-
-asyncio.run(main())
+backend = await DaytonaSandboxBackend.create(
+    snapshot='base',
+    auto_stop_minutes=60,
+)
+try:
+    result = await backend.run(['python', '--version'], timeout=60)
+    print(result.stdout)
+finally:
+    await backend.close(terminate=True)
 ```
 
-The caller opens and closes an injected session. The capability does neither.
-An attached session (`DaytonaSandboxSession(sandbox_id=...)`) is also left
-running when the session closes. Do not share one session between overlapping
-runs that need isolated files or processes.
+Use `connect(sandbox_id_or_name)` for a fresh handle to an existing sandbox; it
+never provisions a replacement.
 
-`session=` cannot be combined with `sandbox_id`, `snapshot`, a non-default
-`auto_stop_minutes`, `workdir`, `env`, or `network_block_all` on the capability.
-Configure those on `DaytonaSandboxSession`, which owns the sandbox. Attached
-sandboxes retain their existing network settings.
+## Process and output behavior
 
-`DaytonaSandboxSession.exec` returns a `DaytonaSandboxExecResult` for
-applications that need command access outside an agent run. It streams command
-output from Daytona and retains only the last `max_output_bytes`. The caller
-must provide a positive whole-second timeout.
+Daytona process sessions provide separate stdout and stderr callbacks. The
+backend preserves that separation and joins each stream once when the complete
+result is requested. Command setup, log collection, and the final exit-status RPC
+share one absolute deadline. Timeout or caller cancellation deletes the remote
+process session before returning.
 
-Use `DaytonaSandboxSession.process` when an application needs to exchange input
-with a long-running command or handle stdout and stderr separately:
+Complete command output is buffered in memory. The backend does not add a second
+presentation policy or claim that transport is bounded. Model-facing tools should
+apply their own byte or line budget, and commands that can produce very large
+output should bound it at the source.
+
+The public error surface is deliberately narrow:
+
+- `DaytonaSandboxError` for provider operations that fail.
+- `DaytonaSandboxAuthError` when credentials are rejected.
+- `DaytonaSandboxUnavailableError` when the referenced sandbox is missing.
+
+Filesystem misses use the built-in `FileNotFoundError`, and command deadlines use
+the built-in `TimeoutError` contract.
+
+## Configuration
 
 ```python
-async with DaytonaSandboxSession(network_block_all=True) as session:
-    async with session.process(
-        'worker',
-        'python worker.py',
-        on_stdout=print,
-        on_stderr=print,
-        max_input_bytes=64 * 1024,
-    ) as process:
-        await process.send('{"task":"run"}\n')
-        returncode = await process.wait(timeout=60)
+DaytonaSandbox(
+    sandbox_id=None,
+    snapshot=None,
+    auto_stop_minutes=60,
+    workdir=None,
+    env=None,
+    network_block_all=False,
+)
 ```
-
-The caller supplies the process identity, input bound, and every wait. Starting,
-input, output streaming, and deletion use Daytona's process-session API. Context
-exit terminates the remote process session, including after a timeout or
-cancellation. Input echo is disabled so protocol input cannot appear on stdout.
-
-## Limits
-
-Commands default to `default_command_timeout=60` seconds. Model-requested
-timeouts are capped by `max_command_timeout=300`. Tool output is bounded by
-`max_output_bytes` and `max_output_lines`; command output keeps the tail and
-directory output keeps the head. `read_file` refuses files larger than
-`max_read_bytes` before decoding them.
-
-The Daytona SDK is currently constrained to `>=0.198.0,<0.199.0`. Later SDKs
-require `typing-extensions>=4.16.0`, while another Harness extra currently pins
-4.15.0. Raise the ceiling after those extras resolve together.
-
-## Composition
-
-The tools use common names. Prefix them when another capability contributes the
-same names:
-
-```python
-from pydantic_ai.capabilities import PrefixTools
-from pydantic_ai_harness import DaytonaSandbox
-
-PrefixTools(wrapped=DaytonaSandbox(instructions=''), prefix='daytona')
-```
-
-Daytona sandboxes isolate processes and files from the application host. Network
-access and credentials inside the sandbox remain separate trust boundaries. Use
-`network_block_all=True` when tools do not require outbound access.
-The Daytona SDK is asyncio-native, so this capability does not support trio.
-Durable execution is rejected because a live sandbox session cannot survive
-activity replay or worker restart.
-
-## Source
-
-- [Daytona Sandbox source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/daytona_sandbox/)
-
-## API reference
-
-::: pydantic_ai_harness.daytona_sandbox.DaytonaSandbox
-
-::: pydantic_ai_harness.daytona_sandbox.DaytonaSandboxSession
-
-::: pydantic_ai_harness.daytona_sandbox.DaytonaSandboxProcess
-
-::: pydantic_ai_harness.daytona_sandbox.DaytonaSandboxExecResult
-
-::: pydantic_ai_harness.daytona_sandbox.DaytonaSandboxError
-
-::: pydantic_ai_harness.daytona_sandbox.DaytonaSandboxAuthError
-
-::: pydantic_ai_harness.daytona_sandbox.DaytonaSandboxUnavailableError

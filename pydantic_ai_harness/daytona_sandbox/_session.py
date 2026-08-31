@@ -23,9 +23,7 @@ from __future__ import annotations
 import asyncio
 import posixpath
 import shlex
-import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias, TypeVar
 
 if TYPE_CHECKING:
@@ -36,7 +34,6 @@ if TYPE_CHECKING:
 
 DEFAULT_AUTO_STOP_MINUTES = 60
 _DEFAULT_PROCESS_IO_TIMEOUT = 30
-_DEFAULT_EXEC_OUTPUT_BYTES = 50 * 1024
 
 ProcessOutputHandler: TypeAlias = Callable[[str], None] | Callable[[str], Awaitable[None]]
 _T = TypeVar('_T')
@@ -52,23 +49,6 @@ class DaytonaSandboxAuthError(DaytonaSandboxError):
 
 class DaytonaSandboxUnavailableError(DaytonaSandboxError):
     """The requested Daytona sandbox no longer exists."""
-
-
-@dataclass(frozen=True, kw_only=True)
-class DaytonaSandboxExecResult:
-    """The outcome of running a command in a Daytona sandbox."""
-
-    output: str
-    """The command result text returned by Daytona's direct execution API."""
-
-    returncode: int
-    """The command exit status, or `-1` when the SDK reports a timeout."""
-
-    timed_out: bool = False
-    """Whether the Daytona SDK stopped waiting at the command deadline."""
-
-    output_truncated: bool = False
-    """Whether earlier command output was discarded to bound host memory."""
 
 
 class DaytonaSandboxProcess:
@@ -160,9 +140,10 @@ class DaytonaSandboxProcess:
         except Exception as error:
             raise _translate_error(error, unavailable=True) from error
 
-    async def wait(self, *, timeout: int) -> int:
+    async def wait(self, *, timeout: float | None) -> int:
         """Wait a bounded time for completion and return the command exit status."""
-        _positive_int('timeout', timeout)
+        if timeout is not None and timeout <= 0:
+            raise ValueError(f'timeout must be positive or None, got {timeout!r}.')
         command_id = self._require_command_id()
         logs = self._logs
         if logs is None:  # pragma: no cover - maintained with `_command_id`
@@ -208,34 +189,13 @@ class DaytonaSandboxProcess:
 
 
 class DaytonaSandboxSession:
-    """Async context manager that owns or attaches to one Daytona sandbox.
-
-    A session without `sandbox_id` creates a sandbox from `snapshot` and deletes
-    it on exit. A session with `sandbox_id` attaches to that sandbox and leaves it
-    running. Pass an already-open session to `DaytonaSandbox(session=...)` to
-    reuse one sandbox across several agent runs while retaining lifecycle
-    ownership in the caller.
-
-    ```python
-    import asyncio
-
-    from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxSession
-
-
-    async def main() -> None:
-        async with DaytonaSandboxSession() as session:
-            result = await session.exec('python --version', timeout=30)
-            print(result.output)
-
-
-    asyncio.run(main())
-    ```
-    """
+    """Internal SDK client and sandbox lifetime boundary used by the backend."""
 
     def __init__(
         self,
         *,
         sandbox_id: str | None = None,
+        sandbox_name: str | None = None,
         snapshot: str | None = None,
         auto_stop_minutes: int = DEFAULT_AUTO_STOP_MINUTES,
         workdir: str | None = None,
@@ -246,6 +206,8 @@ class DaytonaSandboxSession:
             raise ValueError(f'auto_stop_minutes must be a positive integer, got {auto_stop_minutes!r}.')
         if sandbox_id is not None and snapshot is not None:
             raise ValueError('snapshot cannot be combined with sandbox_id.')
+        if sandbox_id is not None and sandbox_name is not None:
+            raise ValueError('sandbox_name cannot be combined with sandbox_id.')
         if sandbox_id is not None and auto_stop_minutes != DEFAULT_AUTO_STOP_MINUTES:
             raise ValueError('auto_stop_minutes cannot be combined with sandbox_id.')
         if type(network_block_all) is not bool:
@@ -253,6 +215,7 @@ class DaytonaSandboxSession:
         if sandbox_id is not None and network_block_all:
             raise ValueError('network_block_all cannot configure an attached sandbox.')
         self._requested_id = sandbox_id
+        self._sandbox_name = sandbox_name
         self._snapshot = snapshot
         self._auto_stop_minutes = auto_stop_minutes
         self._workdir = workdir
@@ -287,6 +250,7 @@ class DaytonaSandboxSession:
                 sandbox = await _finish_on_cancellation(client.get(self._requested_id))
             else:
                 params = CreateSandboxFromSnapshotParams(
+                    name=self._sandbox_name,
                     snapshot=self._snapshot,
                     env_vars=self._env,
                     auto_stop_interval=self._auto_stop_minutes,
@@ -312,6 +276,10 @@ class DaytonaSandboxSession:
         return self
 
     async def __aexit__(self, *_: object) -> None:
+        await self.close(terminate=self._requested_id is None)
+
+    async def close(self, *, terminate: bool) -> None:
+        """Close the SDK client, optionally deleting the sandbox first."""
         client = self._client
         sandbox = self._sandbox
         if client is None:
@@ -323,18 +291,27 @@ class DaytonaSandboxSession:
                 raise _translate_error(error, unavailable=False) from error
             return
 
-        if self._requested_id is None and not self._owned_sandbox_deleted:
+        failure: DaytonaSandboxError | None = None
+        if terminate and not self._owned_sandbox_deleted:
             try:
                 await _finish_cleanup(
                     client.delete(sandbox, timeout=60, wait=True),
                     then=self._mark_owned_sandbox_deleted,
                 )
             except Exception as error:
-                raise _translate_error(error, unavailable=False) from error
+                from daytona import DaytonaNotFoundError
+
+                if isinstance(error, DaytonaNotFoundError):
+                    self._mark_owned_sandbox_deleted()
+                else:
+                    failure = _translate_error(error, unavailable=False)
         try:
             await _finish_cleanup(client.close(), then=self._clear)
         except Exception as error:
-            raise _translate_error(error, unavailable=False) from error
+            if failure is None:
+                failure = _translate_error(error, unavailable=False)
+        if failure is not None:
+            raise failure
 
     def _mark_owned_sandbox_deleted(self) -> None:
         self._owned_sandbox_deleted = True
@@ -384,56 +361,20 @@ class DaytonaSandboxSession:
             io_timeout=io_timeout,
         )
 
-    async def exec(
-        self,
-        command: str,
-        *,
-        timeout: int,
-        max_output_bytes: int = _DEFAULT_EXEC_OUTPUT_BYTES,
-    ) -> DaytonaSandboxExecResult:
-        """Run a command while retaining only a bounded tail of streamed output."""
-        _positive_int('timeout', timeout)
-        _positive_int('max_output_bytes', max_output_bytes)
-        output = _TailBuffer(max_output_bytes)
-        process_id = f'harness-{uuid.uuid4().hex}'
+    async def file_info(self, path: str) -> tuple[str, str, bool, int | None]:
+        """Return the protocol-facing metadata for one path."""
+        resolved = self._path(path)
         try:
-            async with self.process(
-                process_id,
-                command,
-                on_stdout=output.append,
-                on_stderr=output.append,
-                max_input_bytes=1,
-            ) as process:
-                try:
-                    returncode = await process.wait(timeout=timeout)
-                except TimeoutError:
-                    return DaytonaSandboxExecResult(
-                        output=output.text,
-                        returncode=-1,
-                        timed_out=True,
-                        output_truncated=output.truncated,
-                    )
-        except DaytonaSandboxError:
-            raise
-        except Exception as error:  # pragma: no cover - SDK failures are translated by the process
-            raise _translate_error(error, unavailable=True) from error
-        return DaytonaSandboxExecResult(
-            output=output.text,
-            returncode=returncode,
-            output_truncated=output.truncated,
-        )
-
-    async def file_size(self, path: str) -> int:
-        try:
-            return (await self._require_sandbox().fs.get_file_info(self._path(path))).size
+            entry = await self._require_sandbox().fs.get_file_info(resolved)
         except Exception as error:
-            raise _translate_error(error, unavailable=False) from error
+            raise _translate_file_error(error, path) from error
+        return posixpath.basename(resolved.rstrip('/')), resolved, entry.is_dir, None if entry.is_dir else entry.size
 
     async def read_bytes(self, path: str) -> bytes:
         try:
             data = await self._require_sandbox().fs.download_file(self._path(path))
         except Exception as error:
-            raise _translate_error(error, unavailable=False) from error
+            raise _translate_file_error(error, path) from error
         return data
 
     async def write_bytes(self, path: str, data: bytes) -> None:
@@ -451,12 +392,47 @@ class DaytonaSandboxSession:
         except Exception as error:
             raise _translate_error(error, unavailable=False) from error
 
-    async def list_files(self, path: str) -> list[tuple[str, bool]]:
+    async def list_entries(self, path: str) -> list[tuple[str, str, bool, int | None]]:
+        """Return direct children with their protocol-facing metadata."""
+        resolved = self._path(path)
         try:
-            entries = await self._require_sandbox().fs.list_files(self._path(path))
+            entries = await self._require_sandbox().fs.list_files(resolved)
+        except Exception as error:
+            raise _translate_file_error(error, path) from error
+        return [
+            (
+                entry.name,
+                posixpath.join(resolved, entry.name),
+                entry.is_dir,
+                None if entry.is_dir else entry.size,
+            )
+            for entry in entries
+        ]
+
+    async def make_dir(self, path: str) -> None:
+        try:
+            await self._require_sandbox().fs.create_folder(self._path(path), '755')
         except Exception as error:
             raise _translate_error(error, unavailable=False) from error
-        return [(entry.name, entry.is_dir) for entry in entries]
+
+    async def remove(self, path: str) -> None:
+        try:
+            await self._require_sandbox().fs.delete_file(self._path(path), recursive=True)
+        except Exception as error:
+            raise _translate_file_error(error, path) from error
+
+    async def exists(self, path: str) -> bool:
+        try:
+            await self._require_sandbox().fs.get_file_info(self._path(path))
+        except Exception as error:
+            try:
+                from daytona import DaytonaNotFoundError
+            except ImportError:  # pragma: no cover - an open session already imported Daytona
+                raise _translate_error(error, unavailable=False) from error
+            if isinstance(error, DaytonaNotFoundError):
+                return False
+            raise _translate_error(error, unavailable=False) from error
+        return True
 
 
 def _translate_error(error: Exception, *, unavailable: bool) -> DaytonaSandboxError:
@@ -475,6 +451,16 @@ def _translate_error(error: Exception, *, unavailable: bool) -> DaytonaSandboxEr
     if unavailable and isinstance(error, DaytonaNotFoundError):
         return DaytonaSandboxUnavailableError('The Daytona sandbox does not exist or is no longer available.')
     return DaytonaSandboxError(str(error))
+
+
+def _translate_file_error(error: Exception, path: str) -> Exception:
+    try:
+        from daytona import DaytonaNotFoundError
+    except ImportError:  # pragma: no cover - an open session already imported Daytona
+        return DaytonaSandboxError(str(error))
+    if isinstance(error, DaytonaNotFoundError):
+        return FileNotFoundError(f'No such file or directory in the Daytona sandbox: {path!r}')
+    return _translate_error(error, unavailable=False)
 
 
 async def _finish_on_cancellation(
@@ -512,26 +498,3 @@ async def _finish_cleanup(operation: Awaitable[object], *, then: Callable[[], No
 def _positive_int(name: str, value: int) -> None:
     if type(value) is not int or value <= 0:
         raise ValueError(f'{name} must be a positive integer, got {value!r}.')
-
-
-class _TailBuffer:
-    def __init__(self, max_bytes: int) -> None:
-        self._max_bytes = max_bytes
-        self._data = bytearray()
-        self.truncated = False
-
-    @property
-    def text(self) -> str:
-        return bytes(self._data).decode('utf-8', errors='ignore')
-
-    def append(self, chunk: str) -> None:
-        data = chunk.encode('utf-8')
-        if len(data) >= self._max_bytes:
-            self.truncated = self.truncated or bool(self._data) or len(data) > self._max_bytes
-            self._data[:] = data[-self._max_bytes :]
-            return
-        overflow = len(self._data) + len(data) - self._max_bytes
-        if overflow > 0:
-            del self._data[:overflow]
-            self.truncated = True
-        self._data.extend(data)

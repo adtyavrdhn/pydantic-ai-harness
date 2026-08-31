@@ -13,6 +13,7 @@ from daytona import DaytonaNotFoundError
 
 
 class CreateParams(Protocol):
+    name: str | None
     snapshot: str | None
     auto_stop_interval: int | None
     auto_delete_interval: int | None
@@ -131,11 +132,13 @@ class FakeFileSystem:
 
     async def get_file_info(self, path: str) -> SimpleNamespace:
         self._raise_if_needed()
+        if path in self.owner.directories:
+            return SimpleNamespace(size=0, is_dir=True)
         data = self.owner.files.get(path)
         if data is None:
             raise DaytonaNotFoundError(f'no file: {path}')
         size = self.owner.reported_sizes.get(path, len(data))
-        return SimpleNamespace(size=size)
+        return SimpleNamespace(size=size, is_dir=False)
 
     async def download_file(self, path: str) -> bytes:
         self._raise_if_needed()
@@ -159,7 +162,35 @@ class FakeFileSystem:
             name, separator, _ = relative.partition('/')
             if name:
                 entries[name] = bool(separator) or entries.get(name, False)
-        return [SimpleNamespace(name=name, is_dir=is_dir) for name, is_dir in entries.items()]
+        for directory in self.owner.directories:
+            if not directory.startswith(prefix):
+                continue
+            relative = directory[len(prefix) :]
+            name, separator, _ = relative.partition('/')
+            if name:
+                entries[name] = bool(separator) or True
+        return [
+            SimpleNamespace(
+                name=name,
+                is_dir=is_dir,
+                size=0 if is_dir else len(self.owner.files[prefix + name]),
+            )
+            for name, is_dir in entries.items()
+        ]
+
+    async def create_folder(self, path: str, mode: str) -> None:
+        self._raise_if_needed()
+        assert mode == '755'
+        self.owner.directories.add(path)
+
+    async def delete_file(self, path: str, recursive: bool = False) -> None:
+        self._raise_if_needed()
+        self.owner.files.pop(path, None)
+        self.owner.directories.discard(path)
+        if recursive:
+            prefix = path.rstrip('/') + '/'
+            self.owner.files = {key: value for key, value in self.owner.files.items() if not key.startswith(prefix)}
+            self.owner.directories = {key for key in self.owner.directories if not key.startswith(prefix)}
 
     def _raise_if_needed(self) -> None:
         if self.owner.fs_error is not None:
@@ -167,10 +198,12 @@ class FakeFileSystem:
 
 
 class FakeSandbox:
-    def __init__(self, sandbox_id: str) -> None:
+    def __init__(self, sandbox_id: str, name: str | None = None) -> None:
         self.id = sandbox_id
+        self.name = name or sandbox_id
         self.deleted = False
         self.files: dict[str, bytes] = {}
+        self.directories: set[str] = set()
         self.reported_sizes: dict[str, int] = {}
         self.exec_calls: list[ExecCall] = []
         self.exec_error: Exception | None = None
@@ -207,7 +240,7 @@ class FakeClient:
             await self.owner.create_gate.wait()
         if self.owner.create_error is not None:
             raise self.owner.create_error
-        sandbox = FakeSandbox(f'sb-{len(self.owner.sandboxes) + 1}')
+        sandbox = FakeSandbox(f'sb-{len(self.owner.sandboxes) + 1}', params.name)
         self.owner.sandboxes.append(sandbox)
         self.owner.create_params.append(params)
         return sandbox
@@ -216,7 +249,7 @@ class FakeClient:
         if self.owner.get_error is not None:
             raise self.owner.get_error
         for sandbox in self.owner.sandboxes:
-            if sandbox.id == sandbox_id:
+            if sandbox.id == sandbox_id or sandbox.name == sandbox_id:
                 return sandbox
         raise DaytonaNotFoundError(f'no sandbox: {sandbox_id}')
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import daytona
 import pytest
 
 from .fake_daytona import FakeDaytona
@@ -12,8 +13,6 @@ def anyio_backend() -> str:
 
 @pytest.fixture
 def fake_daytona(monkeypatch: pytest.MonkeyPatch) -> FakeDaytona:
-    import daytona
-
     fake = FakeDaytona()
     monkeypatch.setattr(daytona, 'AsyncDaytona', fake.client)
     return fake
