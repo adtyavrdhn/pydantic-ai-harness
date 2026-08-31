@@ -793,6 +793,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         is never fed early (the stream scanner keeps the last parsed statement provisional),
         so the snippet's result always comes from the tail feed. Prints and nested tool-call
         records from the pumped prefix are merged into the returned `ToolReturn`.
+
+        With `speculate` also enabled, both the pumped fragments and the tail dispatch
+        through the claim store, so launches made while the code streamed are adopted
+        wherever the program actually asks for them; the tail gets an execution prefetch
+        and the part's unclaimed launches are evicted after success, exactly as on the
+        speculation-only path.
         """
         assert self.eager is not None
         code = tool_args.get('code')
@@ -822,7 +828,9 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 'so the session was restarted. Send the snippet again.'
             )
         tail = '\n'.join(lines[part.fed_line_count :])
-        return await self._call_tool_impl(
+        if self.speculation is not None:
+            self.speculation.prelaunch_for_execution(ctx.tool_call_id or 'pyd_ai_code_mode', tail, ctx)
+        result = await self._call_tool_impl(
             name,
             {'code': tail},
             ctx,
@@ -830,6 +838,11 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             prior_output=part.output,
             prior_nested=(part.nested_calls, part.nested_returns),
         )
+        if self.speculation is not None:
+            # Same contract as the speculation-only path: eviction only on success, so a
+            # failed tail keeps its launches for the retry to adopt.
+            await self.speculation.evict_part(ctx.tool_call_id or 'pyd_ai_code_mode')
+        return result
 
     async def feed_eager_fragment(self, part: _EagerPart, source: str, ctx: RunContext[AgentDepsT]) -> None:
         """Feed one closed statement into the session, accumulating its observable effects.

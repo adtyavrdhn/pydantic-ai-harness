@@ -1041,3 +1041,73 @@ class TestDeclaredSpeculation:
         """`speculate='search'` is a likely typo for a one-element list, not a mode."""
         with pytest.raises(UserError, match='one-element list'):
             CodeMode[None](speculate='search')
+
+
+class TestTierComposition:
+    """`eager=True` with `speculate=[...]`: the REPL frontier advances while launches run ahead."""
+
+    async def test_eager_execution_and_speculative_launches_compose(self):
+        """Deadlock-unless-both: mid-stream execution and past-the-blocker launches.
+
+        The model refuses to finish streaming until the blocking first statement has
+        started executing in the REPL (only eager can do that), and the blocking statement
+        refuses to return until both branch arms' calls have started (only speculative
+        lookahead past a blocking statement can do that). The taken arm then claims its
+        launch from an eagerly fed fragment.
+        """
+        gate_started = asyncio.Event()
+        release_gate = asyncio.Event()
+        starts: list[str] = []
+
+        async def gate(x: int) -> str:
+            """Block until both branch arms are in flight."""
+            gate_started.set()
+            await asyncio.wait_for(release_gate.wait(), timeout=5)
+            return 'open'
+
+        async def search(query: str) -> str:
+            """Return a canned result, releasing the gate once both arms started."""
+            starts.append(query)
+            if len(starts) >= 2:
+                release_gate.set()
+            await asyncio.sleep(0)
+            return f'result:{query}'
+
+        code = (
+            'g = await gate(x=1)\n'
+            'if g == "open":\n'
+            '    a = await search(query="alpha")\n'
+            'else:\n'
+            '    a = await search(query="beta")\n'
+            'print(a)\n'
+            '"ok"'
+        )
+
+        async def stream_code(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if len(messages) > 1:
+                yield 'done'
+                return
+            args = json.dumps({'code': code})
+            chunks = [args[offset : offset + 16] for offset in range(0, len(args), 16)]
+            yield {1: DeltaToolCall(name='run_code')}
+            for chunk in chunks[:-1]:
+                yield {1: DeltaToolCall(json_args=chunk)}
+                await asyncio.sleep(0)
+            await asyncio.wait_for(gate_started.wait(), timeout=5)
+            yield {1: DeltaToolCall(json_args=chunks[-1])}
+
+        capability = CodeMode[None](eager=True, speculate=['search'])
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_code),
+            deps_type=type(None),
+            capabilities=[capability],
+            tools=[Tool(search), Tool(gate)],
+        )
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert sorted(starts) == ['alpha', 'beta']
+        assert capability.speculation_stats.launched == 2
+        assert capability.speculation_stats.adopted == 1
+        assert capability.speculation_stats.evicted == 1

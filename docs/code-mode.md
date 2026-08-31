@@ -289,6 +289,13 @@ executing. The taken arm claims its result; the untaken arm's launch is discarde
 as wasted. Wasted launches are the cost of hiding branch latency, which is why eligibility
 demands side-effect freedom.
 
+The tiers compose: with both `eager=True` and `speculate` set, eager execution advances
+the program frontier through the live REPL while speculation launches eligible calls the
+frontier has not reached (branch arms, calls behind a blocking statement), and the eager
+feeds' dispatches claim those launches. In a snippet that starts with a blocking shell
+command and then branches on its result, the command runs while the model is still
+generating and both arms' reads are in flight before it returns.
+
 
 ### Speculation events
 

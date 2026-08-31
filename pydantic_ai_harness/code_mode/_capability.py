@@ -149,10 +149,11 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     streamed, and the `run_code` dispatch only executes the remainder. Side effects land
     before the tool call is committed and are not rolled back; a statement that fails leaves
     the session exactly as a failed snippet does today (assignments before the failing line
-    persist) and surfaces the error as the `run_code` result. Mutually exclusive with
-    `speculate`, which instead shadow-launches allowlisted pure calls and reconciles them
-    with claim/evict. Enabling this puts runs in streaming mode, and has no effect under
-    Temporal durable execution.
+    persist) and surfaces the error as the `run_code` result. Composes with `speculate`:
+    eager execution advances the program frontier while speculation launches eligible
+    calls beyond it (branch arms, calls behind a blocking statement), and the eager
+    feeds' dispatches claim those launches. Enabling this puts runs in streaming mode,
+    and has no effect under Temporal durable execution.
     """
 
     speculation_stats: SpeculationStats = field(default_factory=SpeculationStats, init=False, repr=False)
@@ -195,12 +196,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     _announced_tools: set[str] = field(default_factory=set[str], init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Reject contradictory streaming tiers at construction."""
-        if self.eager and self.speculate is not None:
-            raise UserError(
-                '`eager` and `speculate` are mutually exclusive: eager execution runs the real '
-                'statements in order, speculation shadow-launches allowlisted calls. Choose one.'
-            )
+        """Reject malformed configuration at construction."""
         if isinstance(self.speculate, str) and self.speculate != 'declared':
             raise UserError(
                 f"`speculate` accepts a list of tool names or the string 'declared', "
