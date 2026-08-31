@@ -76,21 +76,25 @@ def text_message(message_id: str = 'wamid.1', *, body: str = 'hello', sender: st
     }
 
 
+async def webhook_status(channel: WhatsAppChannel, request: WebhookRequest) -> int:
+    return (await channel.handle_webhook(request)).status_code
+
+
 @pytest.mark.anyio
 class TestWhatsAppChannel:
     async def test_verifies_challenge(self) -> None:
         channel = WhatsAppChannel('token', _PHONE_ID, _APP_SECRET, 'verify-token')
-        accepted = channel.handle_webhook(challenge_request())
+        accepted = await channel.handle_webhook(challenge_request())
         assert (accepted.status_code, accepted.body) == (200, 'challenge')
 
-        assert channel.handle_webhook(challenge_request(token='wrong')).status_code == 403
+        assert await webhook_status(channel, challenge_request(token='wrong')) == 403
         missing_challenge = WebhookRequest(
             method='GET',
             headers={},
             query={'hub.mode': 'subscribe', 'hub.verify_token': 'verify-token'},
             body=b'',
         )
-        assert channel.handle_webhook(missing_challenge).status_code == 403
+        assert await webhook_status(channel, missing_challenge) == 403
         wrong_mode = WebhookRequest(
             method='GET',
             headers={},
@@ -101,8 +105,8 @@ class TestWhatsAppChannel:
             },
             body=b'',
         )
-        assert channel.handle_webhook(wrong_mode).status_code == 403
-        assert channel.handle_webhook(signed_request({}, method='PUT')).status_code == 405
+        assert await webhook_status(channel, wrong_mode) == 403
+        assert await webhook_status(channel, signed_request({}, method='PUT')) == 405
 
     async def test_normalizes_batched_text_and_suppresses_duplicates(self) -> None:
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response({})))
@@ -125,8 +129,8 @@ class TestWhatsAppChannel:
 
         async with channel:
             async with aclosing(channel.messages()) as messages:
-                assert channel.handle_webhook(request).status_code == 200
-                assert channel.handle_webhook(request).status_code == 200
+                assert await webhook_status(channel, request) == 200
+                assert await webhook_status(channel, request) == 200
                 first = await anext(messages)
                 second = await anext(messages)
 
@@ -142,7 +146,7 @@ class TestWhatsAppChannel:
 
     async def test_rejects_invalid_signatures_and_payloads(self) -> None:
         channel = WhatsAppChannel('token', _PHONE_ID, _APP_SECRET, 'verify-token')
-        assert channel.handle_webhook(WebhookRequest('POST', {}, {}, b'{}')).status_code == 401
+        assert await webhook_status(channel, WebhookRequest('POST', {}, {}, b'{}')) == 401
 
         non_ascii = WebhookRequest(
             'POST',
@@ -150,8 +154,8 @@ class TestWhatsAppChannel:
             {},
             b'{}',
         )
-        assert channel.handle_webhook(non_ascii).status_code == 401
-        assert channel.handle_webhook(signed_request({}, secret='wrong')).status_code == 401
+        assert await webhook_status(channel, non_ascii) == 401
+        assert await webhook_status(channel, signed_request({}, secret='wrong')) == 401
 
         malformed_body = b'not json'
         malformed_signature = 'sha256=' + hmac.new(_APP_SECRET.encode(), malformed_body, hashlib.sha256).hexdigest()
@@ -161,8 +165,8 @@ class TestWhatsAppChannel:
             {},
             malformed_body,
         )
-        assert channel.handle_webhook(malformed).status_code == 400
-        assert channel.handle_webhook(signed_request({'object': 'other'})).status_code == 200
+        assert await webhook_status(channel, malformed) == 400
+        assert await webhook_status(channel, signed_request({'object': 'other'})) == 200
 
     async def test_filters_statuses_other_numbers_and_malformed_messages(self) -> None:
         channel = WhatsAppChannel('token', _PHONE_ID, _APP_SECRET, 'verify-token')
@@ -203,17 +207,13 @@ class TestWhatsAppChannel:
 
         async with channel:
             async with aclosing(channel.messages()) as messages:
-                assert channel.handle_webhook(signed_request(payload)).status_code == 200
+                assert await webhook_status(channel, signed_request(payload)) == 200
                 assert (await anext(messages)).message_id == 'accepted'
 
                 invalid_entries = webhook_payload('invalid')
-                assert channel.handle_webhook(signed_request(invalid_entries)).status_code == 200
-                assert (
-                    channel.handle_webhook(
-                        signed_request({'object': 'whatsapp_business_account', 'entry': 'invalid'})
-                    ).status_code
-                    == 200
-                )
+                assert await webhook_status(channel, signed_request(invalid_entries)) == 200
+                request = signed_request({'object': 'whatsapp_business_account', 'entry': 'invalid'})
+                assert await webhook_status(channel, request) == 200
 
     async def test_queue_full_leaves_message_retryable(self) -> None:
         channel = WhatsAppChannel(
@@ -226,15 +226,15 @@ class TestWhatsAppChannel:
         first = signed_request(webhook_payload([text_message('wamid.1', body='first')]))
         second = signed_request(webhook_payload([text_message('wamid.2', body='second')]))
 
-        assert channel.handle_webhook(first).status_code == 503
+        assert await webhook_status(channel, first) == 503
         async with channel:
             async with aclosing(channel.messages()) as messages:
-                assert channel.handle_webhook(first).status_code == 200
-                assert channel.handle_webhook(second).status_code == 503
+                assert await webhook_status(channel, first) == 200
+                assert await webhook_status(channel, second) == 503
                 assert (await anext(messages)).text == 'first'
-                assert channel.handle_webhook(second).status_code == 200
+                assert await webhook_status(channel, second) == 200
                 assert (await anext(messages)).text == 'second'
-        assert channel.handle_webhook(second).status_code == 503
+        assert await webhook_status(channel, second) == 503
 
     @pytest.mark.parametrize('anyio_backend', ['asyncio'])
     async def test_webhook_runs_agent_and_posts_reply(self, anyio_backend: str) -> None:
@@ -254,7 +254,7 @@ class TestWhatsAppChannel:
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(host.serve)
             with anyio.fail_after(1):
-                while channel.handle_webhook(request).status_code == 503:
+                while await webhook_status(channel, request) == 503:
                     await anyio.sleep(0)
                 await posted.wait()
             task_group.cancel_scope.cancel()
@@ -382,13 +382,13 @@ class TestWhatsAppChannel:
         channel = WhatsAppChannel('token', _PHONE_ID, _APP_SECRET, 'verify-token')
         request = signed_request(webhook_payload([text_message()]))
 
-        assert channel.handle_webhook(request).status_code == 503
+        assert await webhook_status(channel, request) == 503
         async with channel:
             async with aclosing(channel.messages()) as messages:
-                assert channel.handle_webhook(request).status_code == 200
+                assert await webhook_status(channel, request) == 200
                 assert (await anext(messages)).message_id == 'wamid.1'
         assert client.is_closed
-        assert channel.handle_webhook(request).status_code == 503
+        assert await webhook_status(channel, request) == 503
 
     async def test_reopening_resets_recent_message_ids(self) -> None:
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response({})))
@@ -396,12 +396,12 @@ class TestWhatsAppChannel:
         request = signed_request(webhook_payload([text_message()]))
         async with channel:
             async with aclosing(channel.messages()) as messages:
-                assert channel.handle_webhook(request).status_code == 200
+                assert await webhook_status(channel, request) == 200
                 assert (await anext(messages)).message_id == 'wamid.1'
 
         async with channel:
             async with aclosing(channel.messages()) as messages:
-                assert channel.handle_webhook(request).status_code == 200
+                assert await webhook_status(channel, request) == 200
                 assert (await anext(messages)).message_id == 'wamid.1'
         await client.aclose()
 

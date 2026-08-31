@@ -121,7 +121,7 @@ whatsapp_host = ChannelHost(agent, whatsapp, allowed_senders={'15551234567'})
 
 
 async def receive_whatsapp(request: Request) -> PlainTextResponse:
-    result = whatsapp.handle_webhook(
+    result = await whatsapp.handle_webhook(
         WebhookRequest(request.method, request.headers, request.query_params, await request.body())
     )
     return PlainTextResponse(result.body, status_code=result.status_code)
@@ -146,6 +146,8 @@ and the verification token in Meta. Subscribe the route to `messages`.
 
 The task group owns the channel service and waits for cancellation and cleanup during shutdown.
 The lifespan and route must use the same process and async event-loop thread.
+Run one host process for each WhatsApp phone number. Terminate TLS and limit
+request body size in the ASGI server or reverse proxy.
 The default Graph API version is `v26.0`; pass `api_version` for another
 supported version.
 
@@ -208,8 +210,8 @@ The WhatsApp adapter limits outbound free-form text to the 24-hour customer
 service window. It surfaces error 131047 when that window is closed; it does not
 substitute an approved template. It retries one response carrying an explicit
 Cloud API throttling code after `retry_delay`, but does not retry network
-timeouts. Meta may batch messages and retry failed webhook deliveries for up to
-seven days.
+timeouts. If a later text chunk fails, earlier chunks remain visible. Meta may
+batch messages and retry failed webhook deliveries for up to seven days.
 
 `serve()` runs until it is cancelled or the adapter ends. It owns every turn in
 an AnyIO task group, so no turn task outlives it. Cancellation closes the

@@ -131,7 +131,7 @@ class WhatsAppChannel:
             with anyio.CancelScope(shield=True):
                 await self._client.aclose()
 
-    def handle_webhook(self, request: WebhookRequest) -> WebhookResponse:
+    async def handle_webhook(self, request: WebhookRequest) -> WebhookResponse:
         """Verify and enqueue messages on the async thread that runs `messages()`."""
         method = request.method.upper()
         if method == 'GET':
