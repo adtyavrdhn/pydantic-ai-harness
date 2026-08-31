@@ -45,9 +45,7 @@ async def sandbox(tmp_path: Path) -> AsyncIterator[Sandbox]:
         yield Sandbox.wrap(backend)
 
 
-def _run_context(sandbox: Sandbox | None = None) -> RunContext[object]:
-    if sandbox is None:
-        return RunContext[object](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0)
+def _run_context(sandbox: Sandbox) -> RunContext[object]:
     return RunContext[object](
         deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0, sandbox=sandbox
     )
