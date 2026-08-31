@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     BinaryContent,
     CachePoint,
@@ -626,6 +627,15 @@ class TestLLMReminder:
 
         assert result == ('generated durably', None)
         assert captured['prompt'] == 'user: fix durable reminders'
+
+    def test_restricted_run_context_rejects_an_excluded_field(self) -> None:
+        # Negative control for the test above: without proof that the stand-in actually rejects
+        # `messages`, that test would pass just as well against a stand-in that carried it.
+        ctx = RestrictedRunContext(deps=None, model=TestModel(), usage=RunUsage(), usage_limits=UsageLimits())
+        ctx.unavailable_fields = frozenset({'messages'})
+
+        with pytest.raises(UserError, match="'messages' is not available in this durable operation"):
+            _ = ctx.messages
 
     async def test_subclass_call_override_is_preserved(self) -> None:
         class GatedReminder(LLMReminder[None]):
