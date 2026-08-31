@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 _HAS_DAYTONA = importlib.util.find_spec('daytona') is not None
-collect_ignore = [] if _HAS_DAYTONA else ['test_daytona_sandbox.py']
+collect_ignore = [] if _HAS_DAYTONA else ['test_backend_protocol.py', 'test_daytona_sandbox.py']
 
 if TYPE_CHECKING or _HAS_DAYTONA:  # pragma: no branch - installed and slim jobs take opposite branches
     import daytona

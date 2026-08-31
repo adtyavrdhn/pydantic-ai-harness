@@ -157,8 +157,10 @@ class DaytonaSandboxProcess:
                 command_id,
                 request_timeout=self._io_timeout,
             )
-        except TimeoutError:
-            raise
+        except asyncio.TimeoutError as error:
+            # Before Python 3.11, asyncio's timeout exception is not the built-in
+            # TimeoutError expected by the sandbox protocol.
+            raise TimeoutError from error
         except Exception as error:
             raise _translate_error(error, unavailable=True) from error
         if command.exit_code is None:
