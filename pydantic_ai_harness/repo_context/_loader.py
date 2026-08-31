@@ -94,8 +94,12 @@ def find_dir_context_file(directory: Path, filenames: Sequence[str]) -> ContextF
 
 
 def render_context_file(file: ContextFile, *, label: str) -> str:
-    """Render one file as a labeled block."""
-    return f'<context-file path="{label}">\n{file.content}\n</context-file>'
+    """Render one file as a labeled block.
+
+    The closing tag sits on its own line, so a file's own trailing newline goes: keeping it would put
+    a blank line before the tag for every file that ends the way a text file should.
+    """
+    return f'<context-file path="{label}">\n{file.content.rstrip()}\n</context-file>'
 
 
 def render_context_files(files: Sequence[ContextFile], *, relative_to: Path) -> str:
