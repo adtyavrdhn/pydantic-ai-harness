@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import types
 from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 import pytest
 
-from .fake_e2b import FakeE2B
+_HAS_E2B = importlib.util.find_spec('e2b') is not None
+collect_ignore = [] if _HAS_E2B else ['test_backend.py', 'test_e2b_live.py', 'test_e2b_sandbox.py']
+
+if TYPE_CHECKING or _HAS_E2B:
+    from .fake_e2b import FakeE2B
 
 
 class _PoisonedE2B(types.ModuleType):
@@ -37,9 +43,11 @@ def _no_real_e2b(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
     yield
 
 
-@pytest.fixture
-def fake_e2b(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeE2B]:
-    """Inject a fake `e2b` module and yield its control surface."""
-    control = FakeE2B()
-    monkeypatch.setitem(sys.modules, 'e2b', control.module)
-    yield control
+if _HAS_E2B:
+
+    @pytest.fixture
+    def fake_e2b(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeE2B]:
+        """Inject a fake `e2b` module and yield its control surface."""
+        control = FakeE2B()
+        monkeypatch.setitem(sys.modules, 'e2b', control.module)
+        yield control
