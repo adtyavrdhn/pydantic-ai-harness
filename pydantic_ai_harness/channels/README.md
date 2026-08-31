@@ -46,11 +46,14 @@ an integration, not an `AbstractCapability`.
   run concurrently.
 - At most 100 accepted turns may be running or waiting by default. Set
   `max_pending_turns` to tune this backpressure limit.
-- `/new` deletes that conversation's stored Pydantic AI message history.
+- `/new` waits for earlier turns in the conversation, then deletes its stored
+  Pydantic AI message history. It does not cancel an active turn.
 - `InMemoryConversationStore` is the default. It keeps history only for the
   current process. Implement `ConversationStore` for durable storage.
 - One `ChannelHost` serves one adapter. Use separate hosts and stores for
   multiple bot accounts or providers.
+- Run one live host process for each bot installation. The in-process lane and
+  replace-style store API do not serialize turns across multiple workers.
 
 The host accepts agents with text output. It does not convert structured or
 deferred tool outputs into chat messages.
@@ -90,7 +93,8 @@ queue, and yield that queue from `messages()` without changing `ChannelHost`.
 
 `ConversationStore` exposes `load`, replace-style `save`, and `delete`. Store
 failures fail the current turn. A store can add its own retry or fallback policy
-without adding storage policy to the host.
+without adding storage policy to the host. A shared durable store does not make
+multiple live hosts safe without external per-conversation serialization.
 
 ## Not included
 

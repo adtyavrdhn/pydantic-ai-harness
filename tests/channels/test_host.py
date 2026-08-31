@@ -111,7 +111,7 @@ class TestChannelHost:
 
         assert channel.sent == []
 
-    async def test_new_clears_history_before_next_turn(self) -> None:
+    async def test_new_waits_for_active_turn_and_clears_history(self) -> None:
         channel = FakeChannel([inbound('first'), inbound('/new'), inbound('second')])
         store = InMemoryConversationStore()
         agent: Agent[None, str] = Agent('test', instructions='Reply in text.')
