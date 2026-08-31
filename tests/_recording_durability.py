@@ -26,7 +26,7 @@ class _RecordingConfig:
         tool: object | None,
         tool_name: str,
     ) -> None | Literal[False]:
-        return None
+        return None  # pragma: no cover - protocol stub; these tests do not wrap tools
 
 
 class _RecordingBackend(CallableOperationBackend[None]):
