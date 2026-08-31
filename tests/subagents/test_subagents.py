@@ -55,8 +55,8 @@ class _SandboxProvider(AbstractCapability[object]):
         return SandboxRef(provider='local-test', sandbox_id=ctx.run_id or 'sub-agent')
 
     async def get_sandbox(self, ctx: RunContext[object], ref: SandboxRef | None) -> SandboxBackend | None:
-        if ref is None or ref.provider != 'local-test':
-            return None
+        assert ref is not None
+        assert ref.provider == 'local-test'
         return LocalSandbox(root=self.root)
 
 
