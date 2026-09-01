@@ -824,10 +824,10 @@ class TestCompositionWarning:
         ) >= (2, 37)
 
         with warnings.catch_warnings(record=True) as caught:
-            if dispatches_inline:
+            if dispatches_inline:  # pragma: no cover - latest-version path
                 await agent.run('hi')
                 assert (await guard.status())[0].spent.usd == Decimal('1')
-            else:  # pragma: no cover - old-version path
+            else:
                 with pytest.raises(Exception, match='Not in workflow event loop'):
                     await agent.run('hi')
 
