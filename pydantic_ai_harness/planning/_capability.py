@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from copy import copy
-from dataclasses import dataclass, field, replace
+from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
@@ -116,6 +116,10 @@ class Planning(AbstractCapability[AgentDepsT]):
 
     descriptions: dict[str, str] | None = None
     """Optional per-tool description overrides, keyed by tool name. Unknown names raise `ValueError`."""
+
+    # Override the inherited default ID because durable-operation recovery needs a stable identity.
+    _: KW_ONLY
+    id: str | None = 'planning'
 
     _resolved_store: PlanStore | None = field(default=None, init=False, repr=False, compare=False)
 

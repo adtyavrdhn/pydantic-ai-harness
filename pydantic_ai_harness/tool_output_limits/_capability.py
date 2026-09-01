@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 from typing import Any, TypeGuard
 
 from pydantic_ai import FunctionToolset
@@ -153,6 +153,10 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
     presets make large spills pageable by line through `read_tool_result`. A return that
     stays under every band threshold passes through as the original object, so the
     serialized text is only model-visible once a band triggers."""
+
+    # Override the inherited default ID because durable-operation recovery needs a stable identity.
+    _: KW_ONLY
+    id: str | None = 'tool_output_limits'
 
     _store: OverflowStore = field(init=False, repr=False)
     _bands: list[Band] = field(init=False, repr=False)
@@ -464,8 +468,8 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
 
     def _summarize_path(self, target: Summarize) -> str:
         for prefix, bands in [
-            ('bands', self.bands),
-            *((f'per_tool:{name}', value) for name, value in self.per_tool.items()),
+            ('bands', self._bands),
+            *((f'per_tool:{name}', value) for name, value in self._per_tool.items()),
         ]:
             for index, band in enumerate(bands):
                 action = band.action
@@ -481,7 +485,7 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
 
     def _resolve_summarize(self, path: str) -> Summarize:
         prefix, index_text, depth_text = path.rsplit(':', 2)
-        bands = self.bands if prefix == 'bands' else self.per_tool[prefix.removeprefix('per_tool:')]
+        bands = self._bands if prefix == 'bands' else self._per_tool[prefix.removeprefix('per_tool:')]
         action: Action | None = bands[int(index_text)].action
         for _ in range(int(depth_text)):
             if action is None:  # pragma: no cover - durable inputs originate from `_summarize_path`
