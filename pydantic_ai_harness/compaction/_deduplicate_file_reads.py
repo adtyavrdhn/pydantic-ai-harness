@@ -144,7 +144,7 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
                 self.context_window,
             )
             if not exceeds(
-                messages,
+                request_context.messages,
                 self.max_messages,
                 token_trigger,
                 self.tokenizer,

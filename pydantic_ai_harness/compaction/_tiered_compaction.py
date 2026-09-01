@@ -146,6 +146,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
         target: int,
         model_request_parameters: ModelRequestParameters | None = None,
+        request_messages: list[ModelMessage] | None = None,
     ) -> list[ModelMessage]:
         """Apply tiers in order until the history fits *target* or tiers run out."""
         original = messages
@@ -155,7 +156,11 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         # message text, so the baseline's fixed overhead (tool definitions, instructions) is
         # never treated as compacted away. On content the estimator undercounts, this
         # understates the reclaim and escalates a tier early -- the cheap direction.
-        baseline = estimate_context_tokens(messages, self.tokenizer, model_request_parameters=model_request_parameters)
+        baseline = estimate_context_tokens(
+            request_messages if request_messages is not None else messages,
+            self.tokenizer,
+            model_request_parameters=model_request_parameters,
+        )
         heuristic_baseline = estimate_token_count(messages, self.tokenizer)
         estimate = baseline
         for tier in self.tiers:
@@ -195,7 +200,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         target = self._target(request_ctx.model)
         if target is None or (
             estimate_context_tokens(
-                messages,
+                request_context.messages,
                 self.tokenizer,
                 model_request_parameters=request_context.model_request_parameters,
             )
@@ -206,7 +211,13 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
             request_ctx,
             strategy='TieredCompaction',
             messages=messages,
-            compact=lambda: self._escalate(messages, request_ctx, target, request_context.model_request_parameters),
+            compact=lambda: self._escalate(
+                messages,
+                request_ctx,
+                target,
+                request_context.model_request_parameters,
+                request_context.messages,
+            ),
             tokenizer=self.tokenizer,
         )
         record_compaction_reclaim(

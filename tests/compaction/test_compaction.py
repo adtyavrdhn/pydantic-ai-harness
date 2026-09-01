@@ -810,7 +810,13 @@ class TestCompaction:
     @pytest.mark.parametrize('injection_count', [1, 2])
     @pytest.mark.anyio
     async def test_compaction_keeps_summary_when_request_only_tail_is_replaced(self, injection_count: int):
-        comp = SummarizingCompaction(model='test:m', max_messages=1, keep_messages=0, preserve_first_user_message=False)
+        comp = SummarizingCompaction(
+            model='test:m',
+            max_tokens=25,
+            keep_messages=0,
+            tokenizer=len,
+            preserve_first_user_message=False,
+        )
         persistent_messages = [_user('first'), _assistant('response'), _user('current')]
         current_request = persistent_messages[-1]
         assert isinstance(current_request, ModelRequest)
@@ -2087,6 +2093,31 @@ class TestTieredCompaction:
         result = await cap.before_model_request(_make_ctx(), rc)
         assert calls == ['t1']  # t2 never reached
         assert len(result.messages) == 1
+
+    @pytest.mark.anyio
+    async def test_request_only_tail_counts_toward_each_tier_target(self):
+        calls: list[str] = []
+        cap = TieredCompaction(
+            tiers=[_RecordingTier('t1', calls, drop=1), _RecordingTier('t2', calls, drop=1)],
+            target_tokens=25,
+            tokenizer=len,
+        )
+        persistent_messages = [_assistant('aaaa'), _assistant('bbbb'), _user('cccc')]
+        current_request = persistent_messages[-1]
+        assert isinstance(current_request, ModelRequest)
+        request_messages = [
+            *persistent_messages[:-1],
+            dataclasses.replace(
+                current_request,
+                parts=[*current_request.parts, UserPromptPart('x' * 20)],
+            ),
+        ]
+        ctx = _make_ctx()
+        ctx.messages = list(persistent_messages)
+
+        await cap.before_model_request(ctx, _make_request_context(request_messages))
+
+        assert calls == ['t1', 't2']
 
     @pytest.mark.anyio
     async def test_triggers_on_anchored_usage_the_heuristic_cannot_see(self):

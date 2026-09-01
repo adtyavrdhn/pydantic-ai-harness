@@ -231,7 +231,7 @@ class SlidingWindowCompaction(AbstractCapability[AgentDepsT]):
             self.max_tokens, self.max_fraction, request_ctx.model, self.fallback_context_window, self.context_window
         )
         if not exceeds(
-            messages,
+            request_context.messages,
             self.max_messages,
             token_trigger,
             self.tokenizer,
