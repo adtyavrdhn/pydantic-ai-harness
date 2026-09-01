@@ -5,6 +5,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Sequence
 from dataclasses import replace
+from inspect import signature
 from pathlib import Path
 from typing import Any
 
@@ -252,6 +253,9 @@ class TestExplicitAgentsDiskDefault:
     conventional folders. Now an explicit `agents` list turns disk loading off,
     and the change announces itself only when it actually drops definitions.
     """
+
+    def test_unset_agents_is_visible_in_signature(self) -> None:
+        assert repr(signature(SubAgents).parameters['agents'].default) == '...'
 
     def test_explicit_agents_skip_convention_and_warn(self) -> None:
         # The surprise from #607: this construction used to load `planner` too.
