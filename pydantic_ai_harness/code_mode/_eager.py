@@ -30,7 +30,7 @@ from pydantic_ai.messages import (
 )
 
 from ._events import emit_best_effort
-from ._streaming import MAX_SCAN_BYTES, closed_statements, decode_partial_code
+from ._streaming import MAX_SCAN_CHARS, closed_statements, decode_partial_code
 
 if TYPE_CHECKING:
     from ._toolset import CodeModeToolset
@@ -163,7 +163,7 @@ class EagerState:
                     merged = dict(watch.args_dict or {})
                     merged.update(args_delta)
                     watch.args_dict = merged
-                if len(watch.args_text) > MAX_SCAN_BYTES:
+                if len(watch.args_text) > MAX_SCAN_CHARS:
                     watch.halted = True
                     return
                 self._scan(watch, ctx)
