@@ -228,6 +228,15 @@ class TestSkillValidation:
         with pytest.raises(ValueError, match='include and exclude cannot be used together'):
             Skills.from_spec(library, include=include, exclude=exclude)
 
+    def test_the_constructor_rejects_include_and_exclude_together(self, tmp_path: Path) -> None:
+        """The constructor keeps its own guard: `from_spec` raises before reaching it, so
+        this is the only path that exercises the `__init__` check the overloads mirror."""
+        library = tmp_path / 'skills'
+        library.mkdir()
+
+        with pytest.raises(ValueError, match='include and exclude cannot be used together'):
+            Skills(library, include=['alpha'], exclude=['alpha'])  # pyright: ignore[reportCallIssue, reportArgumentType]
+
     @pytest.mark.parametrize('selector', ['include', 'exclude'])
     def test_unknown_selected_skill_is_rejected(self, tmp_path: Path, selector: str) -> None:
         library = tmp_path / 'skills'
