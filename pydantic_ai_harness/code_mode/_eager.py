@@ -192,6 +192,9 @@ class EagerState:
         code = self._current_code(watch)
         if code is None:
             return
+        if len(code) > MAX_SCAN_CHARS:
+            watch.halted = True
+            return
         source_prefix = code[: code.rfind('\n') + 1]
         if source_prefix == watch.scanned_source:
             return

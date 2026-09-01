@@ -945,7 +945,37 @@ class TestEagerRewriteAndDurability:
         )
         taken = eager.pop_watch('c1', big)
         assert taken is not None
-        assert taken.feed_count == 0 and not taken.queue
+        assert taken.halted and taken.feed_count == 0 and not taken.queue
+
+    async def test_oversized_dict_args_delta_halts_the_watch(self):
+        """A dict delta whose `code` exceeds the cap halts without parsing or feeding."""
+        ctx = build_run_context(None)
+        capability = CodeMode[None](eager=True)
+        run_capability = await capability.for_run(ctx)
+        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[]))
+        assert isinstance(toolset, CodeModeToolset)
+        eager = toolset.eager
+        assert eager is not None
+
+        # Start with small code, then a delta replaces it with oversized code.
+        small = 'a = 1\nb = 2\n'
+        await eager.observe(
+            PartStartEvent(index=0, part=ToolCallPart(tool_name='run_code', args={'code': small}, tool_call_id='c1')),
+            ctx,
+        )
+        big = 'x = 1\n' * 60_000
+        await eager.observe(
+            PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': big}, tool_call_id='c1')), ctx
+        )
+        taken = eager.pop_watch('c1', big)
+        assert taken is not None
+        assert taken.halted and taken.feed_count == 0 and not taken.queue
+        # Further deltas are ignored because the watch is halted.
+        await eager.observe(
+            PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': 'later'}, tool_call_id='c1')), ctx
+        )
+        # The watch was already popped; verify no new watches were created.
+        assert eager.pop_watch('c1', 'anything') is None
 
     async def test_oversized_streamed_arguments_halt_the_watch(self):
         """Past the scan cap the watch stops decoding, feeding, and accumulating."""
