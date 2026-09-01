@@ -325,7 +325,6 @@ class DaytonaSandboxBackend:
         """The underlying Daytona sandbox, for provider-specific functionality."""
         self._owned = owned
         self._working_dir = absolute_path('working_dir', working_dir)
-        self._working_dir_lock = anyio.Lock()
         self._closed = False
         self.fs = _DaytonaFilesystem(self)
 
@@ -483,18 +482,18 @@ class DaytonaSandboxBackend:
 
     async def working_dir(self) -> str:
         """Return the sandbox's native absolute working directory."""
+        # The probe is an idempotent read: overlapping first calls may each ask, get the
+        # same answer, and the cache converges. No lock needed.
         if self._working_dir is None:
-            async with self._working_dir_lock:
-                if self._working_dir is None:
-                    try:
-                        discovered = await self.sandbox.get_work_dir()
-                    except Exception as error:
-                        raise self.operation_error(error, 'Could not determine the working directory') from error
-                    if not posixpath.isabs(discovered):
-                        raise DaytonaSandboxError(
-                            f'Could not determine the working directory of Daytona sandbox {self.sandbox_id!r}.'
-                        )
-                    self._working_dir = posixpath.normpath(discovered)
+            try:
+                discovered = await self.sandbox.get_work_dir()
+            except Exception as error:
+                raise self.operation_error(error, 'Could not determine the working directory') from error
+            if not posixpath.isabs(discovered):
+                raise DaytonaSandboxError(
+                    f'Could not determine the working directory of Daytona sandbox {self.sandbox_id!r}.'
+                )
+            self._working_dir = posixpath.normpath(discovered)
         return self._working_dir
 
     async def run(

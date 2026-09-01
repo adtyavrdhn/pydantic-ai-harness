@@ -7,6 +7,7 @@ import builtins
 import sys
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 from daytona import DaytonaAuthenticationError, DaytonaConnectionError, DaytonaNotFoundError
 from pydantic_ai.sandboxes import (
@@ -352,16 +353,21 @@ class TestErrorsAndFilesystem:
             await DaytonaSandboxBackend.create()
         assert not isinstance(recoverable.value, SandboxUnavailableError)
 
-    async def test_working_dir_native_probe_is_locked(self, fake_daytona: FakeDaytona) -> None:
+    async def test_concurrent_first_probes_converge(self, fake_daytona: FakeDaytona) -> None:
+        # The probe is an idempotent read, so overlapping first calls are allowed to
+        # duplicate it: both get the same answer and the cache settles.
         backend = await DaytonaSandboxBackend.create()
         sandbox = fake_daytona.sandboxes[0]
         sandbox.workdir_gate = asyncio.Event()
         first = asyncio.create_task(backend.working_dir())
         await sandbox.workdir_started.wait()
         second = asyncio.create_task(backend.working_dir())
+        with anyio.fail_after(5):
+            while sandbox.workdir_calls < 2:
+                await asyncio.sleep(0)
         sandbox.workdir_gate.set()
         assert await asyncio.gather(first, second) == ['/srv/repo', '/srv/repo']
-        assert sandbox.workdir_calls == 1
+        assert sandbox.workdir_calls == 2
 
     async def test_configured_working_dir_needs_no_probe(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create(working_dir='/work')
