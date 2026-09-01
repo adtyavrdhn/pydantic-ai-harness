@@ -69,10 +69,12 @@ async def test_plan_read_dispatches_as_durable_operation() -> None:
     store = InMemoryPlanStore()
     await store.set_items([PlanItem(id='1', content='journal the plan')])
     durability = RecordingDurability()
+    planning = Planning(store=store)
+    assert planning.id == 'planning'
     agent = Agent(
         TestModel(),
         name='planning',
-        capabilities=[Planning(store=store, id='planning'), durability],
+        capabilities=[planning, durability],
     )
 
     await agent.run('continue')

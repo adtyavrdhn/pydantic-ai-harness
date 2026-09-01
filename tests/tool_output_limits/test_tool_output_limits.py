@@ -630,14 +630,24 @@ class TestContentReduction:
 
 
 class TestSummarize:
+    async def test_mutating_source_bands_does_not_desync_summarizer_resolution(self):
+        bands = [Band(over=5, action=Summarize(model=_fixed_model('THE SUMMARY')))]
+        cap: ToolOutputLimits[object] = ToolOutputLimits(bands=bands)
+        bands.clear()
+
+        out = await _run(cap, 'x' * 100)
+
+        assert out == 'THE SUMMARY'
+
     async def test_model_summarizer_dispatches_as_durable_operation(self):
         def large_output() -> str:
             return 'x' * 100
 
         durability = RecordingDurability()
         cap: ToolOutputLimits[Any] = ToolOutputLimits(
-            id='tool_output_limits', bands=[Band(over=5, action=Summarize(model=_fixed_model('THE SUMMARY')))]
+            bands=[Band(over=5, action=Summarize(model=_fixed_model('THE SUMMARY')))]
         )
+        assert cap.id == 'tool_output_limits'
 
         agent = Agent(
             TestModel(call_tools='all'),
