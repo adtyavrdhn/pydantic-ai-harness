@@ -101,6 +101,12 @@ def _request_context() -> ModelRequestContext:
     )
 
 
+class _UsageRequestContext:
+    """The provider-response seam, usable while Harness still floors on an older core."""
+
+    usage_responses: tuple[ModelResponse, ...] = ()
+
+
 def _response(
     *,
     input_tokens: int = 1000,
@@ -130,7 +136,7 @@ async def _record(
 
     async def handler(request_context: ModelRequestContext) -> ModelResponse:
         usage_responses = getattr(request_context, 'usage_responses', None)
-        if usage_responses is not None:
+        if usage_responses is not None:  # pragma: lax no cover - exercised by pydantic-ai#7053 compat CI
             setattr(request_context, 'usage_responses', (*usage_responses, recorded))
         return recorded
 
@@ -622,9 +628,7 @@ class TestOrdering:
         first = _response(input_tokens=10, output_tokens=1, provider_response_id='first')
         second = _response(input_tokens=20, output_tokens=2, provider_response_id='second')
         transformed = _response(input_tokens=900, output_tokens=99, provider_response_id='transformed')
-        request_context = _request_context()
-        if not hasattr(request_context, 'usage_responses'):
-            pytest.skip('requires provider-response accounting from pydantic-ai#7053')
+        request_context: Any = _UsageRequestContext()
 
         async def handler(request_context: ModelRequestContext) -> ModelResponse:
             setattr(request_context, 'usage_responses', (first, second))
@@ -641,9 +645,7 @@ class TestOrdering:
         guard = SpendLimits(budgets=[Budget(window='total')], on_unpriced='raise')
         first = _response(model_name='unknown:first', provider_response_id='first')
         second = _response(model_name='unknown:second', provider_response_id='second')
-        request_context = _request_context()
-        if not hasattr(request_context, 'usage_responses'):
-            pytest.skip('requires provider-response accounting from pydantic-ai#7053')
+        request_context: Any = _UsageRequestContext()
 
         async def handler(request_context: ModelRequestContext) -> ModelResponse:
             setattr(request_context, 'usage_responses', (first, second))
@@ -667,9 +669,7 @@ class TestOrdering:
         )
         first = _response(provider_response_id='first')
         second = _response(provider_response_id='second')
-        request_context = _request_context()
-        if not hasattr(request_context, 'usage_responses'):
-            pytest.skip('requires provider-response accounting from pydantic-ai#7053')
+        request_context: Any = _UsageRequestContext()
 
         async def handler(request_context: ModelRequestContext) -> ModelResponse:
             setattr(request_context, 'usage_responses', (first, second))
@@ -714,6 +714,15 @@ class TestOrdering:
                 _run_ctx(root_capability=root),
                 legacy_request_context,
             )
+
+    async def test_provider_response_accounting_removes_the_ordering_warning(self):
+        guard = SpendLimits[None]()
+        root = CombinedCapability([guard, _RetryOnceInnermost()])
+        request_context: Any = _UsageRequestContext()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', SpendCompositionWarning)
+            await guard.before_model_request(_run_ctx(root_capability=root), request_context)
 
     @pytest.mark.parametrize('root', [None, CombinedCapability([_RetryOnceInnermost()])])
     async def test_an_older_core_does_not_warn_without_a_position_in_the_chain(
@@ -772,7 +781,9 @@ class TestOrdering:
             warnings.simplefilter('error', SpendCompositionWarning)
             await guard.before_model_request(_run_ctx(root_capability=root), legacy_request_context)
 
-    async def test_an_innermost_capability_listed_after_still_counts_every_billed_response(self):
+    async def test_an_innermost_capability_listed_after_still_counts_every_billed_response(  # pragma: lax no cover - unreleased core seam
+        self,
+    ):
         if not hasattr(_request_context(), 'usage_responses'):
             pytest.skip('requires provider-response accounting from pydantic-ai#7053')
         guard = SpendLimits(budgets=[Budget(window='total')], price=lambda r: Decimal('1'))
