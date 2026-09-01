@@ -528,7 +528,7 @@ implementations are:
 ### Exposing externalized bytes as URLs
 
 Each store accepts a `public_url=` callable that turns the canonical
-`media+sha256://<hex>` URI into a URL the model can fetch directly. 
+`media+sha256://<hex>` URI into a URL the model can fetch directly.
 
 Static base URL (public R2 bucket, CDN):
 
