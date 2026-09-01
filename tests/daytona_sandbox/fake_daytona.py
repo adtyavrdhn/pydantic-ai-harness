@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Protocol
@@ -40,17 +39,13 @@ class FakeProcess:
         env: dict[str, str] | None = None,
         timeout: int | None = None,
     ) -> SimpleNamespace:
+        # The backend only uses one-shot exec for `write_bytes`'s parent-directory creation.
         self.owner.exec_calls.append(ExecCall(command, cwd, env, timeout))
-        if self.owner.exec_error is not None:
-            raise self.owner.exec_error
         assert command.startswith('mkdir -p -- ')
         return SimpleNamespace(result='', exit_code=self.owner.mkdir_exit_code)
 
     async def create_session(self, session_id: str, request_timeout: float | None = None) -> None:
         self.owner.process_calls.append(('create', session_id, request_timeout))
-        self.owner.process_create_started.set()
-        if self.owner.process_create_error is not None:
-            raise self.owner.process_create_error
         if self.owner.process_create_gate is not None:
             await self.owner.process_create_gate.wait()
         self.owner.process_sessions.add(session_id)
@@ -75,8 +70,8 @@ class FakeProcess:
         self,
         session_id: str,
         command_id: str,
-        on_stdout: Callable[[str], Awaitable[None] | None],
-        on_stderr: Callable[[str], Awaitable[None] | None],
+        on_stdout: Callable[[str], None],
+        on_stderr: Callable[[str], None],
     ) -> None:
         self.owner.process_calls.append(('logs', session_id, command_id))
         self.owner.process_logs_started.set()
@@ -87,9 +82,7 @@ class FakeProcess:
             (on_stderr, self.owner.process_stderr),
         ):
             for chunk in chunks:
-                result = handler(chunk)
-                if inspect.isawaitable(result):
-                    await result
+                handler(chunk)
         if self.owner.process_hangs:
             await asyncio.Event().wait()
 
@@ -125,8 +118,7 @@ class FakeFileSystem:
         data = self.owner.files.get(path)
         if data is None:
             raise DaytonaNotFoundError(f'no file: {path}')
-        size = self.owner.reported_sizes.get(path, len(data))
-        return SimpleNamespace(size=size, is_dir=False)
+        return SimpleNamespace(size=len(data), is_dir=False)
 
     async def download_file(self, path: str, timeout: int | None = None) -> bytes:
         self.owner.fs_calls.append(('download', path, timeout))
@@ -148,20 +140,15 @@ class FakeFileSystem:
         self._raise_if_needed()
         prefix = '' if path in ('', '.') else path.rstrip('/') + '/'
         entries: dict[str, bool] = {}
+        # File keys never end with '/', so the first segment under the prefix is never empty.
         for candidate in self.owner.files:
-            if not candidate.startswith(prefix):
-                continue
-            relative = candidate[len(prefix) :]
-            name, separator, _ = relative.partition('/')
-            if name:
+            if candidate.startswith(prefix):
+                name, separator, _ = candidate[len(prefix) :].partition('/')
                 entries[name] = bool(separator) or entries.get(name, False)
         for directory in self.owner.directories:
-            if not directory.startswith(prefix):
-                continue
-            relative = directory[len(prefix) :]
-            name, separator, _ = relative.partition('/')
-            if name:
-                entries[name] = bool(separator) or True
+            if directory.startswith(prefix):
+                name = directory[len(prefix) :].partition('/')[0]
+                entries[name] = True
         return [
             SimpleNamespace(
                 name=name,
@@ -199,12 +186,9 @@ class FakeSandbox:
         self.deleted = False
         self.started = False
         self.start_calls: list[float | None] = []
-        self.start_error: Exception | None = None
         self.start_gate: asyncio.Event | None = None
-        self.start_started = asyncio.Event()
         self.files: dict[str, bytes] = {}
         self.directories: set[str] = set()
-        self.reported_sizes: dict[str, int] = {}
         self.exec_calls: list[ExecCall] = []
         self.exec_error: Exception | None = None
         self.fs_error: Exception | None = None
@@ -225,23 +209,18 @@ class FakeSandbox:
         self.process_hangs = False
         self.process_exit_code: int | None = 0
         self.process_delete_error: Exception | None = None
-        self.process_create_error: Exception | None = None
         self.process_status_error: Exception | None = None
         self.process_status_gate: asyncio.Event | None = None
         self.process_logs_error: Exception | None = None
         self.process_create_gate: asyncio.Event | None = None
-        self.process_create_started = asyncio.Event()
         self.process_logs_started = asyncio.Event()
         self.process = FakeProcess(self)
         self.fs = FakeFileSystem(self)
 
     async def start(self, timeout: float | None = 60) -> None:
         self.start_calls.append(timeout)
-        self.start_started.set()
         if self.start_gate is not None:
             await self.start_gate.wait()
-        if self.start_error is not None:
-            raise self.start_error
         self.started = True
 
     async def get_work_dir(self) -> str:
@@ -261,7 +240,6 @@ class FakeClient:
 
     async def create(self, params: CreateParams, *, timeout: float = 60) -> FakeSandbox:
         self.owner.create_timeouts.append(timeout)
-        self.owner.create_started.set()
         if self.owner.create_gate is not None:
             await self.owner.create_gate.wait()
         if self.owner.create_error is not None:
@@ -274,8 +252,6 @@ class FakeClient:
     async def get(self, sandbox_id: str, request_timeout: float | None = None) -> FakeSandbox:
         self.owner.get_calls.append(sandbox_id)
         self.owner.get_request_timeouts.append(request_timeout)
-        if self.owner.get_error is not None:
-            raise self.owner.get_error
         for sandbox in self.owner.sandboxes:
             if sandbox.id == sandbox_id or sandbox.name == sandbox_id:
                 return sandbox
@@ -283,21 +259,12 @@ class FakeClient:
 
     async def delete(self, sandbox: FakeSandbox, timeout: float, wait: bool) -> None:
         self.owner.delete_calls.append((sandbox.id, timeout, wait))
-        self.owner.delete_started.set()
-        if self.owner.delete_gate is not None:
-            await self.owner.delete_gate.wait()
         if self.owner.delete_error is not None:
             raise self.owner.delete_error
         sandbox.deleted = True
 
     async def close(self) -> None:
         self.owner.close_calls += 1
-        self.owner.close_started.set()
-        if self.owner.close_gate is not None and (
-            self.owner.close_gate_after is None or self.owner.close_calls >= self.owner.close_gate_after
-        ):
-            self.owner.close_blocked.set()
-            await self.owner.close_gate.wait()
         if self.owner.close_error is not None:
             raise self.owner.close_error
         self.closed = True
@@ -314,18 +281,10 @@ class FakeDaytona:
         self.get_request_timeouts: list[float | None] = []
         self.closed_clients = 0
         self.create_error: Exception | None = None
-        self.get_error: Exception | None = None
         self.delete_error: Exception | None = None
-        self.delete_gate: asyncio.Event | None = None
-        self.delete_started = asyncio.Event()
         self.close_error: Exception | None = None
-        self.close_gate: asyncio.Event | None = None
-        self.close_gate_after: int | None = None
         self.close_calls = 0
-        self.close_blocked = asyncio.Event()
-        self.close_started = asyncio.Event()
         self.create_gate: asyncio.Event | None = None
-        self.create_started = asyncio.Event()
 
     def client(self) -> FakeClient:
         return FakeClient(self)

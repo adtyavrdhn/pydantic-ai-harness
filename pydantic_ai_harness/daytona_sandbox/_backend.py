@@ -158,41 +158,27 @@ class _DaytonaProcess:
         return self._outcome
 
     async def _settle(self) -> _DaytonaResult:
-        remaining = None if self._deadline is None else self._deadline - (time.monotonic() - self._started)
         completed = False
         try:
-            with anyio.move_on_after(remaining):
+            with anyio.move_on_after(self._remaining()):
                 await self._logs
                 completed = True
         except Exception as error:
             raise self._backend.operation_error(error, 'Could not read the command output', unavailable=True) from error
         if not completed:
-            await _kill_quietly(self)
-            assert self._deadline is not None
-            raise SandboxTimeoutError(
-                f'Command timed out after {self._deadline:g} seconds and was killed.',
-                stdout=''.join(self._stdout),
-                stderr=''.join(self._stderr),
-                timeout=self._deadline,
-            )
-        remaining = None if self._deadline is None else self._deadline - (time.monotonic() - self._started)
+            raise await self._timeout_error()
+        # The exit-status RPC shares the command's deadline: a wedged status lookup after the
+        # logs completed must not extend the promised bound.
         command = None
         try:
-            with anyio.move_on_after(remaining):
+            with anyio.move_on_after(self._remaining()):
                 command = await self._process.get_session_command(
                     self._session_id, self._command_id, request_timeout=_REQUEST_TIMEOUT
                 )
         except Exception as error:
             raise self._backend.operation_error(error, 'Could not read the command result', unavailable=True) from error
         if command is None:
-            await _kill_quietly(self)
-            assert self._deadline is not None
-            raise SandboxTimeoutError(
-                f'Command timed out after {self._deadline:g} seconds and was killed.',
-                stdout=''.join(self._stdout),
-                stderr=''.join(self._stderr),
-                timeout=self._deadline,
-            )
+            raise await self._timeout_error()
         if command.exit_code is None:
             raise DaytonaSandboxError('Daytona closed the command output before reporting an exit status.')
         result = _DaytonaResult(
@@ -202,6 +188,19 @@ class _DaytonaProcess:
         )
         await _kill_quietly(self)
         return result
+
+    def _remaining(self) -> float | None:
+        return None if self._deadline is None else self._deadline - (time.monotonic() - self._started)
+
+    async def _timeout_error(self) -> SandboxTimeoutError:
+        await _kill_quietly(self)
+        assert self._deadline is not None
+        return SandboxTimeoutError(
+            f'Command timed out after {self._deadline:g} seconds and was killed.',
+            stdout=''.join(self._stdout),
+            stderr=''.join(self._stderr),
+            timeout=self._deadline,
+        )
 
     async def kill(self) -> None:
         """Delete the Daytona process session, which kills its command."""

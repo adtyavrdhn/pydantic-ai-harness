@@ -392,6 +392,7 @@ class TestErrorsAndFilesystem:
             False,
         )
         await sandbox.fs.write_bytes('/root.txt', b'root')
+        await sandbox.fs.make_dir('/elsewhere')  # outside the listed directory, must not appear
         await sandbox.fs.make_dir('/workspace/pkg')
         await sandbox.fs.write_bytes('/workspace/pkg/a.py', b'x')
         entries = await sandbox.fs.list_dir('/workspace')
