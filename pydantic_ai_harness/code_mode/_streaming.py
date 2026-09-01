@@ -24,17 +24,22 @@ class _PartialArgs(TypedDict):
 
 _PARTIAL_ARGS_ADAPTER: TypeAdapter[_PartialArgs] = TypeAdapter(_PartialArgs)
 
-_MAX_SCAN_BYTES = 1 << 18
-"""Largest streamed prefix the host will `ast.parse`; larger snippets run whole at dispatch.
+MAX_SCAN_BYTES = 1 << 18
+"""Largest streamed prefix the host will decode or `ast.parse`; larger snippets run whole at dispatch.
 
-The host parser has no sandbox around it, so its work must be bounded: repeated parses of a
-growing prefix are quadratic, and adversarial nesting exercises parser depth limits.
+The host parsers have no sandbox around them, and both run on every delta of a growing
+prefix, so their work must be bounded: repeated parses are quadratic, and adversarial
+nesting exercises parser depth limits.
 """
 
 
 def decode_partial_code(args_text: str) -> str | None:
-    """Recover the `code` string prefix from partially streamed JSON arguments."""
-    if not args_text:
+    """Recover the `code` string prefix from partially streamed JSON arguments.
+
+    Arguments past the scan cap are not decoded: the JSON parse runs on every delta, so its
+    work must be bounded the same way the AST parse is.
+    """
+    if not args_text or len(args_text) > MAX_SCAN_BYTES:
         return None
     try:
         decoded = _PARTIAL_ARGS_ADAPTER.validate_python(from_json(args_text, allow_partial='trailing-strings'))
@@ -58,7 +63,7 @@ def closed_statements(code: str, consumed: int) -> tuple[list[ast.stmt], int]:
     the known upgrade path.
     """
     end = code.rfind('\n')
-    if end < 0 or end >= _MAX_SCAN_BYTES:
+    if end < 0 or end >= MAX_SCAN_BYTES:
         # Oversized prefixes skip host-side parsing entirely: the dispatch hands the code to
         # the sandbox parser, which applies its own resource limits. The cost is losing
         # eagerness for snippets this large, not correctness.
