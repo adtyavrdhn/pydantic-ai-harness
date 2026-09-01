@@ -94,34 +94,42 @@ def persist_compacted_messages(
 ) -> None:
     """Replace both views without persisting request-only parts appended by outer wrappers."""
     persistent_messages = list(messages)
-    request_only_parts = _request_only_tail_part_count(ctx.messages, request_context.messages)
+    request_only_parts = _request_only_tail_parts(ctx.messages, request_context.messages)
     # Exercised by the pydantic-ai#7053 compatibility job; released core shares both views.
-    if request_only_parts and persistent_messages:  # pragma: lax no cover
-        tail = persistent_messages[-1]
-        assert isinstance(tail, ModelRequest)
-        assert len(tail.parts) >= request_only_parts
-        persistent_messages[-1] = replace(tail, parts=tail.parts[:-request_only_parts])
+    if request_only_parts:  # pragma: lax no cover
+        for index in range(len(persistent_messages) - 1, -1, -1):
+            message = persistent_messages[index]
+            if (
+                isinstance(message, ModelRequest)
+                and tuple(message.parts[-len(request_only_parts) :]) == request_only_parts
+            ):
+                retained_parts = message.parts[: -len(request_only_parts)]
+                if retained_parts:
+                    persistent_messages[index] = replace(message, parts=retained_parts)
+                else:
+                    del persistent_messages[index]
+                break
     ctx.messages[:] = persistent_messages
     request_context.messages = list(messages)
 
 
-def _request_only_tail_part_count(
+def _request_only_tail_parts(  # pragma: lax no cover
     persistent_messages: Sequence[ModelMessage], request_messages: Sequence[ModelMessage]
-) -> int:
-    """Count parts appended to the current request after core made the independent request view."""
+) -> tuple[ModelRequestPart, ...]:
+    """Return parts appended after core made the independent current-request view."""
     if not persistent_messages or not request_messages:
-        return 0
+        return ()
     persistent_tail = persistent_messages[-1]
     request_tail = request_messages[-1]
     if not isinstance(persistent_tail, ModelRequest) or not isinstance(request_tail, ModelRequest):
         # Internal compaction runs before the provider call, with the current request at the tail.
-        return 0  # pragma: no cover
+        return ()
     persistent_parts = persistent_tail.parts
     request_parts = request_tail.parts
     if request_parts[: len(persistent_parts)] != persistent_parts:
         # Harness request-only injections append parts; they do not replace the persistent prefix.
-        return 0  # pragma: no cover
-    return len(request_parts) - len(persistent_parts)
+        return ()
+    return tuple(request_parts[len(persistent_parts) :])
 
 
 def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:

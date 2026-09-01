@@ -807,6 +807,40 @@ class TestCompaction:
         assert len(sys_parts) >= 1
         assert 'Summary of conversation.' in sys_parts[-1].content
 
+    @pytest.mark.parametrize('injection_count', [1, 2])
+    @pytest.mark.anyio
+    async def test_compaction_keeps_summary_when_request_only_tail_is_replaced(self, injection_count: int):
+        comp = SummarizingCompaction(model='test:m', max_messages=1, keep_messages=0, preserve_first_user_message=False)
+        persistent_messages = [_user('first'), _assistant('response'), _user('current')]
+        current_request = persistent_messages[-1]
+        assert isinstance(current_request, ModelRequest)
+        request_messages = [
+            *persistent_messages[:-1],
+            dataclasses.replace(
+                current_request,
+                parts=[
+                    *current_request.parts,
+                    *(UserPromptPart(f'request-only {index}') for index in range(injection_count)),
+                ],
+            ),
+        ]
+        ctx = _make_ctx()
+        ctx.messages = list(persistent_messages)
+        request_context = _make_request_context(request_messages)
+        mock_result = AsyncMock(output='Summary of conversation.')
+
+        with patch('pydantic_ai.Agent') as mock_agent:
+            mock_agent.return_value.run = AsyncMock(return_value=mock_result)
+            result = await comp.before_model_request(ctx, request_context)
+
+        assert len(result.messages) == 1
+        summary_message = result.messages[0]
+        assert isinstance(summary_message, ModelRequest)
+        assert [part.content for part in summary_message.parts if isinstance(part, SystemPromptPart)] == [
+            'Summary of previous conversation:\n\nSummary of conversation.'
+        ]
+        assert ctx.messages == result.messages
+
     @pytest.mark.anyio
     async def test_compaction_preserves_system_prompts(self):
         comp = SummarizingCompaction(model='test:m', max_messages=3, keep_messages=1)
