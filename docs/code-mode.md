@@ -288,7 +288,7 @@ Name only tools without observable side effects: a speculated call can run for a
 snippet never takes, so early execution must be harmless to repeat or discard. Launches that
 the snippet never claims are cancelled when it finishes. `sequential` tools are never
 speculated, tool hooks fire at launch time rather than at claim time, and enabling `speculate`
-puts runs in streaming mode. Under Temporal durable execution the option is inactive.
+puts runs in streaming mode. Under durable execution (Temporal, DBOS) the option is inactive.
 Aggregate counters are exposed on `CodeMode.speculation_stats` (`launched`, `adopted`,
 `evicted`).
 

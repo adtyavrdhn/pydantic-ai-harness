@@ -134,7 +134,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     snippet never takes, and its early launch is otherwise indistinguishable from the normal
     call only when re-running or discarding it is harmless. Tool hooks fire at launch time.
     Unclaimed launches are cancelled when the snippet finishes. Enabling this puts runs in
-    streaming mode, and has no effect under Temporal durable execution.
+    streaming mode, and has no effect under durable execution.
 
     Pass `'declared'` instead of a list to trust the tools' own definitions as evidence:
     first-party tools marked `Tool(..., metadata={'read_only': True})` (or
