@@ -125,7 +125,7 @@ class TestConfigValidation:
         judge = Agent(_all_good_model())
 
         @judge.output_validator
-        def validate_output(output: str) -> str:
+        def validate_output(output: str) -> str:  # pragma: no cover - construction raises before any run
             return output
 
         with pytest.raises(ValueError, match='must not have output validators'):
