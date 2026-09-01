@@ -559,6 +559,43 @@ class TestEagerHardening:
         # Only the dispatch ran the snippet; nothing fed during streaming.
         assert calls == ['alpha']
 
+    async def test_restart_with_escaped_json_key_does_not_duplicate_prefix(self):
+        """An escaped `restart` key (e.g. `"\\u0072estart"`) halts feeding like the literal."""
+        calls: list[str] = []
+
+        def search(query: str) -> str:
+            """Return a canned result."""
+            calls.append(query)
+            return f'result:{query}'
+
+        code = 'a = await search(query="alpha")\nprint(a)\n"ok"'
+
+        async def stream_restart(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _prior_run_code_calls(messages):
+                yield 'done'
+                return
+            # Build args with an escaped `restart` key: "\u0072estart" decodes to "restart".
+            args = '{"\\u0072estart": true, "code": ' + json.dumps(code) + '}'
+            yield {1: DeltaToolCall(name='run_code')}
+            for offset in range(0, len(args), 16):
+                yield {1: DeltaToolCall(json_args=args[offset : offset + 16])}
+                await asyncio.sleep(0)
+
+        capability = CodeMode[None](eager=True)
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_restart),
+            deps_type=type(None),
+            capabilities=[capability],
+        )
+        agent.tool_plain(search)
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        # Without the fix, eager would run the prefix once, then restart would run the full
+        # snippet, yielding ['alpha', 'alpha']. With the fix, only the dispatch runs.
+        assert calls == ['alpha']
+
     async def test_two_streamed_parts_never_execute_concurrently(self):
         """Fragments and tails from different `run_code` parts serialize against the session."""
         depth = 0
