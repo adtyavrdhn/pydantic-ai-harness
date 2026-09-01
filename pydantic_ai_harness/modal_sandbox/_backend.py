@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import codecs
-import functools
 import itertools
 import math
 import posixpath
@@ -36,7 +35,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import anyio
-from pydantic_ai.sandboxes import FileEntry, SandboxTimeoutError, SandboxUnavailableError
+from pydantic_ai.sandboxes import CommandResult, FileEntry, SandboxTimeoutError, SandboxUnavailableError
 from typing_extensions import Self
 
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
@@ -121,13 +120,6 @@ class _ModalSandboxAlreadyExists(ModalSandboxError):
 
 
 @dataclass(frozen=True)
-class _ModalResult:
-    exit_code: int
-    stdout: str
-    stderr: str
-
-
-@dataclass(frozen=True)
 class _ModalOutputChunk:
     stream: _Stream
     data: str
@@ -179,7 +171,7 @@ class _ModalProcess:
         self._started_at = started_at
         self._streaming = False
         self._lock = anyio.Lock()
-        self._outcome: _ModalResult | Exception | None = None
+        self._outcome: CommandResult | Exception | None = None
 
     @property
     def pid(self) -> int | None:
@@ -249,7 +241,7 @@ class _ModalProcess:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
 
-    async def wait(self) -> _ModalResult:
+    async def wait(self) -> CommandResult:
         """Wait for the command and return its result, the same one on every call."""
         # The timeout verdict below can only be reached once, so the first call's verdict is
         # the command's verdict: caching it is what makes repeated and concurrent waits agree.
@@ -263,7 +255,7 @@ class _ModalProcess:
             raise self._outcome
         return self._outcome
 
-    async def _settle(self) -> _ModalResult:
+    async def _settle(self) -> CommandResult:
         async def read(reader: modal.io_streams.StreamReader[bytes]) -> str:
             return (await reader.read.aio()).decode('utf-8', errors='replace')
 
@@ -299,7 +291,7 @@ class _ModalProcess:
                 stderr=stderr,
                 timeout=self._deadline,
             )
-        return _ModalResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
+        return CommandResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
     def _timed_out(self, exit_code: int, elapsed: float) -> bool:
         if self._deadline is None:
@@ -448,6 +440,7 @@ class ModalSandboxBackend:
         """The underlying `modal.Sandbox`, for provider-specific functionality."""
         self.fs = _ModalFilesystem(self)
         self._working_dir = working_dir
+        self._working_dir_lock = anyio.Lock()
         self._sandbox_timeout = sandbox_timeout
 
     @property
@@ -627,11 +620,6 @@ class ModalSandboxBackend:
         if first_error is not None:
             await raise_after_cleanup(first_error)
 
-    @functools.cached_property
-    def _working_dir_lock(self) -> anyio.Lock:
-        # `anyio.Lock` binds to the event loop on which it is first used.
-        return anyio.Lock()
-
     async def working_dir(self) -> str:
         """The sandbox's default working directory (absolute POSIX path)."""
         # Modal exposes no API for a running sandbox's working directory -- it is the image's
@@ -662,7 +650,7 @@ class ModalSandboxBackend:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
-    ) -> _ModalResult:
+    ) -> CommandResult:
         """Execute a command and wait for it to complete.
 
         Modal has no per-command kill, so a cancelled `run()` stops the wait but leaves the
