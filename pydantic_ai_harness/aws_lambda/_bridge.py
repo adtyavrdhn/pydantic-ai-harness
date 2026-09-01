@@ -181,6 +181,7 @@ class _AgentLoop:
                     await wait_within_budget(asyncio.gather(*pending, return_exceptions=True))
 
                 await wait_within_budget(loop.shutdown_asyncgens())
+                await wait_within_budget(loop.shutdown_default_executor())
                 loop.stop()
 
             loop.create_task(clean_up())

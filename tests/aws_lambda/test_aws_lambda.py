@@ -861,6 +861,35 @@ class TestBridgeFailureModes:
         assert loop.is_closed()
         assert not thread.is_alive()
 
+    def test_retirement_drains_default_executor_before_closing_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setattr(_bridge, '_RETIRED_LOOP_GRACE_SECONDS', 1)
+        loop = loops.get()
+        thread = loops._thread  # pyright: ignore[reportPrivateUsage]
+        assert thread is not None
+        worker_started = threading.Event()
+        release_worker = threading.Event()
+        worker_finished = threading.Event()
+
+        def executor_work() -> None:
+            worker_started.set()
+            release_worker.wait(timeout=5)
+            worker_finished.set()
+
+        loop.call_soon_threadsafe(loop.run_in_executor, None, executor_work)
+        assert worker_started.wait(timeout=5)
+
+        loops.retire(loop, None)
+
+        assert thread.is_alive()
+        assert not loop.is_closed()
+        assert not worker_finished.is_set()
+        release_worker.set()
+        thread.join(timeout=5)
+        assert worker_finished.is_set()
+        assert loop.is_closed()
+        assert not thread.is_alive()
+
     def test_retirement_cancels_a_waiter_when_the_cleanup_budget_expires(self, monkeypatch: pytest.MonkeyPatch) -> None:
         loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
         monkeypatch.setattr(_bridge, '_RETIRED_LOOP_GRACE_SECONDS', 0)
