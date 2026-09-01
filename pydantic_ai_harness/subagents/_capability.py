@@ -227,8 +227,6 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         by_name: dict[str, SubAgent[AgentDepsT]] = {}
         self._agents_explicit = self.agents is not _AGENTS_UNSET
-        if not self._agents_explicit:
-            self.agents = ()
         for sub_agent in self.agents:
             name = sub_agent.resolved_name
             if name is None:

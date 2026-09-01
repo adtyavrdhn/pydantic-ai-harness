@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +179,13 @@ class TestDiskLoading:
         _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
         cap: SubAgents[object] = SubAgents()
         assert 'planner' in cap._by_name
+
+    def test_replaced_capability_stays_in_discovery_mode(self) -> None:
+        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        original: SubAgents[object] = SubAgents()
+        copied = replace(original)
+        assert list(original._by_name) == ['planner']
+        assert list(copied._by_name) == ['planner']
 
     def test_cwd_equal_home_loads_once_without_shadow_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # When the project root equals the home root, the project and home convention
