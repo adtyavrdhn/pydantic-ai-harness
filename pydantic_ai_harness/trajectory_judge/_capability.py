@@ -16,7 +16,10 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelResponse,
+    NativeToolCallPart,
+    NativeToolReturnPart,
     RetryPromptPart,
+    SpeechPart,
     TextContent,
     TextPart,
     ToolCallPart,
@@ -382,6 +385,8 @@ def _render_transcript(messages: Sequence[ModelMessage]) -> str:
                     lines.append(f'user: {text}')
             elif isinstance(part, ToolReturnPart):
                 lines.append(f'tool {part.tool_name} returned: {part.model_response_str()}')
+            elif isinstance(part, NativeToolReturnPart):
+                lines.append(f'native tool {part.tool_name} returned: {part.model_response_str()}')
             elif isinstance(part, RetryPromptPart):
                 lines.append(f'retry ({part.tool_name or "output"}): {part.model_response()}')
             elif isinstance(part, TextPart):
@@ -389,6 +394,10 @@ def _render_transcript(messages: Sequence[ModelMessage]) -> str:
                     lines.append(f'assistant: {part.content}')
             elif isinstance(part, ToolCallPart):
                 lines.append(f'assistant called tool {part.tool_name} with {part.args_as_json_str()}')
+            elif isinstance(part, NativeToolCallPart):
+                lines.append(f'assistant called native tool {part.tool_name} with {part.args_as_json_str()}')
+            elif isinstance(part, SpeechPart) and part.transcript:
+                lines.append(f'{part.speaker}: {part.transcript}')
     return '\n'.join(lines)
 
 

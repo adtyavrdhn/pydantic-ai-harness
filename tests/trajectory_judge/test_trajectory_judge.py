@@ -17,7 +17,10 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    NativeToolCallPart,
+    NativeToolReturnPart,
     RetryPromptPart,
+    SpeechPart,
     SystemPromptPart,
     TextContent,
     TextPart,
@@ -568,6 +571,8 @@ class TestTranscript:
                         ['part-a', TextContent(content='part-b'), BinaryContent(data=b'\x00', media_type='image/png')]
                     ),
                     UserPromptPart([BinaryContent(data=b'\x00', media_type='image/png')]),
+                    SpeechPart(speaker='user', transcript='spoken request'),
+                    SpeechPart(speaker='user'),
                 ]
             ),
             ModelResponse(
@@ -576,6 +581,12 @@ class TestTranscript:
                     TextPart(''),
                     TextPart('answer'),
                     ToolCallPart('lookup', {'q': 1}),
+                    NativeToolCallPart(tool_name='web_search', args={'q': 'native'}, tool_call_id='native-1'),
+                    NativeToolReturnPart(
+                        tool_name='web_search', content={'status': 'complete'}, tool_call_id='native-1'
+                    ),
+                    SpeechPart(speaker='assistant', transcript='spoken answer'),
+                    SpeechPart(speaker='assistant'),
                 ]
             ),
             ModelRequest(
@@ -594,9 +605,13 @@ class TestTranscript:
         transcript = seen[0]
         assert 'user: hello' in transcript
         assert 'user: part-a part-b' in transcript
-        assert transcript.count('user:') == 2  # the image-only prompt renders nothing
+        assert 'user: spoken request' in transcript
+        assert transcript.count('user:') == 3  # image-only and transcript-less speech prompts render nothing
         assert 'assistant: answer' in transcript
+        assert 'assistant: spoken answer' in transcript
         assert 'assistant called tool lookup with {"q":1}' in transcript
+        assert 'assistant called native tool web_search with {"q":"native"}' in transcript
+        assert 'native tool web_search returned: {"status":"complete"}' in transcript
         assert 'tool lookup returned: {"k":"v"}' in transcript
         assert 'retry (lookup):' in transcript
         assert 'bad args' in transcript
