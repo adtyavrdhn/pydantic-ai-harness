@@ -98,7 +98,7 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     from pydantic_ai_harness import TrajectoryJudge
 
     agent = Agent(
-        'anthropic:claude-sonnet-4-6',
+        'anthropic:claude-sonnet-5',
         capabilities=[
             TrajectoryJudge(
                 model='anthropic:claude-haiku-4-5',
@@ -151,6 +151,7 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     _judge: Agent[None, object] = field(init=False, repr=False, compare=False)
     _steps: int = field(default=0, init=False, repr=False, compare=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
+    _claim_held: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _validate_positive_int('every', self.every)
@@ -240,7 +241,19 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         if limits is not None and limits.request_limit is not None and ctx.usage.requests + 2 > limits.request_limit:
             return False
         ctx.usage.requests += 1
+        self._claim_held = True
         return True
+
+    def _release_claim(self, ctx: RunContext[AgentDepsT]) -> None:
+        """Release the launch's claim exactly once.
+
+        Both `_evaluate`'s `finally` and `_discard_in_flight` call this: whichever settles
+        the evaluation first wins, and the other is a no-op. The guard is what covers a task
+        cancelled before its coroutine ever starts, where the `finally` never runs.
+        """
+        if self._claim_held:
+            self._claim_held = False
+            ctx.usage.requests -= 1
 
     async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
         """Run the agent, then settle the judge: surface a finished failure, cancel the rest.
@@ -254,10 +267,10 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         try:
             result = await handler()
         except BaseException:
-            await self._discard_in_flight()
+            await self._discard_in_flight(ctx)
             raise
         self._collect_finished()
-        await self._discard_in_flight()
+        await self._discard_in_flight(ctx)
         return result
 
     async def _evaluate(self, ctx: RunContext[AgentDepsT], prompt: str) -> None:
@@ -270,7 +283,9 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         one: the launch's claim occupies a slot in `usage.requests` for the whole
         evaluation, so the unadjusted limit would count this evaluation against itself
         twice. The claim is released once the run has recorded the judge's real spend (or
-        recorded nothing, on failure or cancellation).
+        recorded nothing, on failure or cancellation); a task cancelled before this
+        coroutine starts never reaches the `finally`, so `_discard_in_flight` releases the
+        claim instead.
 
         Provider failures propagate out of this task as-is (`ModelAPIError` subclasses from
         the model layer) and are re-raised on the run by `_collect_finished`.
@@ -283,7 +298,7 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
                 usage_limits=_claim_offset_limits(ctx.usage_limits),
             )
         finally:
-            ctx.usage.requests -= 1
+            self._release_claim(ctx)
         verdict = result.output
         if isinstance(verdict, Steer):
             ctx.enqueue(f'Steering from trajectory judge {self._judge_name()!r}: {verdict.message}')
@@ -298,11 +313,15 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         self._task = None
         task.result()
 
-    async def _discard_in_flight(self) -> None:
+    async def _discard_in_flight(self, ctx: RunContext[AgentDepsT]) -> None:
         """Cancel and reap the current evaluation without inspecting its outcome.
 
         The task may already be done, in which case `cancel` is a no-op and awaiting it
         re-raises its failure; both that and the cancellation are discarded deliberately.
+        The claim is released after the task settles: a task cancelled before its coroutine
+        first ran never reached `_evaluate`'s `finally`, so the release here is what keeps
+        a reused `RunUsage` free of phantom requests, and `_release_claim`'s guard makes it
+        a no-op when the `finally` already ran.
         """
         task = self._task
         self._task = None
@@ -311,6 +330,7 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
+        self._release_claim(ctx)
 
     def _judge_name(self) -> str:
         """The attribution name: `name`, then the judge `agent`'s name, then the default."""

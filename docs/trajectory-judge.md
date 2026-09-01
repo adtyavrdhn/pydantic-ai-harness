@@ -31,7 +31,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import TrajectoryJudge
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5',
     capabilities=[
         TrajectoryJudge(
             model='anthropic:claude-haiku-4-5',
@@ -61,7 +61,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import TrajectoryJudge
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5',
     capabilities=[
         TrajectoryJudge(
             model='anthropic:claude-haiku-4-5',
@@ -70,7 +70,7 @@ agent = Agent(
             every=20,
         ),
         TrajectoryJudge(
-            model='google:gemini-2.5-flash',
+            model='google:gemini-3.7-flash',
             name='scope-creep',
             instructions='Flag work that was not asked for in the original request.',
             every=10,
@@ -89,7 +89,7 @@ from pydantic_ai_harness import TrajectoryJudge
 from pydantic_ai_harness.trajectory_judge import AllGood, Steer
 
 judge = Agent(
-    'openai:gpt-5.2',
+    'openai:gpt-5.6-luna',
     name='security-risk',
     instructions=(
         'You review an AI agent trajectory for security risks: exposed secrets, unsafe '
@@ -99,7 +99,7 @@ judge = Agent(
 )
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5',
     capabilities=[TrajectoryJudge(agent=judge, every=10)],
 )
 ```

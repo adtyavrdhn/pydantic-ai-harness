@@ -678,6 +678,28 @@ class TestUsageCoordination:
         assert judge_calls == 1
         assert ctx.usage.requests == 2  # parent + the single winning evaluation, within the limit of 3
 
+    async def test_run_end_before_the_evaluation_starts_releases_the_claim(self) -> None:
+        """A task cancelled before its coroutine first runs still releases the launch claim.
+
+        `wrap_run`'s handler returns without yielding the event loop, so the evaluation task
+        never starts and `_evaluate`'s `finally` never runs; without the release at discard,
+        the claim would survive the run as a phantom request in a reused `RunUsage`.
+        """
+        cap = TrajectoryJudge(model=_steer_model(), every=1)
+        ctx = _ctx()
+        ctx.usage_limits = UsageLimits(request_limit=5)
+        run_cap = await cap.for_run(ctx)
+        await run_cap.after_model_request(
+            ctx, request_context=_request_context(_hi_request()), response=_text_response()
+        )
+        assert ctx.usage.requests == 1  # the claim, made synchronously at launch
+
+        async def handler() -> Any:
+            return 'run-result'
+
+        assert await run_cap.wrap_run(ctx, handler=handler) == 'run-result'
+        assert ctx.usage.requests == 0  # the never-started evaluation released its claim
+
     async def test_unbounded_limits_pass_through(self) -> None:
         """A limits object without `request_limit` neither blocks the launch nor gains one."""
         cap = TrajectoryJudge(model=_steer_model('back on task'), every=1)
