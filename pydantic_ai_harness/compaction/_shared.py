@@ -96,8 +96,7 @@ def persist_compacted_messages(
     persistent_messages = list(messages)
     request_only_parts = _request_only_tail_part_count(ctx.messages, request_context.messages)
     # Exercised by the pydantic-ai#7053 compatibility job; released core shares both views.
-    if request_only_parts:  # pragma: lax no cover
-        assert persistent_messages
+    if request_only_parts and persistent_messages:  # pragma: lax no cover
         tail = persistent_messages[-1]
         assert isinstance(tail, ModelRequest)
         assert len(tail.parts) >= request_only_parts

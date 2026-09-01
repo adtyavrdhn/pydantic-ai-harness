@@ -11,7 +11,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Tracer
-from pydantic_ai import Agent, AgentSpec, DeferredToolRequests, ModelRetry, RunContext
+from pydantic_ai import Agent, AgentSpec, DeferredToolRequests, ModelRetry, RunContext, UserError
 from pydantic_ai.capabilities import ToolSearch
 from pydantic_ai.messages import (
     ModelMessage,
@@ -1086,6 +1086,35 @@ class TestInjection:
         assert len(captured[0]) == 1
         assert '- fresh fact' in captured[0][0]
         assert _memory_contexts(result.all_messages()) == []
+
+    async def test_compaction_can_drop_request_only_memory_with_all_messages(self) -> None:
+        if not hasattr(ModelRequestContext, 'usage_responses'):
+            pytest.skip('requires independent request history from pydantic-ai#7053')
+        store = InMemoryStore()
+        await _seed(store, 'main/MEMORY.md', '- fresh fact')
+        captured: list[list[ModelMessage]] = []
+
+        def capture(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            captured.append(messages)
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent = Agent(
+            FunctionModel(capture),
+            capabilities=[
+                Memory(store=store),
+                SlidingWindowCompaction(max_messages=1, keep_messages=0, preserve_first_user_message=False),
+            ],
+        )
+        with pytest.raises(UserError, match='Processed history cannot be empty'):
+            await agent.run(
+                'continue',
+                message_history=[
+                    ModelRequest(parts=[UserPromptPart('old')]),
+                    ModelResponse(parts=[TextPart('old response')]),
+                ],
+            )
+
+        assert captured == []
 
     async def test_cleanup_preserves_user_content_merged_with_memory_context(self) -> None:
         store = InMemoryStore()
