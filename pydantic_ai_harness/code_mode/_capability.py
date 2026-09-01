@@ -21,7 +21,7 @@ from pydantic_ai_harness.code_mode._toolset import (
     CodeModeOS,
     CodeModeResourceLimits,
     CodeModeToolset,
-    _in_temporal_workflow,  # pyright: ignore[reportPrivateUsage]
+    _in_durable_execution,  # pyright: ignore[reportPrivateUsage]
 )
 
 if TYPE_CHECKING:
@@ -128,7 +128,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     before the tool call is committed and are not rolled back; a statement that fails leaves
     the session exactly as a failed snippet does today (assignments before the failing line
     persist) and surfaces the error as the `run_code` result. Enabling this puts runs in
-    streaming mode, and has no effect under Temporal durable execution.
+    streaming mode, and has no effect under durable execution.
 
     Two consequences of running before the call completes:
 
@@ -228,12 +228,12 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         """Feed streamed `run_code` argument deltas to the eager statement pump.
 
         Wrapped events pass through unmodified; the watcher acts purely by side effect,
-        enqueueing closed statements for execution in the live REPL. Inactive under Temporal,
-        where overlapping non-deterministic work with the stream has no place in a replayed
-        workflow.
+        enqueueing closed statements for execution in the live REPL. Inactive under durable
+        execution, where overlapping non-deterministic work with the stream has no place in
+        a replayed workflow.
         """
         state = self._eager_state
-        if state is not None and _in_temporal_workflow(ctx):
+        if state is not None and _in_durable_execution(ctx):
             state = None
         if state is not None:
             try:
