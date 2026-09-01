@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import BaseModel, ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UsageLimitExceeded, UserError
@@ -108,6 +109,12 @@ def _text_response(text: str = 'ok') -> ModelResponse:
 
 
 class TestConfigValidation:
+    def test_is_a_pydantic_model_with_capability_fields(self) -> None:
+        cap = TrajectoryJudge(model='test', id='judge', description='reviews trajectory', defer_loading=True)
+
+        assert isinstance(cap, BaseModel)
+        assert (cap.id, cap.description, cap.defer_loading) == ('judge', 'reviews trajectory', True)
+
     def test_requires_model_or_agent(self) -> None:
         with pytest.raises(ValueError, match='Provide a judge `model`'):
             TrajectoryJudge()
@@ -122,6 +129,10 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match='owns its own'):
             TrajectoryJudge(agent=judge, instructions='be strict')
 
+    def test_rejects_non_agent(self) -> None:
+        with pytest.raises(ValueError, match='must be an `Agent` instance'):
+            TrajectoryJudge(agent='not-an-agent')
+
     def test_rejects_agent_with_output_validator(self) -> None:
         judge = Agent(_all_good_model())
 
@@ -134,21 +145,25 @@ class TestConfigValidation:
 
     @pytest.mark.parametrize('value', [1.5, True])
     def test_rejects_non_integer_every(self, value: float | bool) -> None:
-        with pytest.raises(ValueError, match='every must be an int'):
+        with pytest.raises(ValidationError) as exc_info:
             TrajectoryJudge(model='test', every=value)  # pyright: ignore[reportArgumentType]
+        assert exc_info.value.errors()[0]['type'] == 'int_type'
 
     def test_rejects_every_below_one(self) -> None:
-        with pytest.raises(ValueError, match='every must be >= 1'):
+        with pytest.raises(ValidationError) as exc_info:
             TrajectoryJudge(model='test', every=0)
+        assert exc_info.value.errors()[0]['type'] == 'greater_than_equal'
 
     @pytest.mark.parametrize('value', [1.5, True])
     def test_rejects_non_integer_window(self, value: float | bool) -> None:
-        with pytest.raises(ValueError, match='window must be an int'):
+        with pytest.raises(ValidationError) as exc_info:
             TrajectoryJudge(model='test', window=value)  # pyright: ignore[reportArgumentType]
+        assert exc_info.value.errors()[0]['type'] == 'int_type'
 
     def test_rejects_window_below_one(self) -> None:
-        with pytest.raises(ValueError, match='window must be >= 1'):
+        with pytest.raises(ValidationError) as exc_info:
             TrajectoryJudge(model='test', window=0)
+        assert exc_info.value.errors()[0]['type'] == 'greater_than_equal'
 
     def test_not_spec_serializable(self) -> None:
         assert TrajectoryJudge.get_serialization_name() is None

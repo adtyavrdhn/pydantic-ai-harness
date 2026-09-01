@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, runtime_checkable
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, TypeAlias, TypeGuard, runtime_checkable
 
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
 from pydantic_ai.exceptions import UserError
@@ -65,15 +66,10 @@ _JUDGE_INSTRUCTIONS = (
 _PROMPT_HEADER = "Review the running agent's recent trajectory and deliver your verdict."
 
 
-def _validate_positive_int(name: str, value: object) -> None:
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f'{name} must be an int, got {value!r}')
-    if value < 1:
-        raise ValueError(f'{name} must be >= 1, got {value}')
+_PositiveInt = Annotated[int, Field(strict=True, ge=1)]
 
 
-@dataclass(kw_only=True)
-class TrajectoryJudge(AbstractCapability[AgentDepsT]):
+class TrajectoryJudge(BaseModel, AbstractCapability[AgentDepsT]):
     """Review a live run with a second model on a cadence, and steer it mid-run.
 
     Long-horizon runs drift: instructions fade, unsupported claims compound, and the agent
@@ -118,6 +114,8 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     and could repeat on replay. Run judged work outside durable execution.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
+
     model: Model | KnownModelName | str | None = None
     """The model that evaluates the trajectory. Provide this (with optional
     `instructions`) or a full `agent`, not both."""
@@ -126,17 +124,17 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     """The judge's review focus, appended to the built-in judge instructions. Only valid
     together with `model`; a passed `agent` owns its own instructions."""
 
-    agent: Agent[None, object] | None = None
+    agent: object | None = None
     """A full judge agent, for advanced customization (own instructions, model settings,
     toolsets, fallback models). Every evaluation runs it with `output_type=[AllGood, Steer]`
     regardless of its own configured output type, so an existing agent can be reused as-is;
     it must not have output validators, which are incompatible with a per-run `output_type`.
     Mutually exclusive with `model`/`instructions`."""
 
-    every: int = 10
+    every: _PositiveInt = 10
     """Evaluate every N model requests within the run."""
 
-    window: int = 20_000
+    window: _PositiveInt = 20_000
     """Sliding token window: each evaluation sees at most this many tokens of the most
     recent trajectory (estimated at ~4 characters per token), rendered as a transcript."""
 
@@ -148,14 +146,12 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     """Optional observability callback invoked with each verdict after it is processed
     (after any steering has been enqueued)."""
 
-    _judge: Agent[None, object] = field(init=False, repr=False, compare=False)
-    _steps: int = field(default=0, init=False, repr=False, compare=False)
-    _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
-    _claim_held: bool = field(default=False, init=False, repr=False, compare=False)
+    _judge: Agent[None, object] = PrivateAttr()
+    _steps: int = PrivateAttr(default=0)
+    _task: asyncio.Task[None] | None = PrivateAttr(default=None)
+    _claim_held: bool = PrivateAttr(default=False)
 
-    def __post_init__(self) -> None:
-        _validate_positive_int('every', self.every)
-        _validate_positive_int('window', self.window)
+    def model_post_init(self, context: object, /) -> None:
         if self.agent is None:
             if self.model is None:
                 raise ValueError('Provide a judge `model` (with optional `instructions`) or a full judge `agent`.')
@@ -166,6 +162,8 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
             # enforces the verdict contract for built-in and caller-supplied judges alike.
             self._judge = Agent(self.model, instructions=instructions)
         else:
+            if not _is_agent(self.agent):
+                raise ValueError('`agent` must be an `Agent` instance.')
             if self.model is not None:
                 raise ValueError('Provide either a judge `model` or a full judge `agent`, not both.')
             if self.instructions is not None:
@@ -182,10 +180,11 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> TrajectoryJudge[AgentDepsT]:
         """Return a fresh per-run instance so step counts and in-flight evaluations are not shared.
 
-        `replace` re-runs `__init__` and `__post_init__`, resetting the `init=False` fields:
-        `_steps` to `0`, `_task` to `None`, and `_judge` rebuilt from the same config.
+        Reconstructing from the public model fields resets the private run state and rebuilds
+        `_judge`. `model_copy` is deliberately not used because it copies private attributes.
         """
-        return replace(self)
+        values = {name: getattr(self, name) for name in type(self).model_fields}
+        return type(self)(**values)
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Reject a judged run inside a durable workflow or flow, before any budget is spent.
@@ -336,8 +335,8 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         """The attribution name: `name`, then the judge `agent`'s name, then the default."""
         if self.name is not None:
             return self.name
-        if self.agent is not None and self.agent.name is not None:
-            return self.agent.name
+        if self.agent is not None and self._judge.name is not None:
+            return self._judge.name
         return 'trajectory-judge'
 
     @classmethod
@@ -357,6 +356,11 @@ def _claim_offset_limits(limits: UsageLimits | None) -> UsageLimits | None:
     if limits is None or limits.request_limit is None:
         return limits
     return replace(limits, request_limit=limits.request_limit + 1)
+
+
+def _is_agent(value: object) -> TypeGuard[Agent[None, object]]:
+    """Narrow a Pydantic-validated arbitrary value to the judge agent type."""
+    return isinstance(value, Agent)
 
 
 def _judge_prompt(messages: Sequence[ModelMessage], window: int) -> str:
