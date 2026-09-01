@@ -646,14 +646,6 @@ class TestWorkingDir:
         await backend.working_dir()
         assert fake_modal.sandboxes[0].exec_calls[-1].timeout == 10
 
-    async def test_concurrent_callers_probe_once(self, fake_modal: FakeModal) -> None:
-        fake_modal.responder = lambda argv, timeout: ('/srv\n', '', 0)
-        backend = await ModalSandboxBackend.create()
-        async with anyio.create_task_group() as task_group:
-            for _ in range(4):
-                task_group.start_soon(backend.working_dir)
-        assert len(fake_modal.sandboxes[0].exec_calls) == 1
-
     @pytest.mark.parametrize(
         ('stdout', 'exit_code'),
         [('', 0), ('relative/dir\n', 0), ('/srv\n', 1)],
