@@ -84,7 +84,7 @@ agent = Agent(
 
 ## Advanced: bring your own judge agent
 
-For anything beyond a model and a review focus (model settings, toolsets, fallback models, custom instructions), pass a full `Agent` instead of piling knobs onto the capability. Every evaluation runs it with `output_type=[AllGood, Steer]`, so the verdict contract is enforced at the run boundary whatever output type the agent was configured with, and an existing agent can be reused as-is. The one constraint: the judge agent must not have output validators, which are incompatible with a per-run `output_type`.
+For anything beyond a model and a review focus (model settings, toolsets, fallback models, custom instructions), pass a full `Agent` instead of piling knobs onto the capability. Every evaluation runs it with `output_type=[AllGood, Steer]`, so the verdict contract is enforced at the run boundary whatever output type the agent was configured with, and an existing agent can be reused as-is only when it is dependency-free; judge dependencies are not passed to evaluations. The one constraint: the judge agent must not have output validators, which are incompatible with a per-run `output_type`.
 
 ```python
 from pydantic_ai import Agent
