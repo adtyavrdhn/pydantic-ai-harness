@@ -440,7 +440,6 @@ class ModalSandboxBackend:
         """The underlying `modal.Sandbox`, for provider-specific functionality."""
         self.fs = _ModalFilesystem(self)
         self._working_dir = working_dir
-        self._working_dir_lock = anyio.Lock()
         self._sandbox_timeout = sandbox_timeout
 
     @property
@@ -624,22 +623,20 @@ class ModalSandboxBackend:
         """The sandbox's default working directory (absolute POSIX path)."""
         # Modal exposes no API for a running sandbox's working directory -- it is the image's
         # unless `create(workdir=...)` overrode it -- so ask the environment itself. It cannot
-        # change, so one answer serves the sandbox's whole life. The lock single-flights the
-        # probe: without it a batch of concurrent tool calls would each run their own `pwd`.
+        # change, so the probe is an idempotent read: overlapping first calls may each run
+        # their own `pwd`, get the same answer, and the cache converges. No lock needed.
         if self._working_dir is None:
-            async with self._working_dir_lock:
-                if self._working_dir is None:
-                    result = await self.run(['pwd'], timeout=_INTERNAL_EXEC_TIMEOUT)
-                    printed = result.stdout.strip()
-                    # Only an absolute path is an answer. Caching whatever else the environment
-                    # printed would hand every later `resolve()` a working directory that is not
-                    # one, mis-resolving relative paths with no error.
-                    if result.exit_code != 0 or not posixpath.isabs(printed):
-                        raise ModalSandboxError(
-                            f'Could not determine the working directory of Modal sandbox {self.sandbox_id!r}: '
-                            f'`pwd` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
-                        )
-                    self._working_dir = printed
+            result = await self.run(['pwd'], timeout=_INTERNAL_EXEC_TIMEOUT)
+            printed = result.stdout.strip()
+            # Only an absolute path is an answer. Caching whatever else the environment
+            # printed would hand every later `resolve()` a working directory that is not
+            # one, mis-resolving relative paths with no error.
+            if result.exit_code != 0 or not posixpath.isabs(printed):
+                raise ModalSandboxError(
+                    f'Could not determine the working directory of Modal sandbox {self.sandbox_id!r}: '
+                    f'`pwd` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
+                )
+            self._working_dir = printed
         return self._working_dir
 
     async def run(
