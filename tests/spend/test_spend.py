@@ -827,7 +827,7 @@ class TestCompositionWarning:
             if dispatches_inline:
                 await agent.run('hi')
                 assert (await guard.status())[0].spent.usd == Decimal('1')
-            else:
+            else:  # pragma: no cover - old-version path
                 with pytest.raises(Exception, match='Not in workflow event loop'):
                     await agent.run('hi')
 
