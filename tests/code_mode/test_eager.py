@@ -241,7 +241,7 @@ class TestEagerExecution:
 
         def stale(value: str) -> None:
             """Record an obsolete nested call if the eager queue reaches it."""
-            stale_calls.append(value)
+            stale_calls.append(value)  # pragma: no cover - reaching this line fails the assertion below
 
         ctx = build_run_context(None)
         ctx.tool_manager = None
