@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from aws_durable_execution_sdk_python import durable_execution  # pyright: ignore[reportUnknownVariableType]
-from aws_durable_execution_sdk_python.config import StepSemantics
+from aws_durable_execution_sdk_python.config import StepConfig, StepSemantics
 from aws_durable_execution_sdk_python.exceptions import ExecutionError
 from aws_durable_execution_sdk_python.retries import RetryPresets
 from aws_durable_execution_sdk_python.serdes import DEFAULT_JSON_SERDES
@@ -41,6 +41,7 @@ from pydantic_ai.toolsets.external import ExternalToolset
 from pydantic_ai_harness.aws_lambda import (
     AWSLambdaDurability,
     _bridge,  # pyright: ignore[reportPrivateUsage]
+    _operation_backend,  # pyright: ignore[reportPrivateUsage]
     durable_agent_handler,
     run_durable,
 )
@@ -434,6 +435,20 @@ class TestStepConfig:
             match=rf"Invalid 'aws_lambda' step config value for '{key}': expected {expected}, got",
         ):
             AWSLambdaDurability(step_config={key: value})
+
+    def test_new_sdk_step_config_field_passes_through_unvalidated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def future_step_config(**config: Any) -> object:
+            config.pop('timeout')
+            return StepConfig(**config)
+
+        monkeypatch.setattr(
+            _operation_backend, '_STEP_CONFIG_FIELDS', _operation_backend._STEP_CONFIG_FIELDS | {'timeout'}
+        )
+        monkeypatch.setattr(_operation_backend, 'StepConfig', future_step_config)
+
+        capability = AWSLambdaDurability(step_config={'timeout': 30.0})
+
+        assert capability is not None
 
     def test_unknown_per_tool_config_key_is_rejected(self) -> None:
         toolset = FunctionToolset[object](id='tools')

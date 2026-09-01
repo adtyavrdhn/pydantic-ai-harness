@@ -30,6 +30,11 @@ _STEP_SEMANTICS_ADAPTER = TypeAdapter(StepSemantics)
 _SERDES_ADAPTER: TypeAdapter[SerDes[object] | None] = TypeAdapter(
     SerDes | None, config=ConfigDict(arbitrary_types_allowed=True)
 )  # pyright: ignore[reportUnknownArgumentType]
+_STEP_CONFIG_VALUE_ADAPTERS = {
+    'retry_strategy': (_RETRY_STRATEGY_ADAPTER, 'a callable or None'),
+    'step_semantics': (_STEP_SEMANTICS_ADAPTER, 'StepSemantics'),
+    'serdes': (_SERDES_ADAPTER, 'SerDes or None'),
+}
 
 
 class AWSLambdaOperationConfig(RoleBasedOperationConfig[StepConfig | None]):
@@ -103,21 +108,13 @@ def _parse_step_config(config: Mapping[str, Any] | None) -> StepConfig | None:
 
 
 def _validate_step_config_value(key: str, value: object) -> None:
-    try:
-        if key == 'retry_strategy':
-            _RETRY_STRATEGY_ADAPTER.validate_python(value, strict=True)
-            return
-        if key == 'step_semantics':
-            _STEP_SEMANTICS_ADAPTER.validate_python(value, strict=True)
-            return
-        _SERDES_ADAPTER.validate_python(value, strict=True)
+    adapter_config = _STEP_CONFIG_VALUE_ADAPTERS.get(key)
+    if adapter_config is None:
         return
+    adapter, expected = adapter_config
+    try:
+        adapter.validate_python(value, strict=True)
     except ValidationError:
-        expected = {
-            'retry_strategy': 'a callable or None',
-            'step_semantics': 'StepSemantics',
-            'serdes': 'SerDes or None',
-        }[key]
         raise UserError(
             f'Invalid {_TOOL_CONFIG_KEY!r} step config value for {key!r}: expected {expected}, '
             f'got {type(value).__name__}.'
