@@ -6,7 +6,8 @@ invocation that times out, fails, or is retried resumes from the last completed 
 replaying the work.
 
 Lambda's durable API is synchronous and an agent run is async, so the capability drives every
-step through the bridge in `_bridge.py`. See `run_durable`, which is how a handler enters a run.
+step through the bridge in `_bridge.py`. See `durable_agent_handler`, which adapts an async handler
+body, and `run_durable`, the lower-level bridge entrypoint.
 """
 
 from __future__ import annotations
@@ -47,8 +48,8 @@ _TOOL_CONFIG_KEY = 'aws_lambda'
 class AWSLambdaDurability(BaseDurabilityCapability[AgentDepsT]):
     """Capability that checkpoints an agent's I/O into AWS Lambda durable steps.
 
-    Attach it with `capabilities=[AWSLambdaDurability()]` and enter the run from a durable handler
-    with `run_durable`: every model request, function tool call, MCP call, and dynamic-toolset
+    Attach it with `capabilities=[AWSLambdaDurability()]` and decorate an async handler with
+    `durable_agent_handler`: every model request, function tool call, MCP call, and dynamic-toolset
     resolution is wrapped in `DurableContext.step(...)`. A completed step is served from its
     checkpoint when the execution resumes, so finished work is not repeated and tokens are not
     re-spent.
@@ -68,7 +69,7 @@ class AWSLambdaDurability(BaseDurabilityCapability[AgentDepsT]):
         ```python {test="skip"}
         from aws_durable_execution_sdk_python import DurableContext, durable_execution
         from pydantic_ai import Agent
-        from pydantic_ai_harness.aws_lambda import AWSLambdaDurability, run_durable
+        from pydantic_ai_harness.aws_lambda import AWSLambdaDurability, durable_agent_handler
 
         agent = Agent('bedrock:us.amazon.nova-pro-v1:0', name='support', capabilities=[AWSLambdaDurability()])
 
@@ -79,8 +80,9 @@ class AWSLambdaDurability(BaseDurabilityCapability[AgentDepsT]):
 
 
         @durable_execution
-        def handler(event: dict[str, object], context: DurableContext) -> str:
-            result = run_durable(lambda: agent.run(str(event['prompt'])), context=context)
+        @durable_agent_handler
+        async def handler(event: dict[str, object], context: DurableContext) -> str:
+            result = await agent.run(str(event['prompt']))
             return result.output
         ```
     """

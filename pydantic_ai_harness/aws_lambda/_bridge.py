@@ -25,13 +25,15 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import functools
+import inspect
 import threading
 from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from queue import Queue
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, overload
 
 from pydantic_ai.exceptions import UserError
 
@@ -377,6 +379,76 @@ def current_bridge() -> StepBridge | None:
 
 def in_durable_context() -> bool:
     return _active_bridge.get() is not None
+
+
+@overload  # pragma: no cover - typing-only overload
+def durable_agent_handler(
+    func: Callable[[Any, DurableStepContext], Coroutine[Any, Any, T]],
+    /,
+) -> Callable[[Any, DurableStepContext], T]: ...
+
+
+@overload  # pragma: no cover - typing-only overload
+def durable_agent_handler(
+    func: None = None,
+    /,
+    *,
+    cancel_timeout: float = DEFAULT_CANCEL_TIMEOUT_SECONDS,
+) -> Callable[
+    [Callable[[Any, DurableStepContext], Coroutine[Any, Any, T]]],
+    Callable[[Any, DurableStepContext], T],
+]: ...
+
+
+def durable_agent_handler(
+    func: Callable[[Any, DurableStepContext], Coroutine[Any, Any, T]] | None = None,
+    /,
+    *,
+    cancel_timeout: float = DEFAULT_CANCEL_TIMEOUT_SECONDS,
+) -> (
+    Callable[[Any, DurableStepContext], T]
+    | Callable[
+        [Callable[[Any, DurableStepContext], Coroutine[Any, Any, T]]],
+        Callable[[Any, DurableStepContext], T],
+    ]
+):
+    """Adapt an async handler body for the AWS durable execution decorator.
+
+    `@durable_execution` must be outermost because its synchronous wrapper is what Lambda invokes.
+
+    Example:
+        ```python {test="skip"}
+        @durable_execution
+        @durable_agent_handler
+        async def handler(event: dict[str, Any], context: DurableContext) -> str:
+            result = await agent.run(event['prompt'])
+            return result.output
+        ```
+
+    Args:
+        func: Async durable handler body.
+        cancel_timeout: Seconds to wait for an abandoned handler body to unwind. See `run_durable`.
+    """
+
+    def decorate(
+        handler: Callable[[Any, DurableStepContext], Coroutine[Any, Any, T]],
+    ) -> Callable[[Any, DurableStepContext], T]:
+        if not inspect.iscoroutinefunction(handler):
+            raise UserError(
+                '`@durable_agent_handler` requires an async handler. `@durable_execution` must be the '
+                'outermost decorator because it is what Lambda invokes. A synchronous handler should '
+                'call `run_durable` directly instead.'
+            )
+
+        @functools.wraps(handler)
+        def wrapped(event: Any, context: DurableStepContext) -> T:
+            return run_durable(lambda: handler(event, context), context=context, cancel_timeout=cancel_timeout)
+
+        return wrapped
+
+    if func is None:
+        return decorate
+    return decorate(func)
 
 
 def run_durable(

@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
+from aws_durable_execution_sdk_python import durable_execution  # pyright: ignore[reportUnknownVariableType]
 from aws_durable_execution_sdk_python.config import StepSemantics
 from aws_durable_execution_sdk_python.exceptions import ExecutionError
 from pydantic_ai import Agent, RunContext
@@ -38,6 +39,7 @@ from pydantic_ai.toolsets.external import ExternalToolset
 from pydantic_ai_harness.aws_lambda import (
     AWSLambdaDurability,
     _bridge,  # pyright: ignore[reportPrivateUsage]
+    durable_agent_handler,
     run_durable,
 )
 
@@ -126,6 +128,64 @@ class TestDurableRun:
             run_durable(lambda: agent.run('go'), context=ctx)
 
         assert [op.status for op in ctx.failed] == ['failed']
+
+
+class TestDurableAgentHandler:
+    def test_runs_async_handler(self) -> None:
+        agent = Agent(TestModel(custom_output_text='done'), name='a', capabilities=[AWSLambdaDurability()])
+        ctx = FakeDurableContext()
+
+        @durable_agent_handler
+        async def handler(event: dict[str, str], context: _bridge.DurableStepContext) -> str:
+            result = await agent.run(event['prompt'])
+            return result.output
+
+        assert handler({'prompt': 'go'}, ctx) == 'done'
+        assert ctx.step_names == ['a__model.request']
+
+    def test_parameterized_form_passes_cancel_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        received: list[float] = []
+
+        def fake_run_durable(agent_run: Any, *, context: _bridge.DurableStepContext, cancel_timeout: float) -> str:
+            del agent_run, context
+            received.append(cancel_timeout)
+            return 'done'
+
+        monkeypatch.setattr(_bridge, 'run_durable', fake_run_durable)
+
+        @durable_agent_handler(cancel_timeout=30)
+        async def handler(event: object, context: _bridge.DurableStepContext) -> str:
+            del event, context
+            return 'unused'
+
+        assert handler({}, FakeDurableContext()) == 'done'
+        assert received == [30]
+
+    def test_wrong_decorator_order_is_rejected(self) -> None:
+        async def handler(event: object, context: object) -> None:
+            del event, context
+
+        sdk_wrapped = durable_execution(handler)
+        with pytest.raises(
+            UserError,
+            match='`@durable_execution` must be the outermost decorator.*synchronous handler should call `run_durable`',
+        ):
+            durable_agent_handler(sdk_wrapped)  # pyright: ignore[reportCallIssue, reportArgumentType]
+
+    def test_multiple_agent_runs_share_one_handler_invocation(self) -> None:
+        first = Agent(TestModel(custom_output_text='one'), name='first', capabilities=[AWSLambdaDurability()])
+        second = Agent(TestModel(custom_output_text='two'), name='second', capabilities=[AWSLambdaDurability()])
+        ctx = FakeDurableContext()
+
+        @durable_agent_handler
+        async def handler(event: object, context: _bridge.DurableStepContext) -> tuple[str, str]:
+            del event, context
+            first_result = await first.run('go')
+            second_result = await second.run('go')
+            return first_result.output, second_result.output
+
+        assert handler({}, ctx) == ('one', 'two')
+        assert ctx.step_names == ['first__model.request', 'second__model.request']
 
 
 class TestCapabilityOperation:

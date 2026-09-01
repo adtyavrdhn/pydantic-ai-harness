@@ -20,8 +20,8 @@ The AWS Durable Execution SDK requires Python 3.11 or newer.
 
 ## Quick start
 
-Attach the capability when you build the agent, and enter the run from the durable handler with
-`run_durable`:
+Attach the capability when you build the agent, then adapt an async handler body with
+`durable_agent_handler`:
 
 ```python {title="handler.py" test="skip" lint="skip"}
 from typing import Any
@@ -29,7 +29,7 @@ from typing import Any
 from aws_durable_execution_sdk_python import DurableContext, durable_execution
 from pydantic_ai import Agent
 
-from pydantic_ai_harness.aws_lambda import AWSLambdaDurability, run_durable
+from pydantic_ai_harness.aws_lambda import AWSLambdaDurability, durable_agent_handler
 
 agent = Agent(
     'bedrock:us.amazon.nova-pro-v1:0',
@@ -44,8 +44,9 @@ def get_weather(city: str) -> str:
 
 
 @durable_execution
-def handler(event: dict[str, Any], context: DurableContext) -> str:
-    result = run_durable(lambda: agent.run(str(event['prompt'])), context=context)
+@durable_agent_handler
+async def handler(event: dict[str, Any], context: DurableContext) -> str:
+    result = await agent.run(str(event['prompt']))
     return result.output
 ```
 
@@ -69,10 +70,11 @@ aws lambda create-function \
 aws lambda publish-version --function-name support-agent
 ```
 
-!!! warning "A run is durable only inside `run_durable`"
+!!! warning "A run is durable only inside the durable handler bridge"
     Attaching `AWSLambdaDurability` does not by itself make a run durable. Only a run entered through
-    `run_durable` is checkpointed. Calling `agent.run_sync(...)`, or awaiting the agent from your
-    own `asyncio.run(...)`, produces a fully working but **non-durable** run, with no warning.
+    `durable_agent_handler` or `run_durable` is checkpointed. Calling `agent.run_sync(...)`, or
+    awaiting the agent from your own `asyncio.run(...)`, produces a fully working but
+    **non-durable** run, with no warning.
 
 ## Requirements
 
@@ -86,15 +88,24 @@ as `<agent>`, so `@agent.tool_plain def get_weather` is checkpointed as
 ## How the sync handler and the async agent connect
 
 Lambda's durable API is synchronous: `context.step(...)` blocks, and every step has to be created
-on the thread Lambda invoked. An agent run is async. `run_durable` bridges the two: it hosts the
-agent run on a background event loop and services its steps on the handler thread, so all steps are
-created in one continuous sequence. A step body hands its work back to the agent loop and blocks
-until it finishes, which keeps the loop free while the handler thread waits.
+on the thread Lambda invoked. An agent run is async. `durable_agent_handler` uses `run_durable` to
+bridge the two: it hosts the async handler body on a background event loop and services its steps
+on the Lambda handler thread, so all steps are created in one continuous sequence. A step body
+hands its work back to the agent loop and blocks until it finishes, which keeps the loop free while
+the handler thread waits.
 
-Two consequences are worth knowing:
+The async body can await two agent runs, use `asyncio.gather`, or perform async post-processing
+between runs, and all of those sections share the same bridge and step sequence. A synchronous
+handler must call `run_durable` separately for each async section, and concurrent calls are
+rejected.
 
+Three consequences are worth knowing:
+
+- `@durable_execution` must be the outermost decorator because its wrapper is what Lambda invokes.
+  Reversing the order raises a `UserError` when the handler is defined.
 - `run_durable` blocks the calling thread, so it cannot be called from inside a running event loop.
-  Call it directly from the synchronous handler.
+  Call it directly from a synchronous handler. It remains available when the bridge needs to be
+  entered somewhere other than the top of a handler.
 - Durable steps cannot nest. A tool that starts another durable agent run is rejected with an
   explanatory error rather than deadlocking.
 
