@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from copy import copy
-from dataclasses import dataclass, field, replace
+from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Generic, Literal, TypeGuard
 
 from pydantic_ai import Agent
@@ -121,6 +121,10 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
     on_fire: Callable[[str], None] | None = None
     """Optional observability callback invoked with each rendered reminder as it fires."""
 
+    # Override the inherited default ID because durable-operation recovery needs a stable identity.
+    _: KW_ONLY
+    id: str | None = 'system_reminders'
+
     _request_count: int = field(default=0, init=False, repr=False, compare=False)
     # Keyed by `id(reminder)`, not list index: a user callback that inserts or removes a
     # reminder mid-run must not shift another reminder onto a stale budget.
@@ -226,9 +230,12 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
         # mutate the public sequence while this request is in progress.
         self._dynamic_snapshot = tuple(self.dynamic_reminders)
         for index, dynamic in enumerate(self._dynamic_snapshot):
-            if isinstance(dynamic, LLMReminder):
+            if (
+                isinstance(dynamic, LLMReminder) and type(dynamic).__call__ is LLMReminder.__call__  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+            ):
                 try:
-                    result, error_type = await self._generate_reminder(ctx, index)
+                    transcript = _build_compact_transcript(ctx.messages, dynamic.max_context_messages)
+                    result, error_type = await self._generate_reminder(ctx, index, transcript)
                 except Exception:
                     result, error_type = None, 'DurabilityError'
                 if error_type is not None:
@@ -242,12 +249,14 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
         return texts
 
     @durable_operation('generate_reminder')
-    async def _generate_reminder(self, ctx: RunContext[AgentDepsT], index: int) -> tuple[str | None, str | None]:
+    async def _generate_reminder(
+        self, ctx: RunContext[AgentDepsT], index: int, transcript: str
+    ) -> tuple[str | None, str | None]:
         reminder = self._dynamic_snapshot[index]
         if not _is_llm_reminder(reminder):  # pragma: no cover - operation inputs originate above
             raise RuntimeError(f'Dynamic reminder {index} is no longer an LLMReminder.')
         try:
-            return await reminder._generate(ctx), None  # pyright: ignore[reportPrivateUsage]
+            return await reminder._generate_from_transcript(ctx, transcript), None  # pyright: ignore[reportPrivateUsage]
         except Exception as exc:
             # Reminders are best-effort. Journal the fallback decision rather than inheriting an
             # engine's potentially unbounded retry policy and stalling the agent run.
@@ -323,11 +332,14 @@ class LLMReminder(Generic[AgentDepsT]):
 
     async def _generate(self, ctx: RunContext[AgentDepsT]) -> str | None:
         """Generate without fallback so a durability engine can retry transient failures."""
+        transcript = _build_compact_transcript(ctx.messages, self.max_context_messages)
+        return await self._generate_from_transcript(ctx, transcript)
+
+    async def _generate_from_transcript(self, ctx: RunContext[AgentDepsT], transcript: str) -> str | None:
         agent = self._agent
         if agent is None:
             agent = Agent(self.model, instructions=self.instructions, output_type=str)
             self._agent = agent
-        transcript = _build_compact_transcript(ctx.messages, self.max_context_messages)
         result = await agent.run(transcript, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
         text = result.output.strip()
         return text or None
