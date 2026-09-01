@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, TypeAlias, runtime_checkable
@@ -358,7 +359,7 @@ def _claim_offset_limits(limits: UsageLimits | None) -> UsageLimits | None:
 
 def _judge_prompt(messages: Sequence[ModelMessage], window: int) -> str:
     """The judge's user prompt: the rendered trajectory, clamped to the window's tail."""
-    transcript = _render_transcript(messages)
+    transcript = html.escape(_render_transcript(messages), quote=False)
     max_chars = window * _CHARS_PER_TOKEN
     if len(transcript) > max_chars:
         transcript = transcript[-max_chars:]
