@@ -83,7 +83,7 @@ class _FakeRealtimeModel(AbstractModel):
         return 'openai'
 
 
-def _ctx(model: Any = None) -> Any:
+def _ctx(model: Any = None, *, messages: list[ModelMessage] | None = None) -> Any:
     """Minimal `RunContext`-like object for driving hooks."""
 
     @dataclasses.dataclass
@@ -95,7 +95,11 @@ def _ctx(model: Any = None) -> Any:
         deps: None = None
         tracer: Tracer = dataclasses.field(default_factory=NoOpTracer)
 
-    return _FakeCtx(model=model) if model is not None else _FakeCtx()
+    return (
+        _FakeCtx(model=model, messages=list(messages or ()))
+        if model is not None
+        else _FakeCtx(messages=list(messages or ()))
+    )
 
 
 def _request_context(
@@ -281,7 +285,9 @@ class TestFractionTriggers:
         capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_fraction=0.1, keep_messages=2)
         request_context = _request_context(_history(6))
 
-        await capability.before_model_request(_ctx(), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(messages=request_context.messages), request_context
+        )
 
         assert len(request_context.messages) < 12
 
@@ -290,7 +296,9 @@ class TestFractionTriggers:
         capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_fraction=0.9, keep_messages=2)
         request_context = _request_context(_history(6))
 
-        await capability.before_model_request(_ctx(), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(messages=request_context.messages), request_context
+        )
 
         assert len(request_context.messages) == 12
 
@@ -300,11 +308,11 @@ class TestFractionTriggers:
 
         _fixed_window(monkeypatch, 100)
         small = _request_context(_history(6))
-        await capability.before_model_request(_ctx(), small)
+        small = await capability.before_model_request(_ctx(messages=small.messages), small)
 
         _fixed_window(monkeypatch, 10_000_000)
         large = _request_context(_history(6))
-        await capability.before_model_request(_ctx(), large)
+        large = await capability.before_model_request(_ctx(messages=large.messages), large)
 
         assert len(small.messages) < len(large.messages)
 
@@ -313,7 +321,10 @@ class TestFractionTriggers:
         capability: ClearToolResults[None] = ClearToolResults(max_fraction=0.9)
         request_context = _request_context(_history(2))
 
-        assert await capability.before_model_request(_ctx(), request_context) is request_context
+        assert (
+            await capability.before_model_request(_ctx(messages=request_context.messages), request_context)
+            is request_context
+        )
 
     async def test_clear_tool_results_clears_when_over_the_fraction(self, monkeypatch: pytest.MonkeyPatch):
         """Asserting the negative alone cannot tell a working trigger from one that never fires."""
@@ -321,7 +332,9 @@ class TestFractionTriggers:
         capability: ClearToolResults[None] = ClearToolResults(max_fraction=0.1, keep_pairs=1)
         request_context = _request_context(_tool_history(4))
 
-        await capability.before_model_request(_ctx(), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(messages=request_context.messages), request_context
+        )
 
         assert _tool_return_contents(request_context.messages).count(_CLEARED) == 3
 
@@ -330,7 +343,10 @@ class TestFractionTriggers:
         capability: DeduplicateFileReads[None] = DeduplicateFileReads(file_key=lambda call: None, max_fraction=0.9)
         request_context = _request_context(_history(2))
 
-        assert await capability.before_model_request(_ctx(), request_context) is request_context
+        assert (
+            await capability.before_model_request(_ctx(messages=request_context.messages), request_context)
+            is request_context
+        )
 
     async def test_deduplicate_file_reads_drops_stale_reads_over_the_fraction(
         self, monkeypatch: pytest.MonkeyPatch
@@ -342,7 +358,9 @@ class TestFractionTriggers:
         )
         request_context = _request_context(_tool_history(3, tool_name='read_file', path='a.py'))
 
-        await capability.before_model_request(_ctx(), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(messages=request_context.messages), request_context
+        )
 
         contents = _tool_return_contents(request_context.messages)
         assert contents.count(_SUPERSEDED) == 2, 'only the newest read of a.py should survive'
@@ -364,7 +382,9 @@ class TestFractionTriggers:
         summary.output = 'a summary'
         with patch('pydantic_ai.Agent') as agent_class:
             agent_class.return_value.run = AsyncMock(return_value=summary)
-            await capability.before_model_request(_ctx(), request_context)
+            request_context = await capability.before_model_request(
+                _ctx(messages=request_context.messages), request_context
+            )
 
         assert len(request_context.messages) < 12
         assert any('a summary' in _message_text(message) for message in request_context.messages)
@@ -455,7 +475,9 @@ class TestRequestModelIsTheOneResolved:
         capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_fraction=0.1, keep_messages=2)
         request_context = _request_context(_history(6), self.REQUEST)
 
-        await capability.before_model_request(_ctx(self.RUN), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(self.RUN, messages=request_context.messages), request_context
+        )
 
         assert len(request_context.messages) < 12, "the run model's window would not have triggered"
 
@@ -464,7 +486,9 @@ class TestRequestModelIsTheOneResolved:
         capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_fraction=0.1, keep_messages=2)
         request_context = _request_context(_history(6), self.REQUEST)
 
-        await capability.before_model_request(_ctx(self.RUN), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(self.RUN, messages=request_context.messages), request_context
+        )
 
         assert len(request_context.messages) == 12, "the run model's window would have triggered"
 
@@ -473,21 +497,30 @@ class TestRequestModelIsTheOneResolved:
         capability: SummarizingCompaction[None] = SummarizingCompaction(max_fraction=0.1)
         request_context = _request_context(_history(6), self.REQUEST)
 
-        assert await capability.before_model_request(_ctx(self.RUN), request_context) is request_context
+        assert (
+            await capability.before_model_request(_ctx(self.RUN, messages=request_context.messages), request_context)
+            is request_context
+        )
 
     async def test_clear_tool_results(self, monkeypatch: pytest.MonkeyPatch):
         self._windows(monkeypatch, run=1_000, request=10_000_000)
         capability: ClearToolResults[None] = ClearToolResults(max_fraction=0.1)
         request_context = _request_context(_history(6), self.REQUEST)
 
-        assert await capability.before_model_request(_ctx(self.RUN), request_context) is request_context
+        assert (
+            await capability.before_model_request(_ctx(self.RUN, messages=request_context.messages), request_context)
+            is request_context
+        )
 
     async def test_deduplicate_file_reads(self, monkeypatch: pytest.MonkeyPatch):
         self._windows(monkeypatch, run=1_000, request=10_000_000)
         capability: DeduplicateFileReads[None] = DeduplicateFileReads(file_key=lambda call: None, max_fraction=0.1)
         request_context = _request_context(_history(6), self.REQUEST)
 
-        assert await capability.before_model_request(_ctx(self.RUN), request_context) is request_context
+        assert (
+            await capability.before_model_request(_ctx(self.RUN, messages=request_context.messages), request_context)
+            is request_context
+        )
 
     async def test_tiered_compaction(self, monkeypatch: pytest.MonkeyPatch):
         self._windows(monkeypatch, run=10_000_000, request=1_000)
@@ -497,7 +530,9 @@ class TestRequestModelIsTheOneResolved:
         )
         request_context = _request_context(_history(6), self.REQUEST)
 
-        await capability.before_model_request(_ctx(self.RUN), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(self.RUN, messages=request_context.messages), request_context
+        )
 
         assert len(request_context.messages) < 12
 
@@ -520,7 +555,9 @@ class TestRequestModelIsTheOneResolved:
         )
         request_context = _request_context(_history(6), self.REQUEST)
 
-        await capability.before_model_request(_ctx(self.RUN), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(self.RUN, messages=request_context.messages), request_context
+        )
 
         assert len(request_context.messages) < 12
 
@@ -536,7 +573,8 @@ class TestRequestModelIsTheOneResolved:
 
         capability: TieredCompaction[None] = TieredCompaction(tiers=[_Recording()], target_fraction=0.1)
 
-        await capability.before_model_request(_ctx(self.RUN), _request_context(_history(6), self.REQUEST))
+        request_context = _request_context(_history(6), self.REQUEST)
+        await capability.before_model_request(_ctx(self.RUN, messages=request_context.messages), request_context)
 
         assert seen == [self.REQUEST]
 
@@ -608,7 +646,7 @@ class TestStrategyFallbackWindow:
         )
         request_context = _request_context(_history(6))
 
-        await capability.before_model_request(_ctx(), request_context)
+        await capability.before_model_request(_ctx(messages=request_context.messages), request_context)
 
         assert len(request_context.messages) == 12, 'the 200K default would have triggered'
 
@@ -621,14 +659,19 @@ class TestStrategyFallbackWindow:
         )
         request_context = _request_context(_history(6))
 
-        assert await capability.before_model_request(_ctx(), request_context) is request_context
+        assert (
+            await capability.before_model_request(_ctx(messages=request_context.messages), request_context)
+            is request_context
+        )
 
     async def test_limit_warner_uses_the_configured_fallback(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, None)
         capability: WarnNearLimits[None] = WarnNearLimits(max_context_fraction=0.9, fallback_context_window=10_000_000)
         request_context = _request_context(_history(6))
 
-        await capability.before_model_request(_ctx(), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(messages=request_context.messages), request_context
+        )
 
         assert len(request_context.messages) == 12, 'the 200K default would have warned'
 
@@ -662,7 +705,9 @@ class TestTriggerBoundary:
         )
         request_context = _request_context(messages)
 
-        await capability.before_model_request(_ctx(), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(messages=request_context.messages), request_context
+        )
 
         assert len(request_context.messages) < 6
 
@@ -713,7 +758,9 @@ class TestProgressiveToolSchemas:
         )
         request_context = _request_context(messages, model_request_parameters=parameters)
 
-        await capability.before_model_request(_ctx(), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(messages=request_context.messages), request_context
+        )
 
         assert len(request_context.messages) == 1
 
@@ -747,7 +794,9 @@ class TestStrategyWindowOverride:
         )
         request_context = _request_context(_history(6))
 
-        await capability.before_model_request(_ctx(), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(messages=request_context.messages), request_context
+        )
 
         assert len(request_context.messages) < 12, 'the resolved 1M window would not have triggered'
 
@@ -758,7 +807,7 @@ class TestStrategyWindowOverride:
         )
         request_context = _request_context(_history(6))
 
-        await capability.before_model_request(_ctx(), request_context)
+        await capability.before_model_request(_ctx(messages=request_context.messages), request_context)
 
         assert len(request_context.messages) == 12, 'the fallback would have triggered'
 
@@ -771,7 +820,10 @@ class TestStrategyWindowOverride:
         )
         request_context = _request_context(messages)
 
-        assert await capability.before_model_request(_ctx(), request_context) is request_context
+        assert (
+            await capability.before_model_request(_ctx(messages=request_context.messages), request_context)
+            is request_context
+        )
         assert len(request_context.messages) == 6, 'a trigger scaled by context_window=10 would have compacted'
 
     @pytest.mark.parametrize(('name', 'factory'), _OVERRIDE_FACTORIES, ids=[n for n, _ in _OVERRIDE_FACTORIES])
@@ -792,7 +844,9 @@ class TestTieredTargetFraction:
         )
         request_context = _request_context(_history(6))
 
-        await capability.before_model_request(_ctx(), request_context)
+        request_context = await capability.before_model_request(
+            _ctx(messages=request_context.messages), request_context
+        )
 
         assert len(request_context.messages) < 12
 
@@ -804,7 +858,10 @@ class TestTieredTargetFraction:
         )
         request_context = _request_context(_history(2))
 
-        assert await capability.before_model_request(_ctx(), request_context) is request_context
+        assert (
+            await capability.before_model_request(_ctx(messages=request_context.messages), request_context)
+            is request_context
+        )
 
     def test_requires_one_target(self):
         with pytest.raises(ValueError, match='One of target_tokens or target_fraction must be set'):
@@ -821,7 +878,7 @@ class TestLimitWarnerFraction:
         capability: WarnNearLimits[None] = WarnNearLimits(max_context_fraction=0.1, warning_threshold=0.5)
         request_context = _request_context(_history(6))
 
-        await capability.before_model_request(_ctx(), request_context)
+        await capability.before_model_request(_ctx(messages=request_context.messages), request_context)
 
         warning = request_context.messages[-1]
         assert isinstance(warning, ModelRequest)
@@ -832,7 +889,7 @@ class TestLimitWarnerFraction:
         capability: WarnNearLimits[None] = WarnNearLimits(max_context_fraction=0.9)
         request_context = _request_context(_history(2))
 
-        await capability.before_model_request(_ctx(), request_context)
+        await capability.before_model_request(_ctx(messages=request_context.messages), request_context)
 
         assert len(request_context.messages) == 4
 
@@ -883,7 +940,7 @@ class TestReportContextUsage:
         messages = _history(3)
         request_context = _request_context(messages)
 
-        await monitor.before_model_request(_ctx(), request_context)
+        await monitor.before_model_request(_ctx(messages=request_context.messages), request_context)
 
         assert request_context.messages == messages
 

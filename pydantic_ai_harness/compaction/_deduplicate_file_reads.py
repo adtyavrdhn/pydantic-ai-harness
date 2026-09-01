@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from pydantic_ai._run_context import AgentDepsT
@@ -18,8 +18,6 @@ from pydantic_ai_harness.compaction._shared import (
     estimate_token_count,
     exceeds,
     iter_tool_pairs,
-    messages_for_compaction,
-    persist_compacted_messages,
     rebuild_with_cleared,
     record_compaction_reclaim,
     resolve_token_trigger,
@@ -133,7 +131,7 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         """Deduplicate file reads, optionally gated on a size threshold."""
-        messages = messages_for_compaction(ctx, request_context)
+        messages: list[ModelMessage] = list(ctx.messages)
         request_ctx = context_for_request(ctx, request_context)
         if self.max_messages is not None or self.max_tokens is not None or self.max_fraction is not None:
             token_trigger = resolve_token_trigger(
@@ -144,7 +142,7 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
                 self.context_window,
             )
             if not exceeds(
-                request_context.messages,
+                messages,
                 self.max_messages,
                 token_trigger,
                 self.tokenizer,
@@ -163,5 +161,5 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
             estimate_token_count(messages, self.tokenizer),
             estimate_token_count(compacted, self.tokenizer),
         )
-        persist_compacted_messages(ctx, request_context, compacted)
-        return request_context
+        ctx.messages[:] = compacted
+        return replace(request_context, messages=list(ctx.messages))

@@ -20,8 +20,6 @@ from pydantic_ai_harness.compaction._shared import (
     context_for_request,
     estimate_context_tokens,
     estimate_token_count,
-    messages_for_compaction,
-    persist_compacted_messages,
     record_compaction_reclaim,
     resolve_token_trigger,
     validate_token_trigger,
@@ -146,7 +144,6 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
         target: int,
         model_request_parameters: ModelRequestParameters | None = None,
-        request_messages: list[ModelMessage] | None = None,
     ) -> list[ModelMessage]:
         """Apply tiers in order until the history fits *target* or tiers run out."""
         original = messages
@@ -156,11 +153,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         # message text, so the baseline's fixed overhead (tool definitions, instructions) is
         # never treated as compacted away. On content the estimator undercounts, this
         # understates the reclaim and escalates a tier early -- the cheap direction.
-        baseline = estimate_context_tokens(
-            request_messages if request_messages is not None else messages,
-            self.tokenizer,
-            model_request_parameters=model_request_parameters,
-        )
+        baseline = estimate_context_tokens(messages, self.tokenizer, model_request_parameters=model_request_parameters)
         heuristic_baseline = estimate_token_count(messages, self.tokenizer)
         estimate = baseline
         for tier in self.tiers:
@@ -191,7 +184,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         """Escalate through the tiers when the conversation exceeds the target."""
-        messages = messages_for_compaction(ctx, request_context)
+        messages: list[ModelMessage] = list(ctx.messages)
         # The tiers get the request's context, not the run's: a tier that resolves a model --
         # a summarizing one, or a `TieredCompaction` nested inside this one -- has to reach the
         # same conclusion this gate did.
@@ -200,7 +193,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         target = self._target(request_ctx.model)
         if target is None or (
             estimate_context_tokens(
-                request_context.messages,
+                messages,
                 self.tokenizer,
                 model_request_parameters=request_context.model_request_parameters,
             )
@@ -211,13 +204,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
             request_ctx,
             strategy='TieredCompaction',
             messages=messages,
-            compact=lambda: self._escalate(
-                messages,
-                request_ctx,
-                target,
-                request_context.model_request_parameters,
-                request_context.messages,
-            ),
+            compact=lambda: self._escalate(messages, request_ctx, target, request_context.model_request_parameters),
             tokenizer=self.tokenizer,
         )
         record_compaction_reclaim(
@@ -225,5 +212,5 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
             estimate_token_count(messages, self.tokenizer),
             estimate_token_count(compacted, self.tokenizer),
         )
-        persist_compacted_messages(ctx, request_context, compacted)
-        return request_context
+        ctx.messages[:] = compacted
+        return replace(request_context, messages=list(ctx.messages))

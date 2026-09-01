@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from pydantic_ai._run_context import AgentDepsT
@@ -18,8 +18,6 @@ from pydantic_ai_harness.compaction._shared import (
     estimate_token_count,
     exceeds,
     iter_tool_pairs,
-    messages_for_compaction,
-    persist_compacted_messages,
     rebuild_with_cleared,
     record_compaction_reclaim,
     resolve_token_trigger,
@@ -155,13 +153,13 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         """Clear old tool results if the conversation exceeds the configured threshold."""
-        messages = messages_for_compaction(ctx, request_context)
+        messages: list[ModelMessage] = list(ctx.messages)
         request_ctx = context_for_request(ctx, request_context)
         token_trigger = resolve_token_trigger(
             self.max_tokens, self.max_fraction, request_ctx.model, self.fallback_context_window, self.context_window
         )
         if not exceeds(
-            request_context.messages,
+            messages,
             self.max_messages,
             token_trigger,
             self.tokenizer,
@@ -180,5 +178,5 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
             estimate_token_count(messages, self.tokenizer),
             estimate_token_count(compacted, self.tokenizer),
         )
-        persist_compacted_messages(ctx, request_context, compacted)
-        return request_context
+        ctx.messages[:] = compacted
+        return replace(request_context, messages=list(ctx.messages))

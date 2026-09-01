@@ -1062,9 +1062,7 @@ class TestInjection:
             assert '- version two' in captured[0][0]
             _assert_history_memory_count(continued.all_messages(), released_core=1)
 
-    async def test_compaction_does_not_persist_request_only_memory_context(self) -> None:  # pragma: lax no cover
-        if not hasattr(ModelRequestContext, 'usage_responses'):
-            pytest.skip('requires independent request history from pydantic-ai#7053')
+    async def test_compaction_before_memory_preserves_request_only_injection(self) -> None:
         store = InMemoryStore()
         await _seed(store, 'main/MEMORY.md', '- fresh fact')
         captured: list[list[str]] = []
@@ -1080,8 +1078,8 @@ class TestInjection:
         result = await Agent(
             FunctionModel(capture),
             capabilities=[
-                Memory(store=store),
                 SlidingWindowCompaction(max_messages=2, keep_messages=2, preserve_first_user_message=False),
+                Memory(store=store),
             ],
         ).run('continue', message_history=history)
 
@@ -1091,39 +1089,7 @@ class TestInjection:
         persisted = result.all_messages()
         assert len(persisted) == 3
         assert isinstance(persisted[0], ModelResponse)
-        assert _memory_contexts(persisted) == []
-
-    async def test_compaction_can_drop_request_only_memory_with_all_messages(self) -> None:  # pragma: lax no cover
-        if not hasattr(ModelRequestContext, 'usage_responses'):
-            pytest.skip('requires independent request history from pydantic-ai#7053')
-        store = InMemoryStore()
-        await _seed(store, 'main/MEMORY.md', '- fresh fact')
-        captured: list[list[ModelMessage]] = []
-
-        def capture(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            captured.append(messages)
-            return ModelResponse(parts=[TextPart('done')])
-
-        agent = Agent(
-            FunctionModel(capture),
-            capabilities=[
-                Memory(store=store),
-                SlidingWindowCompaction(max_messages=1, keep_messages=0, preserve_first_user_message=False),
-            ],
-        )
-        result = await agent.run(
-            'continue',
-            message_history=[
-                ModelRequest(parts=[UserPromptPart('old')]),
-                ModelResponse(parts=[TextPart('old response')]),
-            ],
-        )
-
-        assert len(captured) == 1
-        assert len(_memory_contexts(captured[0])) == 1
-        assert '- fresh fact' in _memory_contexts(captured[0])[0]
-        assert len(result.all_messages()) == 1
-        assert isinstance(result.all_messages()[0], ModelResponse)
+        _assert_history_memory_count(persisted, released_core=1)
 
     async def test_cleanup_preserves_user_content_merged_with_memory_context(self) -> None:
         store = InMemoryStore()

@@ -89,49 +89,6 @@ def _collect_message_text(messages: Sequence[ModelMessage]) -> list[str]:
     return segments
 
 
-def persist_compacted_messages(
-    ctx: RunContext[AgentDepsT], request_context: ModelRequestContext, messages: list[ModelMessage]
-) -> None:
-    """Replace both views without persisting request-only parts appended by outer wrappers."""
-    persistent_messages = list(messages)
-    request_only_parts = _request_only_tail_parts(ctx.messages, request_context.messages)
-    request_messages = list(persistent_messages)
-    # Exercised by the pydantic-ai#7053 compatibility job; released core shares both views.
-    if request_only_parts:  # pragma: lax no cover
-        if request_messages and isinstance(tail := request_messages[-1], ModelRequest):
-            request_messages[-1] = replace(tail, parts=[*tail.parts, *request_only_parts])
-        else:
-            request_messages.append(ModelRequest(parts=list(request_only_parts)))
-    ctx.messages[:] = persistent_messages
-    request_context.messages = request_messages
-
-
-def messages_for_compaction(ctx: RunContext[AgentDepsT], request_context: ModelRequestContext) -> list[ModelMessage]:
-    """Return durable input when the current request has an independent ephemeral tail."""
-    if _request_only_tail_parts(ctx.messages, request_context.messages):  # pragma: lax no cover
-        return list(ctx.messages)
-    return list(request_context.messages)
-
-
-def _request_only_tail_parts(  # pragma: lax no cover
-    persistent_messages: Sequence[ModelMessage], request_messages: Sequence[ModelMessage]
-) -> tuple[ModelRequestPart, ...]:
-    """Return parts appended after core made the independent current-request view."""
-    if not persistent_messages or not request_messages:
-        return ()
-    persistent_tail = persistent_messages[-1]
-    request_tail = request_messages[-1]
-    if not isinstance(persistent_tail, ModelRequest) or not isinstance(request_tail, ModelRequest):
-        # Internal compaction runs before the provider call, with the current request at the tail.
-        return ()
-    persistent_parts = persistent_tail.parts
-    request_parts = request_tail.parts
-    if request_parts[: len(persistent_parts)] != persistent_parts:
-        # Harness request-only injections append parts; they do not replace the persistent prefix.
-        return ()
-    return tuple(request_parts[len(persistent_parts) :])
-
-
 def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:
     """Collect all text segments from a sequence of messages, instructions included."""
     segments = _collect_message_text(messages)
