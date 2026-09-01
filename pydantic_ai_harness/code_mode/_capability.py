@@ -63,6 +63,12 @@ def _mount_from_spec(mount: CodeModeMountSpec | Sequence[CodeModeMountSpec] | No
     """
     if mount is None:
         return None
+    entries = mount if isinstance(mount, Sequence) else [mount]
+    allowed_keys = CodeModeMountSpec.__annotations__.keys()
+    for entry in entries:
+        unknown_keys = entry.keys() - allowed_keys
+        if unknown_keys:
+            raise ValueError(f'Unknown mount spec key(s): {sorted(unknown_keys)}')
     validated = _MOUNT_SPEC_ADAPTER.validate_python(mount)
     if isinstance(validated, list):
         return [MountDir(**entry) for entry in validated]

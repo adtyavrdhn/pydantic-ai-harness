@@ -121,9 +121,10 @@ warnings.filterwarnings('ignore', category=HarnessDeprecationWarning)
 
 A spec cannot carry a live `HistorySource`, so `ConversationSearch.from_spec` takes a
 `backend` naming a step-persistence store instead and reads it through
-`SnapshotHistorySource`. `backend`, `directory`, and `database` (defaults included)
-mirror `StepPersistence.from_spec`, so a spec that declares both capabilities with the
-same values reads the history the other writes:
+`SnapshotHistorySource`. Unlike `StepPersistence.from_spec`,
+`ConversationSearch.from_spec` requires a persistent `backend` (`file` or `sqlite`).
+Configure the same explicit `backend`, `directory`, or `database` values on both
+capabilities so one reads the history the other writes:
 
 ```yaml
 # agent.yaml

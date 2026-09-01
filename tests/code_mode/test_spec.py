@@ -90,9 +90,20 @@ class TestFromSpec:
         assert [mount.virtual_path for mount in capability.mount] == ['/a', '/b']
         assert capability.mount[1].write_bytes_limit == 1024
 
-    def test_a_misshapen_mount_fails_on_the_entry_that_carries_it(self, tmp_path: Path) -> None:
-        bad: dict[str, Any] = {'mount': {'host_path': str(tmp_path), 'virtual': '/work'}}
-        with pytest.raises(ValidationError):
+    def test_a_mount_missing_a_required_key_fails_validation(self, tmp_path: Path) -> None:
+        bad: dict[str, Any] = {'mount': {'host_path': str(tmp_path)}}
+        with pytest.raises(ValidationError, match='Field required'):
+            CodeMode.from_spec(**bad)
+
+    def test_an_unknown_mount_key_is_rejected(self, tmp_path: Path) -> None:
+        bad: dict[str, Any] = {
+            'mount': {
+                'host_path': str(tmp_path),
+                'virtual_path': '/work',
+                'write_bytes_limt': 1024,
+            },
+        }
+        with pytest.raises(ValueError, match=r"Unknown mount spec key\(s\): \['write_bytes_limt'\]"):
             CodeMode.from_spec(**bad)
 
     def test_live_os_access_is_rejected_by_name(self) -> None:
