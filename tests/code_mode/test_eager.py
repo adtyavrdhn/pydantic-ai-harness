@@ -972,3 +972,27 @@ class TestEagerRewriteAndDurability:
             PartStartEvent(index=1, part=ToolCallPart(tool_name='run_code', args=big, tool_call_id='c2')), ctx
         )
         assert eager.pop_watch('c2', 'anything') is not None
+
+    async def test_carriage_return_lines_defer_to_dispatch(self):
+        """Lone-CR line separators feed nothing; the snippet runs whole at dispatch.
+
+        The AST counts `\r` as a line terminator but the executed-prefix slicing is
+        `\n`-based, so scanning such code would feed misaligned slices. Staying inert
+        costs eagerness, never correctness.
+        """
+        ctx = build_run_context(None)
+        capability = CodeMode[None](eager=True)
+        run_capability = await capability.for_run(ctx)
+        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[]))
+        assert isinstance(toolset, CodeModeToolset)
+        eager = toolset.eager
+        assert eager is not None
+
+        code = 'a = 1\rb = 2\rc = 3'
+        await eager.observe(
+            PartStartEvent(index=0, part=ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='c1')),
+            ctx,
+        )
+        taken = eager.pop_watch('c1', code)
+        assert taken is not None
+        assert taken.feed_count == 0 and not taken.queue

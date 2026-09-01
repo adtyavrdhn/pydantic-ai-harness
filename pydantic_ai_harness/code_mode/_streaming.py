@@ -24,12 +24,14 @@ class _PartialArgs(TypedDict):
 
 _PARTIAL_ARGS_ADAPTER: TypeAdapter[_PartialArgs] = TypeAdapter(_PartialArgs)
 
-MAX_SCAN_BYTES = 1 << 18
-"""Largest streamed prefix the host will decode or `ast.parse`; larger snippets run whole at dispatch.
+MAX_SCAN_CHARS = 1 << 18
+"""Largest streamed prefix (in characters) the host will decode or `ast.parse`.
 
-The host parsers have no sandbox around them, and both run on every delta of a growing
-prefix, so their work must be bounded: repeated parses are quadratic, and adversarial
-nesting exercises parser depth limits.
+Larger snippets run whole at dispatch. The host parsers have no sandbox around them, and
+both run on every delta of a growing prefix, so their work must be bounded: repeated
+parses are quadratic, and adversarial nesting exercises parser depth limits. Characters
+are the honest unit because parser work scales with them; the equivalent UTF-8 byte size
+can be up to four times larger.
 """
 
 
@@ -39,7 +41,7 @@ def decode_partial_code(args_text: str) -> str | None:
     Arguments past the scan cap are not decoded: the JSON parse runs on every delta, so its
     work must be bounded the same way the AST parse is.
     """
-    if not args_text or len(args_text) > MAX_SCAN_BYTES:
+    if not args_text or len(args_text) > MAX_SCAN_CHARS:
         return None
     try:
         decoded = _PARTIAL_ARGS_ADAPTER.validate_python(from_json(args_text, allow_partial='trailing-strings'))
@@ -62,8 +64,11 @@ def closed_statements(code: str, consumed: int) -> tuple[list[ast.stmt], int]:
     acceptable for model-written snippets; the reference implementation's incremental scanner is
     the known upgrade path.
     """
+    # Only `\n` terminates lines here. A snippet using lone `\r` separators parses (the AST
+    # counts them as lines) but the executed-prefix slicing is `\n`-based, so treating `\r`
+    # as a boundary would feed misaligned slices; such snippets stay whole until dispatch.
     end = code.rfind('\n')
-    if end < 0 or end >= MAX_SCAN_BYTES:
+    if end < 0 or end >= MAX_SCAN_CHARS:
         # Oversized prefixes skip host-side parsing entirely: the dispatch hands the code to
         # the sandbox parser, which applies its own resource limits. The cost is losing
         # eagerness for snippets this large, not correctness.
