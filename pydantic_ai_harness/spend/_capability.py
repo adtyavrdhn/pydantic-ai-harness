@@ -268,6 +268,11 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
     ) -> ModelRequestContext:
         """Refuse the request if any budget with a ceiling is already spent."""
         if not hasattr(request_context, 'usage_responses'):
+            # Only a core without provider-response accounting can hide a billed response
+            # behind an inner wrapper. Once the pydantic-ai floor includes
+            # `ModelRequestContext.usage_responses`, delete this warning path outright:
+            # `warn_about_inner_wrappers`, `_composition.py`, `SpendCompositionWarning`,
+            # and `_reported_arrangements`.
             warn_about_inner_wrappers(ctx.root_capability, self, self._reported_arrangements)
         enforcing = [(budget, key) for budget, key in self._keyed(ctx) if budget.enforces]
         read = await self._read(list(dict.fromkeys(key for _, key in enforcing)))
