@@ -14,7 +14,6 @@ production failures.
 from __future__ import annotations
 
 import posixpath
-import time
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -49,7 +48,7 @@ class ExecCall:
 class _AioCallable:
     """Mimics a synchronicity-wrapped Modal method: callable, plus an `.aio` async twin.
 
-    The session only ever calls `.aio`, but exposing both mirrors the real SDK shape.
+    The backend only calls `.aio`, but exposing both mirrors the real SDK shape.
     """
 
     def __init__(self, fn: Callable[..., Any]) -> None:
@@ -68,6 +67,13 @@ class _AioCallable:
         return self._fn(*args, **kwargs)
 
 
+class _HangingAioCall:
+    """An `.aio` that never returns, for tests that cancel a pending call."""
+
+    async def aio(self, *args: Any, **kwargs: Any) -> Any:
+        await anyio.sleep_forever()
+
+
 class _FakeStream:
     """Mimics a Modal exec stdio stream: readable whole via `.read.aio()`, or iterable.
 
@@ -83,12 +89,10 @@ class _FakeStream:
         data: bytes,
         chunk_size: int | None,
         error: Exception | None = None,
-        chunks: list[bytes] | None = None,
     ) -> None:
         self._data = data
         self._chunk_size = chunk_size
         self._error = error
-        self._chunks = chunks
         self.read = _AioCallable(self._read)
         self._pending: list[bytes] = []
         self._pos = 0
@@ -99,9 +103,7 @@ class _FakeStream:
         return self._data
 
     def __aiter__(self) -> _FakeStream:
-        if self._chunks is not None:
-            self._pending = list(self._chunks)
-        elif self._chunk_size is None:
+        if self._chunk_size is None:
             self._pending = [self._data] if self._data else []
         else:
             self._pending = [self._data[i : i + self._chunk_size] for i in range(0, len(self._data), self._chunk_size)]
@@ -128,19 +130,16 @@ class _FakeProcess:
         stdout_error: Exception | None,
         stderr_error: Exception | None,
         wait_error: Exception | None,
-        wait_delay: float,
-        output_chunks: list[bytes] | None,
+        wait_hangs: bool,
     ) -> None:
-        self.stdout = _FakeStream(stdout, chunk_size, stdout_error, output_chunks)
+        self.stdout = _FakeStream(stdout, chunk_size, stdout_error)
         self.stderr = _FakeStream(stderr, chunk_size, stderr_error)
         self._returncode = returncode
         self._wait_error = wait_error
-        self._wait_delay = wait_delay
         self.returncode: int | None = None
-        self.wait = _AioCallable(self._wait)
+        self.wait: _AioCallable | _HangingAioCall = _HangingAioCall() if wait_hangs else _AioCallable(self._wait)
 
     def _wait(self) -> int:
-        time.sleep(self._wait_delay)
         if self._wait_error is not None:
             raise self._wait_error
         self.returncode = self._returncode
@@ -312,8 +311,7 @@ class FakeSandbox:
             self._control.stdout_error,
             self._control.stderr_error,
             self._control.wait_error,
-            self._control.wait_delay,
-            self._control.output_chunks,
+            self._control.wait_hangs,
         )
 
     def _terminate(self, *, wait: bool = False) -> int | None:
@@ -364,10 +362,9 @@ class FakeModal:
         self.stdout_error: Exception | None = None
         self.stderr_error: Exception | None = None
         self.wait_error: Exception | None = None
-        self.wait_delay = 0.0
-        self.output_chunks: list[bytes] | None = None
-        # How the fake splits exec output when the bounded reader iterates it; None yields the
-        # whole output as one chunk. A test bounding output sets a small size to force drops.
+        self.wait_hangs = False
+        # How the fake splits exec output when the stream reader iterates it; None yields the
+        # whole output as one chunk.
         self.output_chunk_size: int | None = None
         self.module = self._build_module()
 
@@ -378,10 +375,6 @@ class FakeModal:
     @property
     def filesystem_error_type(self) -> type[Exception]:
         return FakeSandboxFilesystemError
-
-    @property
-    def file_not_found_type(self) -> type[Exception]:
-        return FakeSandboxFilesystemNotFoundError
 
     @property
     def unavailable_type(self) -> type[Exception]:
@@ -418,7 +411,7 @@ class FakeModal:
 
         def image_from_registry(tag: str) -> object:
             # Closed signature on purpose, like `sandbox_create` below: signature drift in
-            # the session should fail here, not only in production.
+            # the backend should fail here, not only in production.
             control.image_tags.append(tag)
             return object()
 
@@ -452,9 +445,9 @@ class FakeModal:
             control.attach_ids.append(sandbox_id)
             if control.attach_error is not None:
                 raise control.attach_error
-            for existing in control.sandboxes:
-                if existing.object_id == sandbox_id:
-                    return existing
+            existing = next((s for s in control.sandboxes if s.object_id == sandbox_id), None)
+            if existing is not None:
+                return existing
             sandbox = FakeSandbox(control, sandbox_id)
             sandbox.poll_result = control.attach_poll_result
             control.sandboxes.append(sandbox)

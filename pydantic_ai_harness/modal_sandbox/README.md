@@ -1,11 +1,12 @@
 # Modal Sandbox
 
-`ModalSandbox` supplies a Modal container as the run's `ctx.sandbox` and retains
-its released `run_command`, `read_file`, `write_file`, and `list_directory`
-tools. Additional tools and capabilities can consume `ctx.sandbox` directly.
+`ModalSandbox` supplies a Modal container as the run's `ctx.sandbox`. It owns
+provider connection and lifecycle behavior. Add tools or capabilities that consume
+`ctx.sandbox` for the model-facing interface you want.
 
 [Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/modal_sandbox/)
 
+> [!NOTE]
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 ## Install and authenticate
@@ -14,101 +15,103 @@ tools. Additional tools and capabilities can consume `ctx.sandbox` directly.
 uv add "pydantic-ai-harness[modal]"
 modal token new
 ```
-In CI, set `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` instead.
+
+In deployed environments, set `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`.
 
 ## Use with an agent
 
 ```python
-from pydantic_ai import Agent
-from pydantic_ai_harness import ModalSandbox
+from pydantic_ai import Agent, RunContext
+from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
     capabilities=[ModalSandbox(image='python:3.12-slim')],
 )
+
+
+@agent.tool
+async def run_command(ctx: RunContext[None], argv: list[str]) -> str:
+    result = await ctx.sandbox.run(argv, timeout=60)
+    return result.stdout
 ```
 
-The released command and file tools remain available to the model. Custom tools
-can also use `ctx.sandbox`; prefer argv for commands unless shell syntax is an
-intentional part of the tool's schema.
+The example uses argv, which Modal executes directly. To expose shell syntax, call
+`ctx.sandbox.run(command, shell=True, timeout=...)` from a tool whose schema makes
+that behavior explicit.
 
 ## Lifecycle
 
-For an owned sandbox, acquisition derives a Modal-safe name from the logical run
-ID. A retry reconnects to that named sandbox instead of provisioning a duplicate.
-The serialized `SandboxRef` contains the provider and sandbox ID; later workers
-reconnect by ID and never create from `get_sandbox`. Release also reconnects by ID
-and terminates the sandbox, so it works in a different worker and is safe to retry.
-An already terminated sandbox counts as successfully released.
+An owned sandbox gets a deterministic name derived from the logical run ID. A retry
+reconnects to the running sandbox with that name before creating one. Acquisition
+detaches the initial handle and stores only the provider and sandbox ID in the
+`SandboxRef`; later workers reconnect by ID. Release reconnects, terminates the
+sandbox, and detaches. An already missing sandbox counts as released.
 
-Modal's `sandbox_timeout` is a server-side cleanup backstop. Unexpected control
-plane or authentication failures during release are surfaced rather than silently
-reported as successful cleanup.
-
-Attach to a sandbox managed elsewhere by ID when the capability must not own its
-lifetime:
+Attach to a sandbox managed elsewhere when the capability must not own its lifetime:
 
 ```python
+from pydantic_ai_harness.modal_sandbox import ModalSandbox
+
 ModalSandbox(sandbox_id='sb-abc123')
 ```
 
-Creation-only settings cannot be combined with `sandbox_id`. Attached sandboxes
-are not terminated at run end, and concurrent runs share their filesystem and
-process space.
+Creation-only settings cannot be combined with `sandbox_id`. Attached sandboxes are
+not terminated at run end, and concurrent runs share their filesystem and processes.
+`sandbox_timeout` is Modal's server-side lifetime backstop. It also limits an orphan
+if cancellation interrupts sandbox creation before the provider returns its ID.
 
 ## Direct backend use
 
-`ModalSandboxBackend` implements Pydantic AI's `SandboxBackend` protocol and the
-filesystem, process-start, and output-streaming opt-ins:
+`ModalSandboxBackend` implements Pydantic AI's `SandboxBackend` protocol and its
+filesystem, process start, and streaming opt-ins:
 
 ```python
+import anyio
+
 from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
 
-backend = await ModalSandboxBackend.create(
-    image='python:3.12-slim',
-    sandbox_timeout=1800,
-)
-try:
-    result = await backend.run(['python', '--version'], timeout=60)
-    print(result.stdout)
-finally:
-    await backend.close(terminate=True)
+
+async def main() -> None:
+    backend = await ModalSandboxBackend.create(
+        image='python:3.12-slim',
+        sandbox_timeout=1800,
+    )
+    try:
+        result = await backend.run(['python', '--version'], timeout=60)
+        print(result.stdout)
+    finally:
+        await backend.close(terminate=True)
+
+
+anyio.run(main)
 ```
 
-`create_or_connect(name=...)` is available for callers that need the same
-retry-safe named lifecycle used by the capability. `connect(sandbox_id)` and
-`connect_name(app_name, name)` only reconnect.
+Use `connect(sandbox_id)` or `connect_name(app_name, name)` for a running sandbox.
+Neither method provisions a replacement.
 
-`ModalSandboxSession` and `ModalSandboxExecResult` remain available for code
-written against the released direct session API. New code should use
-`ModalSandboxBackend`, which implements the shared sandbox protocol.
+## Limits and errors
 
-## Limits and cancellation
+Modal exposes no per-command kill operation, so `process.kill()` raises
+`NotImplementedError`. Set `timeout=` when starting commands. Modal accepts whole
+seconds, so fractional timeouts round up. Cancelling a wait does not kill the remote
+command; it can continue until its command deadline or the sandbox lifetime ends.
 
-Modal does not expose a way to kill one command. `SandboxProcess.kill()` therefore
-raises `NotImplementedError`. Give every command a finite `timeout`; cancellation
-of the client wait does not otherwise guarantee that the remote process stops.
-Modal accepts whole-second deadlines, so fractional values round up.
+Command output is returned in full. Tools that put output into model context should
+apply their own byte or line limits.
 
-Command results are buffered by Modal and returned in full. The backend does not
-invent a model-output policy or pretend the transport is bounded. Tools that put
-output into model context should enforce their own byte or line budget, and
-commands that may produce very large output should bound it at the source.
-Streaming decodes UTF-8 incrementally and replaces invalid byte sequences.
-
-The public error surface is deliberately narrow:
-
-- `ModalSandboxError` for provider operations that fail.
-- `ModalSandboxTerminalError` as the catchable base for failures a retry cannot fix.
-- `ModalSandboxAuthError` when credentials are rejected.
-- `ModalSandboxUnavailableError` when the referenced sandbox is not running.
-- `ModalSandboxCommandTimeoutError` for command deadlines, also a built-in `TimeoutError`.
-
-Filesystem misses use the built-in `FileNotFoundError` contract.
+- `ModalSandboxError` reports recoverable provider failures.
+- `ModalSandboxAuthError` and `ModalSandboxUnavailableError` are also core
+  `SandboxUnavailableError` instances, so the run does not retry them.
+- Command deadlines raise core `SandboxTimeoutError`, including partial `stdout` and
+  `stderr`.
+- Missing filesystem paths raise `FileNotFoundError`.
 
 ## Configuration
 
 ```python
+from pydantic_ai_harness.modal_sandbox import ModalSandbox
+
 ModalSandbox(
     image='python:3.12-slim',
     sandbox_id=None,
@@ -117,11 +120,5 @@ ModalSandbox(
     sandbox_timeout=300,
     workdir=None,
     env=None,
-    default_command_timeout=60.0,
-    max_command_timeout=None,
-    max_output_bytes=51200,
-    max_output_lines=2000,
-    max_read_bytes=5242880,
-    instructions=None,
 )
 ```
