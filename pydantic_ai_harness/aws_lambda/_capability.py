@@ -124,8 +124,7 @@ class AWSLambdaDurability(BaseDurabilityCapability[AgentDepsT]):
                 `metadata={'aws_lambda': {...}}` overrides it key by key for that tool.
         """
         super().__init__(models=models, event_stream_handler=event_stream_handler, name=name)
-        AWSLambdaOperationConfig(step_config)
-        self._base_step_config = step_config
+        self._operation_config = AWSLambdaOperationConfig(step_config)
 
     @property
     def in_durable_context(self) -> bool:
@@ -135,5 +134,5 @@ class AWSLambdaDurability(BaseDurabilityCapability[AgentDepsT]):
         return AWSLambdaOperationBackend(
             agent_name=self.name,
             default_model_id=self.default_model_id,
-            config=AWSLambdaOperationConfig(self._base_step_config),
+            config=self._operation_config,
         )
