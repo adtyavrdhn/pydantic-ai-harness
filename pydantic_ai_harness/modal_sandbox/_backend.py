@@ -243,8 +243,9 @@ class _ModalProcess:
 
     async def wait(self) -> CommandResult:
         """Wait for the command and return its result, the same one on every call."""
-        # The timeout verdict below can only be reached once, so the first call's verdict is
-        # the command's verdict: caching it is what makes repeated and concurrent waits agree.
+        # `_settle` is effectful (it can kill the command and consume the single-consumer readers), so the protocol's
+        # promise that repeated and concurrent waits agree is kept by settling once under
+        # the lock and handing every later caller the cached outcome.
         async with self._lock:
             if self._outcome is None:
                 try:
