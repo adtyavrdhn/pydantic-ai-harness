@@ -73,7 +73,7 @@ agent = Agent(
             every=20,
         ),
         TrajectoryJudge(
-            model='google-gla:gemini-2.5-flash',
+            model='google:gemini-2.5-flash',
             name='scope-creep',
             instructions='Flag work that was not asked for in the original request.',
             every=10,
@@ -111,7 +111,7 @@ agent = Agent(
 
 ## Cost and failure semantics
 
-- The judge's model usage is threaded onto the run's `usage` and runs under the run's `usage_limits`, minus the parent's pending request and one request per sibling judge evaluation in flight at launch. Judges cannot silently exceed the run's budget, and concurrent judges cannot race each other past a shared request limit: an evaluation that finds no remaining budget fails with `UsageLimitExceeded` before spending anything.
+- The judge's model usage is threaded onto the run's `usage` and respects the run's `usage_limits`: each launch claims one request on the shared usage before the evaluation starts, so the parent's next request and concurrent judges account for in-flight evaluations and the shared request limit cannot be exceeded. A launch the request budget cannot fit skips the tick, like one that finds an evaluation still in flight.
 - An evaluation failure is raised on the run at the next cadence tick or at run end; judge failures are never silently dropped. If you need a judge to degrade instead, give it a fallback model through `agent` (for example a `FallbackModel`): resilience policy belongs to the judge agent, not to fields on the capability.
 - A judged run inside a durable workflow or flow (Temporal, DBOS, Prefect) is rejected with `UserError` before the first model request: the evaluation is launched from a capability hook in orchestration context, so its model calls would not be checkpointed and could repeat on replay. A durable-capable agent run outside its workflow or flow is unaffected. Run judged work outside durable execution.
 

@@ -27,6 +27,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from pydantic_ai_harness.trajectory_judge import AllGood, Steer, TrajectoryJudge, TrajectoryVerdict
@@ -586,59 +587,113 @@ class TestTranscript:
 
 
 class TestUsageCoordination:
-    async def test_concurrent_judges_share_the_request_budget(self) -> None:
-        """Each launch reserves the in-flight siblings' requests, closing the shared-limit race.
+    async def test_parent_preflight_accounts_for_in_flight_judge(self) -> None:
+        """A blocked judge's claimed request stops the parent's next call at the shared limit.
 
-        With `request_limit=3`, one parent request already recorded, and three `every=1`
-        judges due on the same tick, only the first evaluation may spend a request; the
-        other two find no remaining budget at their own pre-request check and fail with
-        `UsageLimitExceeded` before spending anything.
+        With `request_limit=3` and the judge's model call held in flight, the parent
+        completes two requests and its third preflight fails against the claim, so the
+        shared usage never exceeds the configured limit. Without the claim the parent could
+        spend the full limit while the judge call was in flight and finish at limit + 1.
         """
         gate = asyncio.Event()
-        entered = asyncio.Event()
+        judge_entered = asyncio.Event()
+        judge_calls = 0
+        parent_calls = 0
+        usages: list[RunUsage] = []
+
+        # The gate never opens: the failing run cancels the evaluation, so the body's tail
+        # never executes and the whole function is excluded from coverage.
+        async def judge_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:  # pragma: no cover
+            nonlocal judge_calls
+            judge_calls += 1
+            judge_entered.set()
+            await gate.wait()
+            return _all_good_response()
+
+        def parent_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal parent_calls
+            parent_calls += 1
+            return ModelResponse(parts=[ToolCallPart('work', {})])
+
+        agent = Agent(
+            FunctionModel(parent_fn),
+            capabilities=[TrajectoryJudge(model=FunctionModel(judge_fn), every=1)],
+        )
+
+        @agent.tool
+        async def work(ctx: RunContext[object]) -> str:
+            usages.append(ctx.usage)
+            await asyncio.wait_for(judge_entered.wait(), timeout=_WAIT)
+            return 'worked'
+
+        with pytest.raises(UsageLimitExceeded):
+            await agent.run('go', usage_limits=UsageLimits(request_limit=3))
+
+        assert parent_calls == 2  # the third parent preflight saw the claim and stopped
+        assert judge_calls == 1
+        assert usages[0].requests == 2  # the cancelled evaluation released its claim
+
+    async def test_sibling_launch_skips_when_the_budget_cannot_fit_its_claim(self) -> None:
+        """Concurrent judges claim atomically at launch; a claim that cannot fit skips the tick.
+
+        With `request_limit=3`, one parent request recorded, and three `every=1` judges due
+        on the same tick, the first launch claims the one affordable evaluation (the launch
+        also reserves room for the parent request core records only after the hook). The
+        other two find no room for their claim and skip without spending or failing.
+        """
+        gate = asyncio.Event()
         judge_calls = 0
         done = asyncio.Event()
 
         async def slow_judge(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             nonlocal judge_calls
             judge_calls += 1
-            entered.set()
             await gate.wait()
             return _all_good_response()
 
         ctx = _ctx()
         ctx.usage = RunUsage(requests=1)
         ctx.usage_limits = UsageLimits(request_limit=3)
-        caps = [
-            TrajectoryJudge(
+        run_caps = [
+            await TrajectoryJudge(
                 model=FunctionModel(slow_judge), every=1, name=f'judge-{index}', on_verdict=lambda _: done.set()
-            )
+            ).for_run(ctx)
             for index in range(3)
         ]
-        run_caps = [await cap.for_run(ctx) for cap in caps]
-        ctx.capabilities = {f'trajectory_judge_{index}': run_cap for index, run_cap in enumerate(run_caps)}
 
         request_context = _request_context(_hi_request())
         for run_cap in run_caps:
             await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
-        await asyncio.wait_for(entered.wait(), timeout=_WAIT)  # the winning evaluation is inside its model call
+        assert ctx.usage.requests == 2  # exactly one claim landed; the skipped launches claimed nothing
         gate.set()
         await asyncio.wait_for(done.wait(), timeout=_WAIT)
 
         async def passthrough() -> Any:
             return 'run-result'
 
-        # Surfacing each loser's recorded failure also awaits its task, so by the final
-        # assertion every evaluation has fully resolved: the count is complete, not a
-        # sleep-length snapshot of a race.
-        with pytest.raises(UsageLimitExceeded):
-            await run_caps[1].wrap_run(ctx, handler=passthrough)
-        with pytest.raises(UsageLimitExceeded):
-            await run_caps[2].wrap_run(ctx, handler=passthrough)
-
-        assert judge_calls == 1  # the reservation stopped the losers before they spent anything
-        assert await run_caps[0].wrap_run(ctx, handler=passthrough) == 'run-result'
+        # The winner's `wrap_run` reaps its finished task; the skipped judges have nothing
+        # to reap and nothing to raise.
+        for run_cap in run_caps:
+            assert await run_cap.wrap_run(ctx, handler=passthrough) == 'run-result'
+        assert judge_calls == 1
         assert ctx.usage.requests == 2  # parent + the single winning evaluation, within the limit of 3
+
+    async def test_unbounded_limits_pass_through(self) -> None:
+        """A limits object without `request_limit` neither blocks the launch nor gains one."""
+        cap = TrajectoryJudge(model=_steer_model('back on task'), every=1)
+        ctx = _ctx()
+        ctx.usage_limits = UsageLimits()
+        run_cap = await cap.for_run(ctx)
+        await run_cap.after_model_request(
+            ctx, request_context=_request_context(_hi_request()), response=_text_response()
+        )
+
+        async def wait_for_enqueue() -> None:
+            while not ctx.enqueue.called:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_enqueue(), timeout=_WAIT)
+        assert ctx.usage.requests == 1  # the judge's real request; the launch claim was released
 
 
 class TestDurableExecution:

@@ -24,8 +24,6 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.tools import AgentDepsT, RunContext
 
-from pydantic_ai_harness._usage import reserved_usage_limits
-
 if TYPE_CHECKING:
     from pydantic_ai.agent import AgentRunResult
     from pydantic_ai.models import ModelRequestContext
@@ -88,12 +86,12 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
 
     At most one evaluation per judge is in flight at a time; a cadence tick that finds one
     still running is skipped. An evaluation still in flight when the run ends is cancelled.
-    The judge's model and tool usage are threaded onto the run's `usage` and run under its
-    `usage_limits`, minus the parent's pending request and one request per sibling judge
-    evaluation in flight at launch, so concurrent judges cannot race each other past a
-    shared request limit. An evaluation failure is raised on the run at the next cadence
-    tick or at run end; give the judge a fallback model (via `agent`) if you need it to
-    degrade instead.
+    The judge's model and tool usage are threaded onto the run's `usage` and respect its
+    `usage_limits`: each launch claims one request on the shared usage before the
+    evaluation starts, so the parent's next preflight and sibling launches account for the
+    in-flight call, and a launch the request budget cannot fit is skipped. An evaluation
+    failure is raised on the run at the next cadence tick or at run end; give the judge a
+    fallback model (via `agent`) if you need it to degrade instead.
 
     ```python
     from pydantic_ai import Agent
@@ -128,7 +126,7 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     """The judge's review focus, appended to the built-in judge instructions. Only valid
     together with `model`; a passed `agent` owns its own instructions."""
 
-    agent: Agent[None, Any] | None = None
+    agent: Agent[None, object] | None = None
     """A full judge agent, for advanced customization (own instructions, model settings,
     toolsets, fallback models). Every evaluation runs it with `output_type=[AllGood, Steer]`
     regardless of its own configured output type, so an existing agent can be reused as-is;
@@ -150,7 +148,7 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     """Optional observability callback invoked with each verdict after it is processed
     (after any steering has been enqueued)."""
 
-    _judge: Agent[None, Any] = field(init=False, repr=False, compare=False)
+    _judge: Agent[None, object] = field(init=False, repr=False, compare=False)
     _steps: int = field(default=0, init=False, repr=False, compare=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -221,31 +219,28 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         """
         self._collect_finished()
         self._steps += 1
-        if self._steps % self.every == 0 and self._task is None:
+        if self._steps % self.every == 0 and self._task is None and self._claim_request(ctx):
             prompt = _judge_prompt([*request_context.messages, response], self.window)
-            limits = reserved_usage_limits(ctx.usage_limits, reserve=1 + self._in_flight_siblings(ctx))
-            self._task = asyncio.create_task(
-                self._evaluate(ctx, prompt, usage_limits=limits), name=f'trajectory-judge:{self._judge_name()}'
-            )
+            self._task = asyncio.create_task(self._evaluate(ctx, prompt), name=f'trajectory-judge:{self._judge_name()}')
         return response
 
-    def _in_flight_siblings(self, ctx: RunContext[AgentDepsT]) -> int:
-        """The number of other judges' evaluations currently in flight on this run.
+    def _claim_request(self, ctx: RunContext[AgentDepsT]) -> bool:
+        """Claim the evaluation's first request on the shared usage, or refuse the launch.
 
-        Judges launch from `after_model_request` and the hook chain awaits capabilities one
-        at a time, so counting siblings here and setting `_task` before yielding the event
-        loop makes the launch-time budget claim atomic. Each in-flight sibling may have
-        passed its own limit check against the shared `ctx.usage` without its spend being
-        recorded yet, so the launch reserves one request per sibling on top of the parent's.
+        Core's `check_before_request` reads `usage.requests`, so a claim recorded here is
+        visible to the parent's next preflight and to sibling launches: the shared request
+        limit accounts for the in-flight evaluation before its spend is recorded. The hook
+        chain runs without yielding the event loop, so the check and the claim are atomic.
+        The launch is refused when the budget cannot fit both the parent's just-finished
+        request (core records it only after this hook returns) and the claim; a judge that
+        cannot afford its call skips the tick, like one that finds an evaluation still in
+        flight. `_evaluate` releases the claim once the judge's real spend is recorded.
         """
-        return sum(
-            1
-            for capability in ctx.capabilities.values()
-            if isinstance(capability, TrajectoryJudge)
-            and capability is not self
-            and capability._task is not None
-            and not capability._task.done()
-        )
+        limits = ctx.usage_limits
+        if limits is not None and limits.request_limit is not None and ctx.usage.requests + 2 > limits.request_limit:
+            return False
+        ctx.usage.requests += 1
+        return True
 
     async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
         """Run the agent, then settle the judge: surface a finished failure, cancel the rest.
@@ -265,16 +260,30 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         await self._discard_in_flight()
         return result
 
-    async def _evaluate(self, ctx: RunContext[AgentDepsT], prompt: str, *, usage_limits: UsageLimits | None) -> None:
+    async def _evaluate(self, ctx: RunContext[AgentDepsT], prompt: str) -> None:
         """Run the judge once and enqueue attributed steering when it says to steer.
 
         `output_type=[AllGood, Steer]` is set here, at the run boundary, so the verdict
         contract holds at runtime whatever output type the judge agent was configured with.
 
+        The judge runs against the shared `usage` under a request limit raised by exactly
+        one: the launch's claim occupies a slot in `usage.requests` for the whole
+        evaluation, so the unadjusted limit would count this evaluation against itself
+        twice. The claim is released once the run has recorded the judge's real spend (or
+        recorded nothing, on failure or cancellation).
+
         Provider failures propagate out of this task as-is (`ModelAPIError` subclasses from
         the model layer) and are re-raised on the run by `_collect_finished`.
         """
-        result = await self._judge.run(prompt, output_type=[AllGood, Steer], usage=ctx.usage, usage_limits=usage_limits)
+        try:
+            result = await self._judge.run(
+                prompt,
+                output_type=[AllGood, Steer],
+                usage=ctx.usage,
+                usage_limits=_claim_offset_limits(ctx.usage_limits),
+            )
+        finally:
+            ctx.usage.requests -= 1
         verdict = result.output
         if isinstance(verdict, Steer):
             ctx.enqueue(f'Steering from trajectory judge {self._judge_name()!r}: {verdict.message}')
@@ -315,6 +324,19 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     def get_serialization_name(cls) -> str | None:
         """Not spec-serializable: the capability may hold a live `Agent` and a callback."""
         return None
+
+
+def _claim_offset_limits(limits: UsageLimits | None) -> UsageLimits | None:
+    """The run's limits with `request_limit` raised by the one request the launch claimed.
+
+    The claim already occupies a slot in the shared `usage.requests`, so against the
+    unadjusted limit the judge's own preflight would count its in-flight request twice and
+    refuse a call the budget affords. Raising the limit by exactly the claim keeps the
+    judge's effective budget identical to the run's.
+    """
+    if limits is None or limits.request_limit is None:
+        return limits
+    return replace(limits, request_limit=limits.request_limit + 1)
 
 
 def _judge_prompt(messages: Sequence[ModelMessage], window: int) -> str:
