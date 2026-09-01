@@ -2558,7 +2558,7 @@ class TestCodeMode:
                 while not release.is_set():
                     try:
                         await release.wait()
-                    except asyncio.CancelledError:
+                    except asyncio.CancelledError:  # pragma: no cover - regression path without the teardown shield
                         extra_cancels += 1
                 unwound.set()
                 raise
