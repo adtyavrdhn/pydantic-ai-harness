@@ -144,6 +144,10 @@ class _DaytonaProcess:
 
     async def wait(self) -> CommandResult:
         """Wait for the command and return the same outcome on every call."""
+        # `_settle` is effectful (its timeout path kills the session and cancels the shared
+        # logs task), so the protocol's promise that repeated and concurrent waits agree is
+        # kept by settling once under the lock and handing every later caller the cached
+        # outcome.
         async with self._lock:
             if self._outcome is None:
                 try:

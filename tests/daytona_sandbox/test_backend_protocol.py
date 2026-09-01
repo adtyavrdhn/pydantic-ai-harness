@@ -353,6 +353,22 @@ class TestErrorsAndFilesystem:
             await DaytonaSandboxBackend.create()
         assert not isinstance(recoverable.value, SandboxUnavailableError)
 
+    async def test_concurrent_waits_share_one_outcome(self, fake_daytona: FakeDaytona) -> None:
+        # A second waiter arriving mid-settle parks on the lock and receives the first
+        # settle's cached result object -- the protocol's concurrent-wait promise. Without
+        # the lock it would run its own settle against internals the first one cleans up.
+        backend = await DaytonaSandboxBackend.create()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_status_gate = asyncio.Event()
+        process = await backend.start(['true'])
+        first = asyncio.create_task(process.wait())
+        await anyio.wait_all_tasks_blocked()  # first is suspended at the status poll, mid-settle
+        second = asyncio.create_task(process.wait())
+        await anyio.wait_all_tasks_blocked()  # second is parked on the wait lock
+        sandbox.process_status_gate.set()
+        one, two = await asyncio.gather(first, second)
+        assert one is two
+
     async def test_concurrent_first_probes_converge(self, fake_daytona: FakeDaytona) -> None:
         # The probe is an idempotent read, so overlapping first calls are allowed to
         # duplicate it: both get the same answer and the cache settles.
