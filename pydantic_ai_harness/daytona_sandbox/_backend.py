@@ -33,7 +33,13 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 import anyio
-from pydantic_ai.sandboxes import CommandResult, FileEntry, SandboxTimeoutError, SandboxUnavailableError
+from pydantic_ai.sandboxes import (
+    CommandResult,
+    FileEntry,
+    SandboxBackend,
+    SandboxTimeoutError,
+    SandboxUnavailableError,
+)
 from typing_extensions import Self
 
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
@@ -44,7 +50,6 @@ if TYPE_CHECKING:
     # Not re-exported at the package root; typing-only, so the private path never runs.
     from daytona._async.process import AsyncProcess
     from pydantic_ai.sandboxes import (
-        SandboxBackend,
         SandboxCommand,
         SandboxFilesystem,
         SandboxProcess,
@@ -306,15 +311,23 @@ class _DaytonaFilesystem:
         return True
 
 
-class DaytonaSandboxBackend:
+class DaytonaSandboxBackend(SandboxBackend):
     """A Daytona sandbox behind Pydantic AI's `SandboxBackend` protocol.
 
     The backend owns its `AsyncDaytona` client and implements filesystem and background
     process support. Daytona delivers output through callbacks, so complete command results
     are buffered while a command runs; live `SupportsStream` output is not exposed.
+
+    The protocol is structural, but subclassing it here makes a signature drift fail the type
+    check on this class instead of at a distant `Sandbox.wrap` call.
     """
 
-    provider = PROVIDER
+    sandbox: AsyncSandbox
+    """The underlying Daytona sandbox, for provider-specific functionality."""
+
+    @property
+    def provider(self) -> str:
+        return PROVIDER
 
     def __init__(
         self,
@@ -326,7 +339,6 @@ class DaytonaSandboxBackend:
     ) -> None:
         self._client = client
         self.sandbox = sandbox
-        """The underlying Daytona sandbox, for provider-specific functionality."""
         self._owned = owned
         self._working_dir = absolute_path('working_dir', working_dir)
         self._closed = False
