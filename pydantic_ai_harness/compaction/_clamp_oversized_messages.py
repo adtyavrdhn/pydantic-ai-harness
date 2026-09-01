@@ -17,7 +17,12 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.tools import RunContext
 
-from pydantic_ai_harness.compaction._shared import compact_with_span, context_for_request, estimate_text_tokens
+from pydantic_ai_harness.compaction._shared import (
+    compact_with_span,
+    context_for_request,
+    estimate_text_tokens,
+    persist_compacted_messages,
+)
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestContext
@@ -179,11 +184,12 @@ class ClampOversizedMessages(AbstractCapability[AgentDepsT]):
         """Clamp any oversized response part before the request is sent."""
         messages: list[ModelMessage] = list(request_context.messages)
         request_ctx = context_for_request(ctx, request_context)
-        request_context.messages = await compact_with_span(
+        compacted = await compact_with_span(
             request_ctx,
             strategy='ClampOversizedMessages',
             messages=messages,
             compact=lambda: self.compact(messages, request_ctx),
             tokenizer=self.tokenizer,
         )
+        persist_compacted_messages(ctx, request_context, compacted)
         return request_context

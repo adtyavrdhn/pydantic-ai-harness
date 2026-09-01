@@ -114,6 +114,7 @@ def _make_ctx(
     @dataclasses.dataclass
     class _FakeCtx:
         usage: RunUsage
+        messages: list[ModelMessage] = dataclasses.field(default_factory=list[ModelMessage])
         usage_limits: UsageLimits | None = None
         model: Model = dataclasses.field(default_factory=TestModel)
         deps: None = None
@@ -416,6 +417,8 @@ class TestSlidingWindowCompaction:
         ctx = _make_ctx()
         result = await sw.before_model_request(ctx, rc)
         assert len(result.messages) <= 3
+        assert ctx.messages == result.messages
+        assert ctx.messages is not result.messages
 
     @pytest.mark.anyio
     async def test_trims_by_token_threshold(self):

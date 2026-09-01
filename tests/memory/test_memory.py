@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import pytest
@@ -17,13 +17,11 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
     ModelRequest,
-    ModelRequestPart,
     ModelResponse,
     SystemPromptPart,
     TextContent,
     TextPart,
     ToolCallPart,
-    UserContent,
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -1024,7 +1022,7 @@ class TestInjection:
             assert contexts[0].endswith('\n</memory>')
             assert stored in contexts[0]
 
-    async def test_continued_and_serialized_history_replaces_prior_memory_context(self) -> None:
+    async def test_continued_and_serialized_history_refreshes_request_only_memory_context(self) -> None:
         store = InMemoryStore()
         await _seed(store, 'main/MEMORY.md', '- version one')
 
@@ -1033,7 +1031,7 @@ class TestInjection:
 
         first = await Agent(FunctionModel(finish), capabilities=[Memory(store=store)]).run('first')
         serialized = first.all_messages_json()
-        assert len(_memory_contexts(first.all_messages())) == 1
+        assert _memory_contexts(first.all_messages()) == []
         await _seed(store, 'main/MEMORY.md', '- version two')
 
         for history in (
@@ -1054,37 +1052,27 @@ class TestInjection:
             assert len(captured[0]) == 1
             assert '- version one' not in captured[0][0]
             assert '- version two' in captured[0][0]
-            assert len(_memory_contexts(continued.all_messages())) == 1
+            assert _memory_contexts(continued.all_messages()) == []
 
     async def test_cleanup_preserves_user_content_merged_with_memory_context(self) -> None:
         store = InMemoryStore()
         await _seed(store, 'main/MEMORY.md', '- fact')
 
-        def finish(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            return ModelResponse(parts=[TextPart('done')])
-
-        first = await Agent(FunctionModel(finish), capabilities=[Memory(store=store)]).run('ORIGINAL USER PROMPT')
-        history = ModelMessagesTypeAdapter.validate_json(first.all_messages_json())
-        for index, message in enumerate(history):
-            if not isinstance(message, ModelRequest) or not _memory_contexts([message]):
-                continue
-            content: list[UserContent] = []
-            other_parts: list[ModelRequestPart] = []
-            for part in [SystemPromptPart('unrelated system context'), *message.parts]:
-                if not isinstance(part, UserPromptPart):
-                    other_parts.append(part)
-                elif isinstance(part.content, str):
-                    content.append(part.content)
-                else:
-                    content.extend(part.content)
-            history[index] = replace(
-                message,
+        history: list[ModelMessage] = [
+            ModelRequest(
                 parts=[
-                    *other_parts,
-                    UserPromptPart([TextContent('UNRELATED USER CONTEXT')]),
-                    UserPromptPart(content),
-                ],
-            )
+                    SystemPromptPart('unrelated system context'),
+                    UserPromptPart(
+                        [
+                            TextContent('UNRELATED USER CONTEXT'),
+                            TextContent('<memory>\n- stale fact\n</memory>', metadata='pydantic-ai-harness.memory.v1'),
+                        ]
+                    ),
+                    UserPromptPart('ORIGINAL USER PROMPT'),
+                ]
+            ),
+            ModelResponse(parts=[TextPart('done')]),
+        ]
 
         captured: list[list[ModelMessage]] = []
 
@@ -1101,6 +1089,8 @@ class TestInjection:
         assert 'UNRELATED USER CONTEXT' in _user_text(captured[0])
         assert len(_memory_contexts(captured[0])) == 1
         assert 'ORIGINAL USER PROMPT' in _user_text(continued.all_messages())
+        assert 'UNRELATED USER CONTEXT' in _user_text(continued.all_messages())
+        assert _memory_contexts(continued.all_messages()) == []
 
     async def test_disabled_injection_removes_memory_context_from_continued_history(self) -> None:
         store = InMemoryStore()
@@ -1185,7 +1175,7 @@ class TestInjection:
             assert len(contexts) == 2
             assert any('personal fact' in context for context in contexts)
             assert any('org fact' in context for context in contexts)
-        assert len(_memory_contexts(second.all_messages())) == 2
+        assert _memory_contexts(second.all_messages()) == []
 
     async def test_legacy_unqualified_marker_is_stripped_from_continued_history(self) -> None:
         store = InMemoryStore()
@@ -1215,7 +1205,7 @@ class TestInjection:
         assert len(captured[0]) == 1
         assert 'durable fact' in captured[0][0]
         assert 'stale fact' not in captured[0][0]
-        assert len(_memory_contexts(result.all_messages())) == 1
+        assert _memory_contexts(result.all_messages()) == []
 
 
 class TestConfigurationAndSpecs:

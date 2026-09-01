@@ -89,6 +89,14 @@ def _collect_message_text(messages: Sequence[ModelMessage]) -> list[str]:
     return segments
 
 
+def persist_compacted_messages(
+    ctx: RunContext[AgentDepsT], request_context: ModelRequestContext, messages: list[ModelMessage]
+) -> None:
+    """Replace persistent history and the independent request view with the compacted messages."""
+    ctx.messages[:] = messages
+    request_context.messages = list(messages)
+
+
 def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:
     """Collect all text segments from a sequence of messages, instructions included."""
     segments = _collect_message_text(messages)

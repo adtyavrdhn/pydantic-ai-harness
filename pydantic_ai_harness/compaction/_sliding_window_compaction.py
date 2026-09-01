@@ -28,6 +28,7 @@ from pydantic_ai_harness.compaction._shared import (
     exceeds,
     find_safe_cutoff,
     find_token_cutoff,
+    persist_compacted_messages,
     prepend_first_user_message,
     record_compaction_reclaim,
     resolve_token_trigger,
@@ -248,5 +249,5 @@ class SlidingWindowCompaction(AbstractCapability[AgentDepsT]):
             estimate_token_count(messages, self.tokenizer),
             estimate_token_count(compacted, self.tokenizer),
         )
-        request_context.messages = compacted
+        persist_compacted_messages(ctx, request_context, compacted)
         return request_context

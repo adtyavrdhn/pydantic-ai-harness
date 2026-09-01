@@ -45,6 +45,7 @@ from pydantic_ai_harness.compaction._shared import (
     find_safe_cutoff,
     find_token_cutoff,
     is_realtime_model,
+    persist_compacted_messages,
     record_compaction_reclaim,
     resolve_token_trigger,
     validate_token_trigger,
@@ -612,7 +613,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
             estimate_token_count(messages, self.tokenizer),
             estimate_token_count(compacted, self.tokenizer),
         )
-        request_context.messages = compacted
+        persist_compacted_messages(ctx, request_context, compacted)
         return request_context
 
     @durable_operation('summarize')

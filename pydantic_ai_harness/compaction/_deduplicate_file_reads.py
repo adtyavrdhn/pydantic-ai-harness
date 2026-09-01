@@ -18,6 +18,7 @@ from pydantic_ai_harness.compaction._shared import (
     estimate_token_count,
     exceeds,
     iter_tool_pairs,
+    persist_compacted_messages,
     rebuild_with_cleared,
     record_compaction_reclaim,
     resolve_token_trigger,
@@ -161,5 +162,5 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
             estimate_token_count(messages, self.tokenizer),
             estimate_token_count(compacted, self.tokenizer),
         )
-        request_context.messages = compacted
+        persist_compacted_messages(ctx, request_context, compacted)
         return request_context

@@ -20,6 +20,7 @@ from pydantic_ai_harness.compaction._shared import (
     context_for_request,
     estimate_context_tokens,
     estimate_token_count,
+    persist_compacted_messages,
     record_compaction_reclaim,
     resolve_token_trigger,
     validate_token_trigger,
@@ -212,5 +213,5 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
             estimate_token_count(messages, self.tokenizer),
             estimate_token_count(compacted, self.tokenizer),
         )
-        request_context.messages = compacted
+        persist_compacted_messages(ctx, request_context, compacted)
         return request_context

@@ -89,6 +89,7 @@ def _ctx(model: Any = None) -> Any:
     @dataclasses.dataclass
     class _FakeCtx:
         usage: RunUsage = dataclasses.field(default_factory=RunUsage)
+        messages: list[ModelMessage] = dataclasses.field(default_factory=list[ModelMessage])
         usage_limits: UsageLimits | None = None
         model: Model = dataclasses.field(default_factory=TestModel)
         deps: None = None
