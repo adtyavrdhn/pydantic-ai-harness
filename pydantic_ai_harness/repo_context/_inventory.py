@@ -15,8 +15,9 @@ _ROOT_NOTES = {
     '.grok': 'Grok setup is derived from the .claude/.agents setup.',
 }
 
+# Sandbox directory entries do not say whether a directory is a symlink, so a walk cannot
+# detect a symlink cycle; this bound stops one. Real skill trees are two levels deep.
 _MAX_SKILL_DEPTH = 8
-_MAX_INVENTORY_ENTRIES = 10_000
 
 
 class AssetRoot(BaseModel):
@@ -78,7 +79,6 @@ async def _scan_skills(sandbox: Sandbox, skills_root: str, workspace: str) -> li
 
     found: list[str] = []
     pending = deque([(skills_root, 0)])
-    visited = 0
     while pending:
         directory, depth = pending.popleft()
         # Defensive race: the directory may disappear after `_stat`.
@@ -86,18 +86,12 @@ async def _scan_skills(sandbox: Sandbox, skills_root: str, workspace: str) -> li
             entries = await sandbox.fs.list_dir(directory)
         except FileNotFoundError:  # pragma: no cover
             continue
-        visited += len(entries)
-        if visited > _MAX_INVENTORY_ENTRIES:
-            raise RuntimeError(f'Asset inventory exceeded {_MAX_INVENTORY_ENTRIES} entries below {skills_root!r}.')
         for entry in entries:
-            path = _child_path(directory, entry.name, skills_root)
-            if path is None:
-                continue
             if entry.is_dir:
                 if depth < _MAX_SKILL_DEPTH:
-                    pending.append((path, depth + 1))
+                    pending.append((entry.path, depth + 1))
             elif entry.name == 'SKILL.md':
-                found.append(_relative(path, workspace))
+                found.append(_relative(entry.path, workspace))
     return found
 
 
@@ -110,15 +104,7 @@ async def _scan_agents(sandbox: Sandbox, agents_root: str, workspace: str) -> li
         entries = await sandbox.fs.list_dir(agents_root)
     except FileNotFoundError:  # pragma: no cover
         return []
-    if len(entries) > _MAX_INVENTORY_ENTRIES:
-        raise RuntimeError(f'Asset inventory exceeded {_MAX_INVENTORY_ENTRIES} entries below {agents_root!r}.')
-    return [
-        _relative(path, workspace)
-        for entry in entries
-        if not entry.is_dir
-        and entry.name.endswith('.md')
-        and (path := _child_path(agents_root, entry.name, agents_root)) is not None
-    ]
+    return [_relative(entry.path, workspace) for entry in entries if not entry.is_dir and entry.name.endswith('.md')]
 
 
 async def _stat(sandbox: Sandbox, path: str) -> SandboxFileEntry | None:
@@ -126,20 +112,6 @@ async def _stat(sandbox: Sandbox, path: str) -> SandboxFileEntry | None:
         return await sandbox.fs.stat(path)
     except FileNotFoundError:
         return None
-
-
-def _child_path(directory: str, name: str, root: str) -> str | None:
-    """Build a lexical child path and reject malformed backend entries."""
-    # Protocol-conforming backends return base names, but do not trust malformed entries.
-    if name in ('', '.', '..') or posixpath.basename(name) != name:  # pragma: no cover
-        return None
-    path = posixpath.normpath(posixpath.join(directory, name))
-    # POSIX sandbox paths share one root; this only catches malformed mixed-drive input.
-    try:
-        confined = posixpath.commonpath((root, path)) == root
-    except ValueError:  # pragma: no cover
-        return None
-    return path if confined else None
 
 
 def _relative(path: str, workspace: str) -> str:

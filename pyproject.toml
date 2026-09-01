@@ -153,8 +153,8 @@ lint = [
 [tool.uv.sources]
 # Draft stack dependency on pydantic/pydantic-ai#6492. Before merge, replace this pin and raise
 # the package floor to the first released version containing both durable operations and the
-# sandbox primitives. Reverify `_FRAMEWORK_UNAVAILABLE_REASONS` against that release at the same time.
-pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "a92d6a5a4e7d8cd357d67a6b9ff8fa4971bad57a" }
+# sandbox primitives.
+pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "3349bfe7631c61b358b18c420b1cc32a66eae639" }
 
 [tool.hatch.version]
 source = 'uv-dynamic-versioning'

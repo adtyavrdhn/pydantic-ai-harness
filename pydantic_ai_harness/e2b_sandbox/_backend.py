@@ -37,7 +37,13 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 import anyio
-from pydantic_ai.sandboxes import CommandResult, FileEntry, SandboxTimeoutError, SandboxUnavailableError
+from pydantic_ai.sandboxes import (
+    CommandResult,
+    FileEntry,
+    SandboxBackend,
+    SandboxTimeoutError,
+    SandboxUnavailableError,
+)
 from typing_extensions import Self
 
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
@@ -45,7 +51,6 @@ from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, r
 if TYPE_CHECKING:
     import e2b
     from pydantic_ai.sandboxes import (
-        SandboxBackend,
         SandboxCommand,
         SandboxFilesystem,
         SandboxProcess,
@@ -322,7 +327,7 @@ def _file_entry(entry: e2b.EntryInfo) -> FileEntry:
     return FileEntry(name=entry.name, path=entry.path, is_dir=is_dir, size=None if is_dir else entry.size)
 
 
-class E2BSandboxBackend:
+class E2BSandboxBackend(SandboxBackend):
     """An [E2B](https://e2b.dev) sandbox as a Pydantic AI [`SandboxBackend`][pydantic_ai.sandboxes.SandboxBackend].
 
     Commands and file operations run inside an E2B microVM, so the host is never exposed.
@@ -340,8 +345,8 @@ class E2BSandboxBackend:
     expires or when the caller is cancelled. That kill signals the command's own process; a
     process the command started in the background outlives it until the sandbox is torn down.
 
-    Deliberately no base class: it conforms to the protocol structurally, like any third-party
-    backend would.
+    The protocol is structural, but subclassing it here makes a signature drift fail the type
+    check on this class instead of at a distant `Sandbox.wrap` call.
 
     Args:
         sandbox: A live `e2b.AsyncSandbox`. Whoever created it owns killing it.
@@ -352,7 +357,12 @@ class E2BSandboxBackend:
             expired sandbox. `None` for a sandbox this process did not create.
     """
 
-    provider = PROVIDER
+    sandbox: e2b.AsyncSandbox
+    """The underlying `e2b.AsyncSandbox`, for provider-specific functionality."""
+
+    @property
+    def provider(self) -> str:
+        return PROVIDER
 
     def __init__(
         self,
@@ -363,7 +373,6 @@ class E2BSandboxBackend:
     ) -> None:
         working_dir = absolute_path('working_dir', working_dir)
         self.sandbox = sandbox
-        """The underlying `e2b.AsyncSandbox`, for provider-specific functionality."""
         self.fs = _E2BFilesystem(self)
         self._working_dir = working_dir
         self._sandbox_timeout = sandbox_timeout
