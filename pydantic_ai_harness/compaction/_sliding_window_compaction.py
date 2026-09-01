@@ -28,6 +28,7 @@ from pydantic_ai_harness.compaction._shared import (
     exceeds,
     find_safe_cutoff,
     find_token_cutoff,
+    messages_for_compaction,
     persist_compacted_messages,
     prepend_first_user_message,
     record_compaction_reclaim,
@@ -224,7 +225,7 @@ class SlidingWindowCompaction(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         """Trim the message list if it exceeds the configured threshold."""
-        messages: list[ModelMessage] = list(request_context.messages)
+        messages = messages_for_compaction(ctx, request_context)
         request_ctx = context_for_request(ctx, request_context)
         token_trigger = resolve_token_trigger(
             self.max_tokens, self.max_fraction, request_ctx.model, self.fallback_context_window, self.context_window

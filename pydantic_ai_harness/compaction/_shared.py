@@ -95,22 +95,22 @@ def persist_compacted_messages(
     """Replace both views without persisting request-only parts appended by outer wrappers."""
     persistent_messages = list(messages)
     request_only_parts = _request_only_tail_parts(ctx.messages, request_context.messages)
+    request_messages = list(persistent_messages)
     # Exercised by the pydantic-ai#7053 compatibility job; released core shares both views.
     if request_only_parts:  # pragma: lax no cover
-        for index in range(len(persistent_messages) - 1, -1, -1):
-            message = persistent_messages[index]
-            if (
-                isinstance(message, ModelRequest)
-                and tuple(message.parts[-len(request_only_parts) :]) == request_only_parts
-            ):
-                retained_parts = message.parts[: -len(request_only_parts)]
-                if retained_parts:
-                    persistent_messages[index] = replace(message, parts=retained_parts)
-                else:
-                    del persistent_messages[index]
-                break
+        if request_messages and isinstance(tail := request_messages[-1], ModelRequest):
+            request_messages[-1] = replace(tail, parts=[*tail.parts, *request_only_parts])
+        else:
+            request_messages.append(ModelRequest(parts=list(request_only_parts)))
     ctx.messages[:] = persistent_messages
-    request_context.messages = list(messages)
+    request_context.messages = request_messages
+
+
+def messages_for_compaction(ctx: RunContext[AgentDepsT], request_context: ModelRequestContext) -> list[ModelMessage]:
+    """Return durable input when the current request has an independent ephemeral tail."""
+    if _request_only_tail_parts(ctx.messages, request_context.messages):  # pragma: lax no cover
+        return list(ctx.messages)
+    return list(request_context.messages)
 
 
 def _request_only_tail_parts(  # pragma: lax no cover

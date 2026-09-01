@@ -18,6 +18,7 @@ from pydantic_ai_harness.compaction._shared import (
     estimate_token_count,
     exceeds,
     iter_tool_pairs,
+    messages_for_compaction,
     persist_compacted_messages,
     rebuild_with_cleared,
     record_compaction_reclaim,
@@ -132,7 +133,7 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         """Deduplicate file reads, optionally gated on a size threshold."""
-        messages: list[ModelMessage] = list(request_context.messages)
+        messages = messages_for_compaction(ctx, request_context)
         request_ctx = context_for_request(ctx, request_context)
         if self.max_messages is not None or self.max_tokens is not None or self.max_fraction is not None:
             token_trigger = resolve_token_trigger(

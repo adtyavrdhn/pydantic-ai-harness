@@ -833,13 +833,22 @@ class TestCompaction:
             mock_agent.return_value.run = AsyncMock(return_value=mock_result)
             result = await comp.before_model_request(ctx, request_context)
 
+        assert mock_agent.return_value.run.await_args is not None
+        summary_prompt = mock_agent.return_value.run.await_args.args[0]
+        assert 'request-only' not in summary_prompt
         assert len(result.messages) == 1
         summary_message = result.messages[0]
         assert isinstance(summary_message, ModelRequest)
         assert [part.content for part in summary_message.parts if isinstance(part, SystemPromptPart)] == [
             'Summary of previous conversation:\n\nSummary of conversation.'
         ]
-        assert ctx.messages == result.messages
+        assert [part.content for part in summary_message.parts if isinstance(part, UserPromptPart)] == [
+            f'request-only {index}' for index in range(injection_count)
+        ]
+        assert len(ctx.messages) == 1
+        persistent_summary = ctx.messages[0]
+        assert isinstance(persistent_summary, ModelRequest)
+        assert all(not isinstance(part, UserPromptPart) for part in persistent_summary.parts)
 
     @pytest.mark.anyio
     async def test_compaction_preserves_system_prompts(self):

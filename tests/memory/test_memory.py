@@ -11,7 +11,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Tracer
-from pydantic_ai import Agent, AgentSpec, DeferredToolRequests, ModelRetry, RunContext, UserError
+from pydantic_ai import Agent, AgentSpec, DeferredToolRequests, ModelRetry, RunContext
 from pydantic_ai.capabilities import ToolSearch
 from pydantic_ai.messages import (
     ModelMessage,
@@ -1079,13 +1079,19 @@ class TestInjection:
         ]
         result = await Agent(
             FunctionModel(capture),
-            capabilities=[Memory(store=store), SlidingWindowCompaction(max_messages=2, keep_messages=2)],
+            capabilities=[
+                Memory(store=store),
+                SlidingWindowCompaction(max_messages=2, keep_messages=2, preserve_first_user_message=False),
+            ],
         ).run('continue', message_history=history)
 
         assert len(captured) == 1
         assert len(captured[0]) == 1
         assert '- fresh fact' in captured[0][0]
-        assert _memory_contexts(result.all_messages()) == []
+        persisted = result.all_messages()
+        assert len(persisted) == 3
+        assert isinstance(persisted[0], ModelResponse)
+        assert _memory_contexts(persisted) == []
 
     async def test_compaction_can_drop_request_only_memory_with_all_messages(self) -> None:  # pragma: lax no cover
         if not hasattr(ModelRequestContext, 'usage_responses'):
@@ -1105,16 +1111,19 @@ class TestInjection:
                 SlidingWindowCompaction(max_messages=1, keep_messages=0, preserve_first_user_message=False),
             ],
         )
-        with pytest.raises(UserError, match='Processed history cannot be empty'):
-            await agent.run(
-                'continue',
-                message_history=[
-                    ModelRequest(parts=[UserPromptPart('old')]),
-                    ModelResponse(parts=[TextPart('old response')]),
-                ],
-            )
+        result = await agent.run(
+            'continue',
+            message_history=[
+                ModelRequest(parts=[UserPromptPart('old')]),
+                ModelResponse(parts=[TextPart('old response')]),
+            ],
+        )
 
-        assert captured == []
+        assert len(captured) == 1
+        assert len(_memory_contexts(captured[0])) == 1
+        assert '- fresh fact' in _memory_contexts(captured[0])[0]
+        assert len(result.all_messages()) == 1
+        assert isinstance(result.all_messages()[0], ModelResponse)
 
     async def test_cleanup_preserves_user_content_merged_with_memory_context(self) -> None:
         store = InMemoryStore()

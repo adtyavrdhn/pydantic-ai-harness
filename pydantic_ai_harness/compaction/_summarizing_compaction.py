@@ -45,6 +45,7 @@ from pydantic_ai_harness.compaction._shared import (
     find_safe_cutoff,
     find_token_cutoff,
     is_realtime_model,
+    messages_for_compaction,
     persist_compacted_messages,
     record_compaction_reclaim,
     resolve_token_trigger,
@@ -588,7 +589,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         """Summarize older messages when the threshold is exceeded."""
-        messages: list[ModelMessage] = list(request_context.messages)
+        messages = messages_for_compaction(ctx, request_context)
         request_ctx = context_for_request(ctx, request_context)
         token_trigger = resolve_token_trigger(
             self.max_tokens, self.max_fraction, request_ctx.model, self.fallback_context_window, self.context_window

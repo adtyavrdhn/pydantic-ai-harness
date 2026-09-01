@@ -20,6 +20,7 @@ from pydantic_ai_harness.compaction._shared import (
     context_for_request,
     estimate_context_tokens,
     estimate_token_count,
+    messages_for_compaction,
     persist_compacted_messages,
     record_compaction_reclaim,
     resolve_token_trigger,
@@ -185,7 +186,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         """Escalate through the tiers when the conversation exceeds the target."""
-        messages: list[ModelMessage] = list(request_context.messages)
+        messages = messages_for_compaction(ctx, request_context)
         # The tiers get the request's context, not the run's: a tier that resolves a model --
         # a summarizing one, or a `TieredCompaction` nested inside this one -- has to reach the
         # same conclusion this gate did.
