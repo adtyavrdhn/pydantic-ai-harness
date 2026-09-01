@@ -65,7 +65,14 @@ class Combines:
     check: Callable[[Any], None]
 
 
-Policy = Anonymous | Combines
+@dataclass
+class Rejects:
+    """A default `id`, and two of them are a mistake this capability will not paper over."""
+
+    reason: str
+
+
+Policy = Anonymous | Combines | Rejects
 
 
 def _check_memory(merged: Any) -> None:
@@ -165,7 +172,15 @@ COMBINE_POLICY: dict[str, Policy] = {
         ),
         _check_advisor,
     ),
+    # -- A default `id`, but two of them are a mistake rather than a composition. --
+    'StackOne': Rejects('each instance authenticates a different account, so merging would silently drop one'),
     # -- Several of these is the normal case, so they stay anonymous. --
+    'BrowserUse': Anonymous('one per browser profile, with its own allow-list'),
+    'ExaAgent': Anonymous('one per Exa research configuration'),
+    'ExaSearch': Anonymous('one per Exa search configuration'),
+    'PlaywrightBrowser': Anonymous('one per browser profile'),
+    'YouResearch': Anonymous('one per You.com research configuration'),
+    'YouSearch': Anonymous('one per You.com search configuration'),
     'Coder': Anonymous('a packaged harness; composing two is composing their members'),
     'Researcher': Anonymous('a packaged harness; composing two is composing their members'),
     'CapabilityCreation': Anonymous('one per authoring directory'),
@@ -178,6 +193,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     'FileSystem': Anonymous('one per rooted directory, with its own allow/deny patterns'),
     'InputGuardrail': Anonymous('several guards is the design'),
     'OutputGuardrail': Anonymous('several guards is the design'),
+    'PromptInjectionDefender': Anonymous('one per `tool_filter`; several scopes compose'),
     'ToolGuardrail': Anonymous('several guards is the design'),
     'LocalStack': Anonymous('one per endpoint'),
     'Macroscope': Anonymous('one per configured command'),
@@ -275,6 +291,15 @@ def test_capability_combine_policy_holds(name: str) -> None:
     if name not in shipped:  # pragma: no cover
         pytest.skip(f'{name} needs an optional dependency group that is not installed')
     capability_type = shipped[name]
+
+    if isinstance(policy, Rejects):
+        assert _default_id(capability_type) is not None, (
+            f'{name} is declared `Rejects` but carries no default id, so `combine` is never reached'
+        )
+        assert 'combine' not in vars(capability_type), (
+            f'{name} is declared `Rejects` but overrides `combine`, which resolves duplicates'
+        )
+        return
 
     if isinstance(policy, Anonymous):
         assert _default_id(capability_type) is None, (
