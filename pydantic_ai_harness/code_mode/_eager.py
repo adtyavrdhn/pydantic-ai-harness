@@ -77,6 +77,9 @@ class _EagerPart:
     output_capped: bool = False
     """Accumulation hit the host-side byte cap; later fragment prints are dropped."""
 
+    output_bytes: int = 0
+    """Running UTF-8 size of `output`, tracked incrementally so feeds stay linear."""
+
     nested_calls: dict[str, ToolCallPart] = field(default_factory=dict[str, ToolCallPart])
     """Tool calls the pumped statements dispatched, keyed by nested tool call id."""
 

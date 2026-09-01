@@ -927,3 +927,22 @@ class TestEagerRewriteAndDurability:
 
         assert result.output == 'done'
         assert calls == ['alpha']
+
+    async def test_oversized_prefix_is_not_parsed_on_the_host(self):
+        """A snippet past the scan cap feeds nothing; the sandbox parser handles it whole."""
+        ctx = build_run_context(None)
+        capability = CodeMode[None](eager=True)
+        run_capability = await capability.for_run(ctx)
+        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[]))
+        assert isinstance(toolset, CodeModeToolset)
+        eager = toolset.eager
+        assert eager is not None
+
+        big = 'x = 1\n' * 60_000
+        await eager.observe(
+            PartStartEvent(index=0, part=ToolCallPart(tool_name='run_code', args={'code': big}, tool_call_id='c1')),
+            ctx,
+        )
+        taken = eager.pop_watch('c1', big)
+        assert taken is not None
+        assert taken.feed_count == 0 and not taken.queue
