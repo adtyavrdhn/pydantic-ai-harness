@@ -4025,8 +4025,8 @@ lint = [
 
 [[package]]
 name = "pydantic-ai-slim"
-version = "2.37.1.dev65+b6cb22b2"
-source = { git = "https://github.com/pydantic/pydantic-ai?subdirectory=pydantic_ai_slim&branch=default-capability-ids#b6cb22b278256189bc270ccd8a157fdd26e3bc3b" }
+version = "2.37.1.dev68+ed040d4c"
+source = { git = "https://github.com/pydantic/pydantic-ai?subdirectory=pydantic_ai_slim&branch=default-capability-ids#ed040d4ca25bb0669c39368b317cb605fdd68d97" }
 dependencies = [
     { name = "anyio", version = "4.12.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "anyio", version = "4.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -4322,8 +4322,8 @@ wheels = [
 
 [[package]]
 name = "pydantic-graph"
-version = "2.37.1.dev65+b6cb22b2"
-source = { git = "https://github.com/pydantic/pydantic-ai?subdirectory=pydantic_graph&branch=default-capability-ids#b6cb22b278256189bc270ccd8a157fdd26e3bc3b" }
+version = "2.37.1.dev68+ed040d4c"
+source = { git = "https://github.com/pydantic/pydantic-ai?subdirectory=pydantic_graph&branch=default-capability-ids#ed040d4ca25bb0669c39368b317cb605fdd68d97" }
 dependencies = [
     { name = "anyio", version = "4.12.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "anyio", version = "4.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },

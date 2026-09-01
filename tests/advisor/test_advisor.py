@@ -54,6 +54,15 @@ def _has_tool_return(messages: Sequence[ModelMessage]) -> bool:
     return any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts)
 
 
+_RESOLVES_DUPLICATE_IDS = hasattr(AbstractCapability, 'combine')
+"""Whether the installed `pydantic-ai` resolves two capabilities sharing an `id` rather than raising.
+
+Keyed on the hook itself rather than a version number: the release that introduces
+`AbstractCapability.combine` (pydantic/pydantic-ai#7248) is not cut yet, so there is no number to
+compare against, and asking whether the behaviour is present needs no bookkeeping once there is.
+"""
+
+
 class TestAdvisor:
     async def test_uses_native_advisor_for_matching_provider(self) -> None:
         seen: list[ModelRequestParameters] = []
@@ -389,14 +398,20 @@ class TestAdvisor:
     async def test_combines_duplicates_and_rejects_a_conflicting_tool_name(self) -> None:
         model = FunctionModel(lambda _messages, _info: ModelResponse(parts=[TextPart('done')]))
 
-        # An agent has one advisor, so two resolve to one rather than colliding -- which is what
-        # lets two packaged harnesses that each carry an `Advisor` compose.
-        agent = Agent(model, capabilities=[Advisor(model, max_tokens=2048), Advisor(model, max_tokens=4096)])
-        await agent.run('Review this.')
+        # This branch pins the composing behaviour; `_RESOLVES_DUPLICATE_IDS` keeps the file
+        # runnable against a released core that still raises (see its docstring).
+        if _RESOLVES_DUPLICATE_IDS:  # pragma: no cover - depends on the installed core
+            # An agent has one advisor, so two resolve to one rather than colliding -- which is
+            # what lets two packaged harnesses that each carry an `Advisor` compose.
+            agent = Agent(model, capabilities=[Advisor(model, max_tokens=2048), Advisor(model, max_tokens=4096)])
+            await agent.run('Review this.')
 
-        # Naming them apart is how you keep both, and that still conflicts on the tool name.
-        with pytest.raises(UserError, match='tool whose name conflicts'):
-            await Agent(model, capabilities=[Advisor(model), Advisor(model, id='second')]).run('Review this.')
+            # Naming them apart is how you keep both, and that still conflicts on the tool name.
+            with pytest.raises(UserError, match='tool whose name conflicts'):
+                await Agent(model, capabilities=[Advisor(model), Advisor(model, id='second')]).run('Review this.')
+        else:  # pragma: no cover - depends on the installed core
+            with pytest.raises(UserError, match="Capability id 'advisor' is used by multiple capabilities"):
+                Agent(model, capabilities=[Advisor(model), Advisor(model)])
 
         def advisor(prompt: str) -> str:  # pragma: no cover
             return prompt
