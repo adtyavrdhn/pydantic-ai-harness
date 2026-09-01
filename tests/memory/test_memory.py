@@ -30,6 +30,7 @@ from pydantic_ai.models.instrumented import InstrumentationSettings
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
+from pydantic_ai_harness.compaction import SlidingWindowCompaction
 from pydantic_ai_harness.memory import (
     FileStore,
     InMemoryStore,
@@ -1060,6 +1061,31 @@ class TestInjection:
             assert '- version one' not in captured[0][0]
             assert '- version two' in captured[0][0]
             _assert_history_memory_count(continued.all_messages(), released_core=1)
+
+    async def test_compaction_does_not_persist_request_only_memory_context(self) -> None:
+        if not hasattr(ModelRequestContext, 'usage_responses'):
+            pytest.skip('requires independent request history from pydantic-ai#7053')
+        store = InMemoryStore()
+        await _seed(store, 'main/MEMORY.md', '- fresh fact')
+        captured: list[list[str]] = []
+
+        def capture(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            captured.append(_memory_contexts(messages))
+            return ModelResponse(parts=[TextPart('done')])
+
+        history: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart('old')]),
+            ModelResponse(parts=[TextPart('old response')]),
+        ]
+        result = await Agent(
+            FunctionModel(capture),
+            capabilities=[Memory(store=store), SlidingWindowCompaction(max_messages=2, keep_messages=2)],
+        ).run('continue', message_history=history)
+
+        assert len(captured) == 1
+        assert len(captured[0]) == 1
+        assert '- fresh fact' in captured[0][0]
+        assert _memory_contexts(result.all_messages()) == []
 
     async def test_cleanup_preserves_user_content_merged_with_memory_context(self) -> None:
         store = InMemoryStore()

@@ -92,9 +92,34 @@ def _collect_message_text(messages: Sequence[ModelMessage]) -> list[str]:
 def persist_compacted_messages(
     ctx: RunContext[AgentDepsT], request_context: ModelRequestContext, messages: list[ModelMessage]
 ) -> None:
-    """Replace persistent history and the independent request view with the compacted messages."""
-    ctx.messages[:] = messages
+    """Replace both views without persisting request-only parts appended by outer wrappers."""
+    persistent_messages = list(messages)
+    request_only_parts = _request_only_tail_part_count(ctx.messages, request_context.messages)
+    if request_only_parts:
+        assert persistent_messages
+        tail = persistent_messages[-1]
+        assert isinstance(tail, ModelRequest)
+        assert len(tail.parts) >= request_only_parts
+        persistent_messages[-1] = replace(tail, parts=tail.parts[:-request_only_parts])
+    ctx.messages[:] = persistent_messages
     request_context.messages = list(messages)
+
+
+def _request_only_tail_part_count(
+    persistent_messages: Sequence[ModelMessage], request_messages: Sequence[ModelMessage]
+) -> int:
+    """Count parts appended to the current request after core made the independent request view."""
+    if not persistent_messages or not request_messages:
+        return 0
+    persistent_tail = persistent_messages[-1]
+    request_tail = request_messages[-1]
+    if not isinstance(persistent_tail, ModelRequest) or not isinstance(request_tail, ModelRequest):
+        return 0
+    persistent_parts = persistent_tail.parts
+    request_parts = request_tail.parts
+    if request_parts[: len(persistent_parts)] != persistent_parts:
+        return 0
+    return len(request_parts) - len(persistent_parts)
 
 
 def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:
