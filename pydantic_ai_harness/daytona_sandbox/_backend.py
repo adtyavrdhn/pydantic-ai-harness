@@ -39,9 +39,10 @@ from typing_extensions import Self
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
 
 if TYPE_CHECKING:
-    from daytona import AsyncDaytona
+    from daytona import AsyncDaytona, AsyncSandbox
+
+    # Not re-exported at the package root; typing-only, so the private path never runs.
     from daytona._async.process import AsyncProcess
-    from daytona._async.sandbox import AsyncSandbox
     from pydantic_ai.sandboxes import (
         SandboxBackend,
         SandboxCommand,
