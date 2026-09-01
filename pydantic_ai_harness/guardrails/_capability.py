@@ -310,6 +310,16 @@ class InputGuardrail(AbstractCapability[AgentDepsT]):
             # drain so both tasks fully unwind before the cancellation propagates. The shield
             # holds for anyio-scope cancellation; a raw second `Task.cancel()` can still
             # pierce it.
+            #
+            # Not an anyio task group, deliberately. The children being raw asyncio tasks is
+            # what confines the re-delivery to this host task: anyio only re-cancels tasks its
+            # scopes track, so each child sees exactly one `.cancel()` and unwinds cleanly. As
+            # task-group children they would be re-cancelled inside their own cleanup on every
+            # cycle -- the failure above, one level down. A task group also cannot shield only
+            # its drain (`tg.cancel_scope.shield = True` covers the whole race, blocking
+            # `cancel_run()` outright), and anyio >= 4 wraps child exceptions in
+            # `BaseExceptionGroup`, which would keep the guard's `SkipModelRequest` from
+            # reaching pydantic-ai unwrapped.
             with anyio.CancelScope(shield=True):
                 await asyncio.gather(guard_task, handler_task, return_exceptions=True)
 
