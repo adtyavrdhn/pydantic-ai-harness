@@ -99,6 +99,10 @@ _CLIENT_DEADLINE_EXIT = -1
 # deadline looks like when its kill lands before the client's deadline fires.
 _SIGKILL_EXIT = 137
 
+# After a command's deadline expires, give Modal this long to report the server-side kill
+# before the result wait gives up (a wedged control plane must not hang `wait()` forever).
+_RESULT_GRACE = 30
+
 
 class ModalSandboxError(RuntimeError):
     """A recoverable Modal provider operation failed."""
@@ -165,12 +169,12 @@ class _ModalProcess:
         self,
         process: modal.container_process.ContainerProcess[bytes],
         *,
-        classify: Callable[[Exception, str], Awaitable[ModalSandboxError]],
+        backend: ModalSandboxBackend,
         deadline: int | None,
         started_at: float,
     ) -> None:
         self._process = process
-        self._classify = classify
+        self._backend = backend
         self._deadline = deadline
         self._started_at = started_at
         self._streaming = False
@@ -227,7 +231,7 @@ class _ModalProcess:
                 except Exception as error:
                     # Same taxonomy as `wait()`: a read that fails mid-stream may be a dead
                     # sandbox rather than the transport blip it looks like.
-                    raise await self._classify(error, 'Could not read the command output') from error
+                    raise await self._backend.operation_error(error, 'Could not read the command output') from error
                 for _, name, chunk in chunks:
                     if chunk is None:  # that stream reached EOF and is not re-armed
                         final = decoders[name].decode(b'', final=True)
@@ -274,19 +278,16 @@ class _ModalProcess:
                 stdout, stderr, exit_code = await gather
             else:
                 remaining = max(0.0, self._started_at + self._deadline - time.monotonic())
-                stdout, stderr, exit_code = await asyncio.wait_for(gather, remaining + 30)
+                stdout, stderr, exit_code = await asyncio.wait_for(gather, remaining + _RESULT_GRACE)
         except BaseException as error:
+            # Cancelling the gather cancels its children; awaiting them reaps the cancellations.
             gather.cancel()
-            for task in tasks:
-                task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            if isinstance(error, asyncio.CancelledError):
-                raise
-            if not isinstance(error, Exception):  # pragma: no cover - asyncio only raises cancellation here
-                raise error
-            raise await self._classify(
-                error, 'Could not read the command result (the command may still run until its deadline)'
-            ) from error
+            if isinstance(error, Exception):  # cancellation is BaseException-only and re-raises below
+                raise await self._backend.operation_error(
+                    error, 'Could not read the command result (the command may still run until its deadline)'
+                ) from error
+            raise
 
         elapsed = time.monotonic() - self._started_at
         # A wait first called long after the deadline can misdate an organic 137 as a timeout.
@@ -322,9 +323,12 @@ class _ModalProcess:
 class _ModalFilesystem:
     """Modal's sandbox filesystem API behind the `SandboxFilesystem` protocol."""
 
-    def __init__(self, sandbox: modal.Sandbox, classify: Callable[[Exception], Awaitable[ModalSandboxError]]) -> None:
-        self._sandbox = sandbox
-        self._classify = classify
+    def __init__(self, backend: ModalSandboxBackend) -> None:
+        self._backend = backend
+
+    @property
+    def _sandbox(self) -> modal.Sandbox:
+        return self._backend.sandbox
 
     @asynccontextmanager
     async def _translated(self, path: str) -> AsyncGenerator[None]:
@@ -341,7 +345,7 @@ class _ModalFilesystem:
         except modal.exception.SandboxFilesystemNotFoundError as e:
             raise FileNotFoundError(f'No such file or directory in the Modal sandbox: {path!r}') from e
         except modal.exception.Error as e:
-            raise await self._classify(e) from e
+            raise await self._backend.operation_error(e, f'Could not access {path!r} in the sandbox') from e
 
     async def read_bytes(self, path: str) -> bytes:
         async with self._translated(path):
@@ -391,7 +395,7 @@ class _ModalFilesystem:
         ):
             return False
         except modal.exception.Error as e:
-            raise await self._classify(e) from e
+            raise await self._backend.operation_error(e, f'Could not access {path!r} in the sandbox') from e
         return True
 
 
@@ -442,7 +446,7 @@ class ModalSandboxBackend:
         working_dir = absolute_path('working_dir', working_dir)
         self.sandbox = sandbox
         """The underlying `modal.Sandbox`, for provider-specific functionality."""
-        self.fs = _ModalFilesystem(sandbox, self._ambiguous_error)
+        self.fs = _ModalFilesystem(self)
         self._working_dir = working_dir
         self._sandbox_timeout = sandbox_timeout
 
@@ -662,8 +666,8 @@ class ModalSandboxBackend:
         """Execute a command and wait for it to complete.
 
         Modal has no per-command kill, so a cancelled `run()` stops the wait but leaves the
-        command running until its `timeout` deadline. Pass a finite `timeout` (the toolset
-        always does) so an abandoned command cannot run on indefinitely.
+        command running until its `timeout` deadline. Pass a finite `timeout` so an abandoned
+        command cannot run on indefinitely.
         """
         process = await self.start(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
         return await process.wait()
@@ -697,8 +701,8 @@ class ModalSandboxBackend:
             # a command printing invalid UTF-8 must not abort the run.
             process = await self.sandbox.exec.aio(*argv, timeout=deadline, workdir=cwd, env=variables, text=False)
         except modal.exception.Error as e:
-            raise await self._exec_error(e, 'Command could not run in the sandbox') from e
-        return _ModalProcess(process, classify=self._exec_error, deadline=deadline, started_at=started_at)
+            raise await self.operation_error(e, 'Command could not run in the sandbox') from e
+        return _ModalProcess(process, backend=self, deadline=deadline, started_at=started_at)
 
     def _unavailable_message(self) -> str:
         if self._sandbox_timeout is None:
@@ -709,41 +713,32 @@ class ModalSandboxBackend:
             'Start a new run, or raise sandbox_timeout for longer work.'
         )
 
-    async def _exec_error(self, e: Exception, context: str) -> ModalSandboxError:
-        """Map an exception raised while running a command.
+    async def operation_error(self, e: Exception, context: str) -> ModalSandboxError:
+        """Translate an SDK failure into this backend's error taxonomy.
 
-        A `ConflictError` is ambiguous (first exec on a dead sandbox, or a transient abort), so
-        it is classified by polling. A terminated or missing sandbox and rejected credentials
-        are terminal. Everything else -- another Modal error or a non-Modal transport failure --
-        stays a recoverable `ModalSandboxError`. `context` distinguishes "the command never
-        started" from "the result could not be read", so the model is warned when the command
-        may still be running.
+        A terminated or missing sandbox and rejected credentials are terminal. Modal reports
+        two failures ambiguously -- a first exec on a dead sandbox raises `ConflictError`
+        (also used for transient aborts), and the filesystem layer wraps everything including
+        auth failures -- so those are classified by polling the sandbox. Everything else stays
+        a recoverable `ModalSandboxError` carrying `context`, which distinguishes "the command
+        never started" from "the result could not be read".
         """
         import modal
 
-        if isinstance(e, modal.exception.ConflictError):
-            return await self._ambiguous_error(e)
         if isinstance(e, modal.exception.AuthError):
             return ModalSandboxAuthError(_AUTH_MESSAGE)
         if isinstance(e, _unavailable_sandbox_exc_types()):
             return ModalSandboxUnavailableError(self._unavailable_message())
+        if isinstance(e, (modal.exception.ConflictError, modal.exception.SandboxFilesystemError)):
+            return await self._poll_ambiguous(e)
         if isinstance(e, modal.exception.Error):
             return ModalSandboxError(f'{context}: {e}')
         return ModalSandboxError(f'{context}: {type(e).__name__}: {e}')
 
-    async def _ambiguous_error(self, e: Exception) -> ModalSandboxError:
-        """Classify a Modal error that may mask sandbox death by polling the sandbox.
-
-        Two Modal layers report ambiguously: the filesystem wraps authentication failures as
-        `SandboxFilesystemError` and transient control-plane failures as `NotFoundError`, and a
-        first exec on a dead sandbox raises `ConflictError` (also used for transient aborts).
-        Polling only after an error recovers the distinction without adding a round trip to
-        successful operations.
-        """
+    async def _poll_ambiguous(self, e: Exception) -> ModalSandboxError:
+        # Polling only after an error keeps the extra round trip off successful operations.
         import modal
 
-        if isinstance(e, modal.exception.AuthError):
-            return ModalSandboxAuthError(_AUTH_MESSAGE)
         try:
             finished = await self.sandbox.poll.aio()
         except modal.exception.AuthError:
@@ -776,12 +771,7 @@ if TYPE_CHECKING:
         modal.container_process.ContainerProcess[bytes]
     )
     _backend = ModalSandboxBackend(_sandbox)
-    _process = _ModalProcess(
-        _container_process,
-        classify=_backend._exec_error,  # pyright: ignore[reportPrivateUsage]
-        deadline=None,
-        started_at=time.monotonic(),
-    )
+    _process = _ModalProcess(_container_process, backend=_backend, deadline=None, started_at=time.monotonic())
     _backend_conforms: SandboxBackend = _backend
     _filesystem_backend_conforms: SupportsFilesystem = _backend
     _start_conforms: SupportsStart = _backend

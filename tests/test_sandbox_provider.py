@@ -68,12 +68,9 @@ async def test_cleanup_call_survives_external_cancellation() -> None:
 
 
 async def test_raise_after_cleanup_prefers_cancellation() -> None:
-    raised_error = False
+    # Inside a cancelled scope the checkpoint delivers the cancellation, so the cleanup
+    # error is never raised: the scope exits having caught its own cancellation.
     with anyio.CancelScope() as scope:
         scope.cancel()
-        try:
-            await raise_after_cleanup(RuntimeError('cleanup failed'))
-        except RuntimeError:
-            raised_error = True
+        await raise_after_cleanup(RuntimeError('cleanup failed'))
     assert scope.cancelled_caught is True
-    assert raised_error is False

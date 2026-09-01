@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 import sys
 import time
@@ -278,6 +279,13 @@ class TestClose:
             await backend.close(terminate=True)
         assert fake_modal.sandboxes[0].terminated is True
 
+    async def test_first_failure_wins_when_both_calls_fail(self, fake_modal: FakeModal) -> None:
+        backend = await ModalSandboxBackend.create()
+        fake_modal.sandboxes[0].terminate_error = RuntimeError('terminate boom')
+        fake_modal.sandboxes[0].detach_error = RuntimeError('detach boom')
+        with pytest.raises(ModalSandboxError, match='terminate boom'):
+            await backend.close(terminate=True)
+
     async def test_auth_failure_during_close_is_typed(self, fake_modal: FakeModal) -> None:
         backend = await ModalSandboxBackend.create()
         fake_modal.sandboxes[0].terminate_error = fake_modal.auth_type('unauthenticated')
@@ -543,6 +551,18 @@ class TestProcess:
         with pytest.raises(SandboxTimeoutError) as second:
             await process.wait()
         assert first.value is second.value
+
+    async def test_cancelling_wait_propagates_the_cancellation(self, fake_modal: FakeModal) -> None:
+        # A cancelled wait abandons the result collection (reaping its readers) and re-raises
+        # the cancellation untranslated; the command itself runs on until its Modal deadline.
+        fake_modal.wait_hangs = True
+        backend = await ModalSandboxBackend.create()
+        process = await backend.start(['x'], timeout=5)
+        waiter = asyncio.create_task(process.wait())
+        await anyio.wait_all_tasks_blocked()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
 
     async def test_no_pid_is_reported(self, fake_modal: FakeModal) -> None:
         # Modal identifies a command by an exec id of its own and never reports the

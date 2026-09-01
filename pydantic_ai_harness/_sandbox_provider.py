@@ -19,19 +19,22 @@ def absolute_path(name: str, value: str | None) -> str | None:
     return posixpath.normpath(value)
 
 
-async def cleanup_call(call: Callable[[], Awaitable[object]], *, timeout: float) -> Exception | TimeoutError | None:
-    """Run one teardown RPC shielded from cancellation and bounded by `timeout`."""
+async def cleanup_call(call: Callable[[], Awaitable[object]], *, timeout: float) -> Exception | None:
+    """Run one teardown RPC shielded from cancellation and bounded by `timeout`.
+
+    Returns the failure instead of raising so the caller owns translation; a bare
+    `TimeoutError` means the bound expired. Shielded because teardown must still go out while
+    a run is being cancelled; bounded so a wedged control plane cannot hang teardown.
+    """
     error: Exception | None = None
-    timed_out = False
     with anyio.CancelScope(shield=True):
         with anyio.move_on_after(timeout) as scope:
             try:
                 await call()
             except Exception as exc:
                 error = exc
-        timed_out = scope.cancel_called
-    if timed_out:
-        return TimeoutError()
+        if scope.cancel_called:
+            return TimeoutError()
     return error
 
 
