@@ -226,7 +226,7 @@ def _is_capability_class(obj: object) -> TypeGuard[type[AbstractCapability[Any]]
         return False
 
 
-def _shipped_capability_types() -> dict[str, type[AbstractCapability[Any]]]:
+def _shipped_capability_types() -> tuple[dict[str, type[AbstractCapability[Any]]], list[str]]:
     """Every capability class in `pydantic_ai_harness`, public or not.
 
     Walks the package rather than reading an export list, so a capability that is never re-exported
@@ -234,17 +234,19 @@ def _shipped_capability_types() -> dict[str, type[AbstractCapability[Any]]]:
     import error means the capability could not have been used either.
     """
     found: dict[str, type[AbstractCapability[Any]]] = {}
+    skipped: list[str] = []
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         for module_info in pkgutil.walk_packages(pydantic_ai_harness.__path__, f'{pydantic_ai_harness.__name__}.'):
             try:
                 module = importlib.import_module(module_info.name)
-            except Exception:  # pragma: no cover
+            except Exception:
+                skipped.append(module_info.name)
                 continue
             for obj in vars(module).values():
                 if _is_capability_class(obj) and obj.__module__.startswith(pydantic_ai_harness.__name__):
                     found[obj.__name__] = obj
-    return found
+    return found, skipped
 
 
 def _default_id(capability_type: type[AbstractCapability[Any]]) -> str | None:
@@ -272,22 +274,26 @@ def test_every_capability_declares_a_combine_policy() -> None:
     outcome nobody chose. Add an entry to `COMBINE_POLICY`: `Anonymous` when several per agent is
     normal, `Combines` when it carries a default `id`.
     """
-    shipped = set(_shipped_capability_types())
+    found, skipped = _shipped_capability_types()
+    shipped = set(found)
     declared = set(COMBINE_POLICY)
     assert not (shipped - declared), (
         f'capabilities with no `COMBINE_POLICY` entry: {sorted(shipped - declared)}. '
         'Decide what two of them mean and add an entry.'
     )
-    assert not (declared - shipped), (
-        f'`COMBINE_POLICY` names capabilities that no longer exist: {sorted(declared - shipped)}.'
-    )
+    # Only meaningful when every module imported: an optional group that is not installed makes its
+    # capabilities look deleted, and the slim CI lane installs none of them.
+    if not skipped:
+        assert not (declared - shipped), (
+            f'`COMBINE_POLICY` names capabilities that no longer exist: {sorted(declared - shipped)}.'
+        )
 
 
 @pytest.mark.parametrize('name', sorted(COMBINE_POLICY))
 def test_capability_combine_policy_holds(name: str) -> None:
     """Each capability composes -- or refuses to -- the way its policy says."""
     policy = COMBINE_POLICY[name]
-    shipped = _shipped_capability_types()
+    shipped, _ = _shipped_capability_types()
     if name not in shipped:  # pragma: no cover
         pytest.skip(f'{name} needs an optional dependency group that is not installed')
     capability_type = shipped[name]
