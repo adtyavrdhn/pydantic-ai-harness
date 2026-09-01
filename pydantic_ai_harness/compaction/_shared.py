@@ -320,6 +320,18 @@ def record_compaction_reclaim(
     _COMPACTION_RECLAIM.set((ref(request_context), reclaimed))
 
 
+def carry_compaction_reclaim(previous_context: ModelRequestContext, request_context: ModelRequestContext) -> None:
+    """Re-key a recorded reclaim onto the context view that replaces *previous_context*.
+
+    For a strategy that replaces the request context without recording a reclaim of its
+    own: the correction is keyed on context identity, so returning a fresh view without
+    carrying the key would silently drop what an earlier strategy recorded.
+    """
+    previous = _COMPACTION_RECLAIM.get()
+    if previous is not None and previous[0]() is previous_context:
+        _COMPACTION_RECLAIM.set((ref(request_context), previous[1]))
+
+
 def get_compaction_reclaim(request_context: ModelRequestContext) -> int:
     """Return the reclaim recorded for *request_context*, if it is still current."""
     previous = _COMPACTION_RECLAIM.get()

@@ -32,6 +32,7 @@ import pydantic_ai_harness
 import pydantic_ai_harness.compaction as compaction
 from pydantic_ai_harness.compaction import (
     DEFAULT_CONTEXT_WINDOW,
+    ClampOversizedMessages,
     ClearToolResults,
     ContextUsage,
     DeduplicateFileReads,
@@ -993,6 +994,31 @@ class TestReportContextUsage:
 
         request_context = await first_compactor.before_model_request(ctx, request_context)
         request_context = await second_compactor.before_model_request(ctx, request_context)
+        await monitor.before_model_request(ctx, request_context)
+
+        expected = estimate_context_tokens(messages) - (before - estimate_token_count(request_context.messages))
+        assert [usage.used_tokens for usage in seen] == [expected]
+
+    async def test_a_clamp_between_compactor_and_reporter_keeps_the_reclaim(self, monkeypatch: pytest.MonkeyPatch):
+        """A strategy that replaces the context without recording must carry the correction."""
+        _fixed_window(monkeypatch, 1_000)
+        seen: list[ContextUsage] = []
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content='x' * 4_000)]),
+            ModelResponse(parts=[TextPart(content='done')], usage=RequestUsage(input_tokens=10_000, output_tokens=0)),
+            ModelRequest(parts=[UserPromptPart(content='continue')]),
+        ]
+        request_context = _request_context(messages)
+        compactor: SlidingWindowCompaction[None] = SlidingWindowCompaction(
+            max_messages=2, keep_messages=2, preserve_first_user_message=False
+        )
+        clamp: ClampOversizedMessages[None] = ClampOversizedMessages(max_part_chars=100_000)
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
+        before = estimate_token_count(messages)
+        ctx = _ctx(messages=messages)
+
+        request_context = await compactor.before_model_request(ctx, request_context)
+        request_context = await clamp.before_model_request(ctx, request_context)
         await monitor.before_model_request(ctx, request_context)
 
         expected = estimate_context_tokens(messages) - (before - estimate_token_count(request_context.messages))
