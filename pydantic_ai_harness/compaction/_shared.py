@@ -95,7 +95,8 @@ def persist_compacted_messages(
     """Replace both views without persisting request-only parts appended by outer wrappers."""
     persistent_messages = list(messages)
     request_only_parts = _request_only_tail_part_count(ctx.messages, request_context.messages)
-    if request_only_parts:
+    # Exercised by the pydantic-ai#7053 compatibility job; released core shares both views.
+    if request_only_parts:  # pragma: lax no cover
         assert persistent_messages
         tail = persistent_messages[-1]
         assert isinstance(tail, ModelRequest)
@@ -114,11 +115,13 @@ def _request_only_tail_part_count(
     persistent_tail = persistent_messages[-1]
     request_tail = request_messages[-1]
     if not isinstance(persistent_tail, ModelRequest) or not isinstance(request_tail, ModelRequest):
-        return 0
+        # Internal compaction runs before the provider call, with the current request at the tail.
+        return 0  # pragma: no cover
     persistent_parts = persistent_tail.parts
     request_parts = request_tail.parts
     if request_parts[: len(persistent_parts)] != persistent_parts:
-        return 0
+        # Harness request-only injections append parts; they do not replace the persistent prefix.
+        return 0  # pragma: no cover
     return len(request_parts) - len(persistent_parts)
 
 
