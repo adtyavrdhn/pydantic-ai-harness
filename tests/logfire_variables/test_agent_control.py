@@ -262,7 +262,9 @@ async def test_a_dynamic_block_is_not_addressable(capfire: CaptureLogfire, value
 
     Replacing it pins one rendering forever; dropping it removes the computation. Either way the block
     stops doing what it was written to do, so both are refused and warned about. Note `toolset:weather`
-    returns a constant and is flagged dynamic all the same -- the cost pydantic-ai#7391 addresses.
+    returns a constant and is flagged dynamic all the same: a function's shape says nothing about
+    whether its text came from the run, so an author who wants fixed text addressable contributes an
+    `InstructionPart` rather than a function.
     """
     with pytest.warns(UserWarning, match='which the agent recomputes per request'):
         blocks = triples(await run_blocks(capfire, 'blocks_dynamic_refused', value))
@@ -602,8 +604,9 @@ async def test_auto_create_snapshots_every_instruction_block(
     # to address it by, and it is dynamic, so there is no text to publish. Nothing left to say about it.
     assert 'UNNAMED' not in (created[0].example or '')
     # A toolset's instruction function is `dynamic` too even when it returns a constant, so one rule
-    # covers agent-level and toolset-level blocks alike. See pydantic-ai#7391 for letting a function
-    # declare itself static, which is what gets a constant like this one published (and overridable).
+    # covers agent-level and toolset-level blocks alike. A toolset that wants its fixed text published
+    # and overridable returns an `InstructionPart` from `get_instructions()` instead, which is static
+    # by default and keeps the flag it was authored with.
     assert [block['dynamic'] for block in example['instructions']] == [False, True, True]
 
 

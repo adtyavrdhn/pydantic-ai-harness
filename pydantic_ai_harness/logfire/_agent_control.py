@@ -1210,10 +1210,12 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
         why a dynamic block publishes only its seam to the baseline: the editor can show that the block
         is there and that it is not yours to change.
 
-        A function that returns a constant is flagged dynamic all the same, which is a real cost here:
-        a toolset's `@toolset.instructions` returning fixed text becomes unaddressable. That is what
-        pydantic-ai#7391 is for -- letting an instruction function declare itself static, which makes it
-        both cacheable and overridable.
+        A function that returns a constant is flagged dynamic all the same, and that is the right call
+        rather than a gap to close: `dynamic` is what decides which side of the provider's cache
+        breakpoint a block sits on, and nothing about a function's shape says whether its text came
+        from the run. An author who wants fixed text addressable says so on the part instead of on the
+        function -- `InstructionPart(content=..., name='style')` is static by default and is accepted
+        anywhere instructions are, a toolset's `get_instructions()` included.
 
         `dynamic` is deliberately carried over untouched on the parts that *are* replaced. Pydantic AI
         sorts static blocks ahead of dynamic ones so a provider can cache the stable prefix, so
@@ -1248,7 +1250,8 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
                     f'Managed agent config addresses instruction block {key!r}, which the agent recomputes '
                     'per request; a managed value would pin or remove that computation, so it is ignored '
                     'and the block keeps what the code produces. An instruction function that returns '
-                    'fixed text is flagged this way too -- see pydantic-ai#7391.'
+                    'fixed text is flagged this way too: contribute it as an `InstructionPart` instead '
+                    'of from a function to make it addressable.'
                 )
                 parts.append(part)
                 continue
