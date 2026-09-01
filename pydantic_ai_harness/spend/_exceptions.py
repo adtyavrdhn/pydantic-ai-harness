@@ -35,7 +35,7 @@ class UnpricedModelWarning(UserWarning):
 
 
 class SpendCompositionWarning(UserWarning):
-    """Warned when wrapper ordering can hide billed responses on an older Pydantic AI core."""
+    """Warned when wrapper ordering can hide billed responses from `SpendLimits`."""
 
 
 class UnpricedModelError(UserError):

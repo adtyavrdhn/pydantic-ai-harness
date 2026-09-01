@@ -3,10 +3,9 @@
 `UsageLimits` in Pydantic AI caps tokens, requests and cost for the duration of
 one run. `SpendLimits` covers what that leaves: periods longer than a run,
 partitioning by tenant or user, and a counter that several worker processes
-share. On newer cores it prices each provider response whose usage Pydantic AI commits with
-[`ModelResponse.cost()`][pydantic_ai.messages.ModelResponse.cost], adds it to
-every configured window, and refuses the next request once a window is spent. On an older
-core it prices the response returned through its wrapper instead.
+share. It prices each model response it records with
+[`ModelResponse.cost()`][pydantic_ai.messages.ModelResponse.cost], adds it to every
+configured window, and refuses the next request once a window is spent.
 
 The gate is local and immediate. Provider usage APIs and observability backends
 aggregate after the fact and are read by polling, so a number there moves only
@@ -49,7 +48,7 @@ if TYPE_CHECKING:
 
 
 SpendCallback = Callable[[SpendSnapshot], None | Awaitable[None]]
-"""Called after each response recorded by the active core compatibility path."""
+"""Called after each response `SpendLimits` records."""
 
 PriceFunc = Callable[[ModelResponse], Decimal | None]
 """Prices a response. Return `None` to fall back to the `genai-prices` registry."""
@@ -128,7 +127,7 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
     """
 
     on_spend: SpendCallback | None = None
-    """Called with a `SpendSnapshot` after each response recorded by the active core seam."""
+    """Called with a `SpendSnapshot` after each response `SpendLimits` records."""
 
     on_unpriced: Literal['zero', 'raise'] = 'zero'
     """What to do when a response cannot be priced.
@@ -283,7 +282,7 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
-        """Accrue every provider response committed while the wrapped lifecycle runs."""
+        """Accrue each response `SpendLimits` records during the wrapped lifecycle."""
         initial_usage_responses: tuple[ModelResponse, ...] | None = getattr(request_context, 'usage_responses', None)
         usage_response_offset = len(initial_usage_responses) if initial_usage_responses is not None else None
         response: ModelResponse | None = None

@@ -17,7 +17,7 @@ Provider usage APIs do not close that gap. They are billing and observability pi
 
 ## The solution
 
-On Pydantic AI cores that expose provider-response accounting, `SpendLimits` prices every provider response whose usage core commits with [`ModelResponse.cost()`](https://pydantic.dev/docs/ai/api/messages/). On an older supported core, it falls back to pricing the response returned through its wrapper. Either way, it adds the result to each window you configure and refuses the next request once a window is spent.
+`SpendLimits` prices each model response it records with [`ModelResponse.cost()`](https://pydantic.dev/docs/ai/api/messages/), adds it to each window you configure, and refuses the next request once a window is spent.
 
 ```python
 from decimal import Decimal
@@ -82,7 +82,7 @@ SpendLimits(budgets=[Budget(window='month', scope=lambda ctx: ctx.deps.tenant_id
 
 No provider request **starts** after a budget is exhausted.
 
-Not: that spend stays under the ceiling. The request that crosses the line completes, and concurrent runs can each pass the check before any of them records anything. Two further gaps are worth knowing rather than discovering: a stream the caller abandons part-way never reaches the accounting hook, so its tokens are billed by the provider and invisible here; and a continuation chain (Anthropic `pause_turn`, OpenAI background mode) can produce several provider responses, which are priced and accrued separately when core exposes them. A capability response served without calling a provider is not charged on that newer seam; the older wrapper-return fallback can charge it as a response. Treat this as a brake on a runaway loop, not as an accounting ledger; reconcile against the provider's own numbers if you need the second thing.
+Not: that spend stays under the ceiling. The request that crosses the line completes, and concurrent runs can each pass the check before any of them records anything. A stream the caller abandons part-way never reaches the accounting hook, so its tokens are billed by the provider and invisible here. Treat this as a brake on a runaway loop, not as an accounting ledger; reconcile against the provider's own numbers if you need the second thing.
 
 ## Reading the numbers
 
@@ -102,7 +102,7 @@ def show(snapshot: SpendSnapshot) -> None:
 SpendLimits(budgets=[Budget(usd=Decimal('100'))], on_spend=show)
 ```
 
-`on_spend` fires after every recorded provider response, or after the wrapper-return response on an older core, sync or async, with a `SpendSnapshot` -- including one that `on_unpriced='raise'` is about to reject, since a report that skipped exactly the unpriced responses would be missing the ones worth knowing about. It carries that response's `usage` unchanged.
+`on_spend` fires after each response `SpendLimits` records, sync or async, with a `SpendSnapshot` -- including one that `on_unpriced='raise'` is about to reject, since a report that skipped exactly the unpriced responses would be missing the ones worth knowing about. It carries that response's `usage` unchanged.
 
 `status()` reads the same numbers without a run, which is what a cost display in a UI wants:
 
@@ -254,12 +254,6 @@ Returning `None` falls through to the registry. When nothing can price a respons
 State lives across runs deliberately, so `for_run` is not overridden: a daily budget that reset every run would not be a daily budget. Per-run isolation comes from `Budget(window='run')`, whose key carries the run id.
 
 `defer_loading=True` is refused. A deferred capability's hooks do not run until the model loads it, so an exhausted budget would not stop a request and the requests made meanwhile would go uncounted -- a brake the thing being braked decides when to apply.
-
-The accrual happens in `wrap_model_request`. Pydantic AI records the exact provider responses whose usage it committed on `request_context.usage_responses` before the `after_model_request` chain runs. `SpendLimits` accrues those responses when the wrapped lifecycle exits, including when an `after_model_request` hook or a nested wrapper rejects the result. Wrapper ordering therefore does not create an accounting gap, and a transformed response returned by middleware is not mistaken for the billable provider response.
-
-A request the provider never saw is not charged. A `SkipModelRequest` raised before the provider boundary leaves `usage_responses` empty, so the synthetic response does not accrue. If a continuation produces more than one billable response before recovery, each recorded provider response accrues separately.
-
-When `request_context.usage_responses` is available, accounting no longer depends on `SpendLimits`' position among other wrappers. On an older supported Pydantic AI release without that field, the capability retains its established innermost behavior and emits `SpendCompositionWarning` for an inner wrapper that can hide a billed response. Listing `SpendLimits` last among innermost capabilities closes that older-core gap.
 
 **Durable execution.** `SpendLimits` is not supported inside a Temporal workflow, and inside a DBOS or Prefect one only as far as the bounds below reach.
 
