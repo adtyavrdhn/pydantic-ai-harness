@@ -222,7 +222,7 @@ class _ModalProcess:
             # keeps the merge in the order Modal produced the output.
             return next(arrival), name, chunk
 
-        pending = {asyncio.ensure_future(read_one(name)) for name in iterators}
+        pending = {asyncio.create_task(read_one(name)) for name in iterators}
         try:
             while pending:
                 done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
@@ -238,7 +238,7 @@ class _ModalProcess:
                         if final:
                             yield _ModalOutputChunk(stream=name, data=final)
                         continue
-                    pending.add(asyncio.ensure_future(read_one(name)))
+                    pending.add(asyncio.create_task(read_one(name)))
                     text = decoders[name].decode(chunk)
                     if text:
                         yield _ModalOutputChunk(stream=name, data=text)
