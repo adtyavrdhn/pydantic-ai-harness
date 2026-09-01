@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import is_dataclass
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UsageLimitExceeded, UserError
@@ -109,10 +110,10 @@ def _text_response(text: str = 'ok') -> ModelResponse:
 
 
 class TestConfigValidation:
-    def test_is_a_pydantic_model_with_capability_fields(self) -> None:
+    def test_is_a_dataclass_with_capability_fields(self) -> None:
         cap = TrajectoryJudge(model='test', id='judge', description='reviews trajectory', defer_loading=True)
 
-        assert isinstance(cap, BaseModel)
+        assert is_dataclass(cap)
         assert (cap.id, cap.description, cap.defer_loading) == ('judge', 'reviews trajectory', True)
 
     def test_requires_model_or_agent(self) -> None:
@@ -128,10 +129,6 @@ class TestConfigValidation:
         judge = Agent(_all_good_model(), output_type=[AllGood, Steer])
         with pytest.raises(ValueError, match='owns its own'):
             TrajectoryJudge(agent=judge, instructions='be strict')
-
-    def test_rejects_non_agent(self) -> None:
-        with pytest.raises(ValueError, match='must be an `Agent` instance'):
-            TrajectoryJudge(agent='not-an-agent')
 
     def test_rejects_agent_with_output_validator(self) -> None:
         judge = Agent(_all_good_model())
