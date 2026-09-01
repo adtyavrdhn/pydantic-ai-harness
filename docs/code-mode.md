@@ -258,7 +258,7 @@ Two consequences of running before the call completes:
   enable `eager` on runs that gate `run_code` behind such a guard.
 - A `restart: true` call re-executes the full snippet on a fresh session. The watcher
   stops feeding as soon as `restart` appears in the streamed arguments, but statements
-  fed before the key streams have already run once, so their side effects repeat.
+  injected before the key arrives have already run once, so their side effects repeat.
 
 Enabling `eager` puts runs in streaming mode and uses asyncio tasks. Under durable
 execution (Temporal, DBOS), the option is inactive and statements run only when the
