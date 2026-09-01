@@ -40,7 +40,7 @@ result = agent.run_sync('Read the toolsets docs, then explain how to build a Fun
 print(result.output)
 ```
 
-On POSIX, the framework's default no-sandbox state continues to use the agent process's filesystem for backward compatibility. An `UnavailableSandbox` with an application-specific reason remains unavailable; the framework's two default reasons are reserved for compatibility detection. On Windows, local checkout reads require an attached sandbox, while remote-only lookup still works without one.
+When the run has no sandbox attached, the tool reads the agent process's filesystem directly, as before (POSIX only; on Windows, local reads need an attached sandbox, and the remote fetch still works without one). An explicitly configured `UnavailableSandbox` does not fall back.
 
 The capability also adds a short static instruction telling the model that the `read_pyai_docs` tool exists and to read the relevant topic before authoring or modifying a Pydantic AI capability, hook, tool, or toolset, rather than relying on memory. The instruction is cache-stable, so it does not invalidate the prompt-cache prefix between turns.
 
@@ -54,7 +54,7 @@ Each call resolves in this order:
 
 The capability never runs git. Keep the local checkout current yourself; the remote path always reads `main`, so it is the fresh fallback.
 
-`local_docs_path` takes precedence over the `PYDANTIC_AI_HARNESS_DOCS_PATH` environment variable. The backward-compatible host fallback expands `~`; an attached sandbox does not, because its home directory is not the agent process's home. Use an absolute sandbox path or a path relative to its working directory. With neither path set, every call goes straight to the remote source.
+`local_docs_path` takes precedence over the `PYDANTIC_AI_HARNESS_DOCS_PATH` environment variable. With a sandbox attached, `~` is not expanded -- use an absolute sandbox path or a path relative to its working directory. With neither path set, every call goes straight to the remote source.
 
 ## Configuration
 
