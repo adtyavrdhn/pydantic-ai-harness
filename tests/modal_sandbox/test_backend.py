@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import functools
 import sys
 import time
+from collections.abc import Awaitable, Callable
 
 import anyio
 import pytest
@@ -46,6 +48,11 @@ class _HangingCall(_AioCallable):
 
 
 pytestmark = pytest.mark.anyio(backends=['asyncio'])
+
+# The two ways to attach to an existing sandbox, for tests that behave identically over both.
+_Attach = Callable[[], Awaitable[ModalSandboxBackend]]
+_CONNECT_BY_ID: _Attach = functools.partial(ModalSandboxBackend.connect, 'sb-keep')
+_CONNECT_BY_NAME: _Attach = functools.partial(ModalSandboxBackend.connect_name, 'app', 'stable')
 
 
 @pytest.fixture
@@ -110,19 +117,6 @@ class TestCreate:
         assert fake_modal.image_tags[-1] == 'python:3.12-slim'
         assert fake_modal.create_kwargs[-1]['env'] is None
 
-    async def test_missing_modal_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        real_import = builtins.__import__
-
-        def no_modal(name: str, *args: object, **kwargs: object) -> object:
-            if name == 'modal':
-                raise ImportError('No module named modal')
-            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
-
-        monkeypatch.delitem(sys.modules, 'modal', raising=False)
-        monkeypatch.setattr(builtins, '__import__', no_modal)
-        with pytest.raises(ModalSandboxError, match="The 'modal' package is required"):
-            await ModalSandboxBackend.create()
-
     async def test_modal_error_becomes_a_start_failure(self, fake_modal: FakeModal) -> None:
         fake_modal.create_error = fake_modal.error_type('capacity')
         with pytest.raises(ModalSandboxError, match='Could not start Modal sandbox: capacity'):
@@ -178,29 +172,17 @@ class TestConnect:
         with pytest.raises(ModalSandboxUnavailableError, match="'sb-nope'"):
             await ModalSandboxBackend.connect('sb-nope')
 
-    async def test_connect_auth_error_is_terminal(self, fake_modal: FakeModal) -> None:
+    @pytest.mark.parametrize('attach', [_CONNECT_BY_ID, _CONNECT_BY_NAME], ids=['by_id', 'by_name'])
+    async def test_attach_auth_error_is_terminal(self, fake_modal: FakeModal, attach: _Attach) -> None:
         fake_modal.attach_error = fake_modal.auth_type('unauthenticated')
         with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
-            await ModalSandboxBackend.connect('sb-keep')
+            await attach()
 
-    async def test_connect_sdk_error_is_translated(self, fake_modal: FakeModal) -> None:
+    @pytest.mark.parametrize('attach', [_CONNECT_BY_ID, _CONNECT_BY_NAME], ids=['by_id', 'by_name'])
+    async def test_attach_sdk_error_is_translated(self, fake_modal: FakeModal, attach: _Attach) -> None:
         fake_modal.attach_error = fake_modal.error_type('transport failed')
-
         with pytest.raises(ModalSandboxError, match='transport failed'):
-            await ModalSandboxBackend.connect('sb-keep')
-
-    async def test_missing_modal_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        real_import = builtins.__import__
-
-        def no_modal(name: str, *args: object, **kwargs: object) -> object:
-            if name == 'modal':
-                raise ImportError('No module named modal')
-            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
-
-        monkeypatch.delitem(sys.modules, 'modal', raising=False)
-        monkeypatch.setattr(builtins, '__import__', no_modal)
-        with pytest.raises(ModalSandboxError, match="The 'modal' package is required"):
-            await ModalSandboxBackend.connect('sb-keep')
+            await attach()
 
 
 class TestConnectName:
@@ -218,30 +200,25 @@ class TestConnectName:
         with pytest.raises(ModalSandboxUnavailableError, match='not running'):
             await ModalSandboxBackend.connect_name('pydantic-ai-harness', 'finished')
 
-    async def test_auth_error_is_terminal(self, fake_modal: FakeModal) -> None:
-        fake_modal.attach_error = fake_modal.auth_type('unauthenticated')
 
-        with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
-            await ModalSandboxBackend.connect_name('app', 'stable')
+@pytest.mark.parametrize(
+    'entry_point',
+    [ModalSandboxBackend.create, _CONNECT_BY_ID, _CONNECT_BY_NAME],
+    ids=['create', 'connect', 'connect_name'],
+)
+async def test_missing_modal_package_is_named(monkeypatch: pytest.MonkeyPatch, entry_point: _Attach) -> None:
+    # Each lifecycle classmethod guards its own lazy `import modal`.
+    real_import = builtins.__import__
 
-    async def test_sdk_error_is_translated(self, fake_modal: FakeModal) -> None:
-        fake_modal.attach_error = fake_modal.error_type('transport failed')
+    def no_modal(name: str, *args: object, **kwargs: object) -> object:
+        if name == 'modal':
+            raise ImportError('No module named modal')
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
 
-        with pytest.raises(ModalSandboxError, match='transport failed'):
-            await ModalSandboxBackend.connect_name('app', 'stable')
-
-    async def test_missing_modal_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        real_import = builtins.__import__
-
-        def no_modal(name: str, *args: object, **kwargs: object) -> object:
-            if name == 'modal':
-                raise ImportError('No module named modal')
-            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
-
-        monkeypatch.delitem(sys.modules, 'modal', raising=False)
-        monkeypatch.setattr(builtins, '__import__', no_modal)
-        with pytest.raises(ModalSandboxError, match="The 'modal' package is required"):
-            await ModalSandboxBackend.connect_name('app', 'stable')
+    monkeypatch.delitem(sys.modules, 'modal', raising=False)
+    monkeypatch.setattr(builtins, '__import__', no_modal)
+    with pytest.raises(ModalSandboxError, match="The 'modal' package is required"):
+        await entry_point()
 
 
 class TestClose:
