@@ -27,6 +27,8 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 
+from pydantic_core import from_json
+
 from ._streaming import MAX_SCAN_CHARS, closed_statements, decode_partial_code
 
 if TYPE_CHECKING:
@@ -178,7 +180,19 @@ class EagerState:
         """
         if watch.args_dict is not None:
             return bool(watch.args_dict.get('restart'))
-        return '"restart"' in watch.args_text
+        # Fast path for the common un-escaped literal.
+        if '"restart"' in watch.args_text:
+            return True
+        # Fall back to partial-JSON decode to catch Unicode-escaped keys like `"\u0072estart"`.
+        if not watch.args_text or len(watch.args_text) > MAX_SCAN_CHARS:
+            return False
+        try:
+            decoded = from_json(watch.args_text, allow_partial='trailing-strings')
+        except ValueError:  # pragma: no cover - malformed JSON fragments that models don't emit
+            return False
+        if isinstance(decoded, dict):
+            return bool(decoded.get('restart'))
+        return False
 
     def _scan(self, watch: _EagerPart, ctx: RunContext[Any]) -> None:
         """Re-parse the streamed code and enqueue any statements that newly closed.
@@ -191,6 +205,10 @@ class EagerState:
             return
         code = self._current_code(watch)
         if code is None:
+            return
+        if len(code) > MAX_SCAN_CHARS:
+            watch.halted = True
+            watch.queue.clear()
             return
         source_prefix = code[: code.rfind('\n') + 1]
         if source_prefix == watch.scanned_source:

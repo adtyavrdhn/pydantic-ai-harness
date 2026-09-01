@@ -559,6 +559,43 @@ class TestEagerHardening:
         # Only the dispatch ran the snippet; nothing fed during streaming.
         assert calls == ['alpha']
 
+    async def test_restart_with_escaped_json_key_does_not_duplicate_prefix(self):
+        """An escaped `restart` key (e.g. `"\\u0072estart"`) halts feeding like the literal."""
+        calls: list[str] = []
+
+        def search(query: str) -> str:
+            """Return a canned result."""
+            calls.append(query)
+            return f'result:{query}'
+
+        code = 'a = await search(query="alpha")\nprint(a)\n"ok"'
+
+        async def stream_restart(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _prior_run_code_calls(messages):
+                yield 'done'
+                return
+            # Build args with an escaped `restart` key: "\u0072estart" decodes to "restart".
+            args = '{"\\u0072estart": true, "code": ' + json.dumps(code) + '}'
+            yield {1: DeltaToolCall(name='run_code')}
+            for offset in range(0, len(args), 16):
+                yield {1: DeltaToolCall(json_args=args[offset : offset + 16])}
+                await asyncio.sleep(0)
+
+        capability = CodeMode[None](eager=True)
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_restart),
+            deps_type=type(None),
+            capabilities=[capability],
+        )
+        agent.tool_plain(search)
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        # Without the fix, eager would run the prefix once, then restart would run the full
+        # snippet, yielding ['alpha', 'alpha']. With the fix, only the dispatch runs.
+        assert calls == ['alpha']
+
     async def test_two_streamed_parts_never_execute_concurrently(self):
         """Fragments and tails from different `run_code` parts serialize against the session."""
         depth = 0
@@ -945,7 +982,37 @@ class TestEagerRewriteAndDurability:
         )
         taken = eager.pop_watch('c1', big)
         assert taken is not None
-        assert taken.feed_count == 0 and not taken.queue
+        assert taken.halted and taken.feed_count == 0 and not taken.queue
+
+    async def test_oversized_dict_args_delta_halts_the_watch(self):
+        """A dict delta whose `code` exceeds the cap halts without parsing or feeding."""
+        ctx = build_run_context(None)
+        capability = CodeMode[None](eager=True)
+        run_capability = await capability.for_run(ctx)
+        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[]))
+        assert isinstance(toolset, CodeModeToolset)
+        eager = toolset.eager
+        assert eager is not None
+
+        # Start with small code, then a delta replaces it with oversized code.
+        small = 'a = 1\nb = 2\n'
+        await eager.observe(
+            PartStartEvent(index=0, part=ToolCallPart(tool_name='run_code', args={'code': small}, tool_call_id='c1')),
+            ctx,
+        )
+        big = 'x = 1\n' * 60_000
+        await eager.observe(
+            PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': big}, tool_call_id='c1')), ctx
+        )
+        taken = eager.pop_watch('c1', big)
+        assert taken is not None
+        assert taken.halted and taken.feed_count == 0 and not taken.queue
+        # Further deltas are ignored because the watch is halted.
+        await eager.observe(
+            PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': 'later'}, tool_call_id='c1')), ctx
+        )
+        # The watch was already popped; verify no new watches were created.
+        assert eager.pop_watch('c1', 'anything') is None
 
     async def test_oversized_streamed_arguments_halt_the_watch(self):
         """Past the scan cap the watch stops decoding, feeding, and accumulating."""
