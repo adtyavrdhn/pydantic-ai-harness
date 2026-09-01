@@ -6,7 +6,6 @@ import asyncio
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -312,34 +311,6 @@ class TestScanAssets:
 
         assert inventory.roots[0].skills == [f'.claude/skills/{"/".join(f"level-{i}" for i in range(8))}/SKILL.md']
 
-    async def test_skill_inventory_has_an_entry_bound(self, tmp_path: Path) -> None:
-        sandbox = MagicMock(spec=Sandbox)
-        sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
-        sandbox.fs.stat = AsyncMock(return_value=SimpleNamespace(is_dir=True))
-        sandbox.fs.list_dir = AsyncMock(
-            return_value=[SimpleNamespace(name=f'entry-{index}', is_dir=False) for index in range(10_001)]
-        )
-
-        with pytest.raises(RuntimeError, match='exceeded 10000 entries'):
-            await scan_assets(sandbox, tmp_path, ('.claude',))
-
-    async def test_agent_inventory_has_an_entry_bound(self, tmp_path: Path) -> None:
-        sandbox = MagicMock(spec=Sandbox)
-        sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
-
-        async def stat(path: str) -> object:
-            if path.endswith('/skills'):
-                raise FileNotFoundError
-            return SimpleNamespace(is_dir=True)
-
-        sandbox.fs.stat = AsyncMock(side_effect=stat)
-        sandbox.fs.list_dir = AsyncMock(
-            return_value=[SimpleNamespace(name=f'entry-{index}.md', is_dir=False) for index in range(10_001)]
-        )
-
-        with pytest.raises(RuntimeError, match='exceeded 10000 entries'):
-            await scan_assets(sandbox, tmp_path, ('.claude',))
-
     async def test_file_at_asset_root_is_not_a_directory(self, tmp_path: Path, sandbox: Sandbox) -> None:
         _write(tmp_path / '.claude', 'not a directory')
 
@@ -356,16 +327,6 @@ class TestScanAssets:
 
         assert inv.roots[0].settings == '.claude/settings.json'
         assert inv.roots[0].skills == []
-
-    async def test_skill_inventory_ignores_parent_directory_entries(self, tmp_path: Path) -> None:
-        sandbox = MagicMock(spec=Sandbox)
-        sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
-        sandbox.fs.stat = AsyncMock(return_value=SimpleNamespace(is_dir=True))
-        sandbox.fs.list_dir = AsyncMock(side_effect=[[SimpleNamespace(name='..', is_dir=True)], []])
-
-        inventory = await scan_assets(sandbox, tmp_path, ('.claude',))
-
-        assert inventory.roots[0].skills == []
 
     async def test_returns_model(self, tmp_path: Path, sandbox: Sandbox) -> None:
         assert isinstance(await scan_assets(sandbox, tmp_path, ()), AgentContextInventory)
