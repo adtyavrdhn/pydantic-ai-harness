@@ -33,6 +33,16 @@ if TYPE_CHECKING:
 _CONVENTION_FOLDER_NAME = 'agents'
 """The folder-name an unset `agent_folders` resolves to in discovery mode."""
 
+
+class _UnsetAgents(tuple[()]):
+    """Empty sequence sentinel that keeps the public `agents` type precise."""
+
+    def __repr__(self) -> str:
+        return '...'
+
+
+_AGENTS_UNSET = _UnsetAgents()
+
 ToolResolver = Callable[[str], 'Sequence[AgentToolset[object]] | None']
 """Maps one tool name from a disk definition's `tools` list to the toolsets that
 provide it, or `None` when the name is unknown (the loader warns and skips it)."""
@@ -97,7 +107,7 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     ```
     """
 
-    agents: Sequence[SubAgent[AgentDepsT]] | EllipsisType = ...
+    agents: Sequence[SubAgent[AgentDepsT]] = _AGENTS_UNSET
     """The sub-agents to expose, each a `SubAgent` pairing an agent with its
     per-delegate run controls. See `SubAgent`. These take precedence over any
     disk-loaded agents of the same name. Left unset, disk discovery uses the
@@ -195,6 +205,9 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     can override this per delegate. See `SubAgent.contain_errors` for the
     containment contract and what always propagates regardless."""
 
+    _agents_explicit: bool = field(init=False, repr=False, compare=False)
+    """Whether the caller supplied `agents`, including an explicitly empty sequence."""
+
     _by_name: dict[str, SubAgent[AgentDepsT]] = field(
         default_factory=dict[str, 'SubAgent[AgentDepsT]'], init=False, repr=False, compare=False
     )
@@ -213,8 +226,10 @@ class SubAgents(AbstractCapability[AgentDepsT]):
 
     def __post_init__(self) -> None:
         by_name: dict[str, SubAgent[AgentDepsT]] = {}
-        agents: Sequence[SubAgent[AgentDepsT]] = () if isinstance(self.agents, EllipsisType) else self.agents
-        for sub_agent in agents:
+        self._agents_explicit = self.agents is not _AGENTS_UNSET
+        if not self._agents_explicit:
+            self.agents = ()
+        for sub_agent in self.agents:
             name = sub_agent.resolved_name
             if name is None:
                 raise ValueError('Sub-agent has no name: give its `Agent` a `name`, or set `SubAgent(name=...)`.')
@@ -279,7 +294,7 @@ class SubAgents(AbstractCapability[AgentDepsT]):
         """
         if not isinstance(self.agent_folders, EllipsisType):
             return self.agent_folders
-        if isinstance(self.agents, EllipsisType):
+        if not self._agents_explicit:
             return _CONVENTION_FOLDER_NAME
         if self._convention_has_definitions():
             # stacklevel reaches the constructor's caller through `__init__` ->
