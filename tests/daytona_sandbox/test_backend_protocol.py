@@ -271,6 +271,7 @@ class TestLifecycle:
         winner = fake_daytona.sandbox('winner')
         winner.name = 'stable'
         connected = await DaytonaSandboxBackend.connect('stable')
+        # The fake cannot change state between connect and create, so script the race at the classmethod seam.
         monkeypatch.setattr(
             DaytonaSandboxBackend,
             'connect',

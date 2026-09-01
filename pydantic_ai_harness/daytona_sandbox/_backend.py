@@ -30,11 +30,10 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import anyio
-from pydantic_ai.sandboxes import FileEntry, SandboxTimeoutError, SandboxUnavailableError
+from pydantic_ai.sandboxes import CommandResult, FileEntry, SandboxTimeoutError, SandboxUnavailableError
 from typing_extensions import Self
 
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
@@ -66,9 +65,13 @@ _MISSING_DAYTONA = (
     'The `daytona` package is required for DaytonaSandbox. Install it with `uv add "pydantic-ai-harness[daytona]"`.'
 )
 _AUTH_MESSAGE = 'Daytona rejected the credentials. Set DAYTONA_API_KEY and try again.'
+# Bound sandbox acquisition so a wedged control plane cannot hang creation or connection.
 _CREATE_TIMEOUT = 120
-_REQUEST_TIMEOUT = 30.0
+# Bound routine SDK requests so a stalled control plane cannot hang an operation.
+_REQUEST_TIMEOUT = 30
+# Bound provider lifecycle RPCs such as create, start, and delete.
 _LIFECYCLE_TIMEOUT = 60.0
+# Bound cleanup RPCs so teardown cannot wedge the caller.
 _TEARDOWN_TIMEOUT = 30.0
 
 
@@ -82,13 +85,6 @@ class DaytonaSandboxUnavailableError(DaytonaSandboxError, SandboxUnavailableErro
 
 class DaytonaSandboxAuthError(DaytonaSandboxError, SandboxUnavailableError):
     """Daytona rejected the configured credentials."""
-
-
-@dataclass(frozen=True)
-class _DaytonaResult:
-    exit_code: int
-    stdout: str
-    stderr: str
 
 
 def _command_line(command: SandboxCommand, shell: bool) -> str:
@@ -139,13 +135,13 @@ class _DaytonaProcess:
         self._deadline = deadline
         self._started = started
         self._lock = anyio.Lock()
-        self._outcome: _DaytonaResult | Exception | None = None
+        self._outcome: CommandResult | Exception | None = None
 
     @property
     def pid(self) -> int | None:
         return None
 
-    async def wait(self) -> _DaytonaResult:
+    async def wait(self) -> CommandResult:
         """Wait for the command and return the same outcome on every call."""
         async with self._lock:
             if self._outcome is None:
@@ -157,9 +153,10 @@ class _DaytonaProcess:
             raise self._outcome
         return self._outcome
 
-    async def _settle(self) -> _DaytonaResult:
+    async def _settle(self) -> CommandResult:
         completed = False
         try:
+            # `fail_after` would make its timeout indistinguishable from an SDK `TimeoutError` translated below.
             with anyio.move_on_after(self._remaining()):
                 await self._logs
                 completed = True
@@ -181,7 +178,7 @@ class _DaytonaProcess:
             raise await self._timeout_error()
         if command.exit_code is None:
             raise DaytonaSandboxError('Daytona closed the command output before reporting an exit status.')
-        result = _DaytonaResult(
+        result = CommandResult(
             exit_code=command.exit_code,
             stdout=''.join(self._stdout),
             stderr=''.join(self._stderr),
@@ -222,13 +219,11 @@ class _DaytonaProcess:
 
 
 async def _kill_quietly(process: _DaytonaProcess) -> None:
-    """Best-effort kill for a path that already has an outcome to report."""
-    with anyio.CancelScope(shield=True):
-        with anyio.move_on_after(_TEARDOWN_TIMEOUT):
-            try:
-                await process.kill()
-            except Exception:
-                pass
+    """Best-effort kill whose failure must not mask the outcome being raised."""
+    try:
+        await process.kill()
+    except Exception:
+        pass
 
 
 class _DaytonaFilesystem:
@@ -250,18 +245,18 @@ class _DaytonaFilesystem:
 
     async def read_bytes(self, path: str) -> bytes:
         async with self._translated(path):
-            return await self._backend.sandbox.fs.download_file(path, int(_REQUEST_TIMEOUT))
+            return await self._backend.sandbox.fs.download_file(path, _REQUEST_TIMEOUT)
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         parent = posixpath.dirname(path)
         async with self._translated(path):
             if parent not in ('', '.', '/'):
                 mkdir = await self._backend.sandbox.process.exec(
-                    f'mkdir -p -- {shlex.quote(parent)}', timeout=int(_REQUEST_TIMEOUT)
+                    f'mkdir -p -- {shlex.quote(parent)}', timeout=_REQUEST_TIMEOUT
                 )
                 if mkdir.exit_code != 0:
                     raise DaytonaSandboxError(mkdir.result or f'Could not create {parent!r}.')
-            await self._backend.sandbox.fs.upload_file(data, path, timeout=int(_REQUEST_TIMEOUT))
+            await self._backend.sandbox.fs.upload_file(data, path, timeout=_REQUEST_TIMEOUT)
 
     async def stat(self, path: str) -> FileEntry:
         async with self._translated(path):
@@ -329,6 +324,7 @@ class DaytonaSandboxBackend:
         """The underlying Daytona sandbox, for provider-specific functionality."""
         self._owned = owned
         self._working_dir = absolute_path('working_dir', working_dir)
+        self._working_dir_lock = anyio.Lock()
         self._closed = False
         self.fs = _DaytonaFilesystem(self)
 
@@ -376,7 +372,7 @@ class DaytonaSandboxBackend:
                     f'Daytona sandbox creation did not complete within {_CREATE_TIMEOUT}s.'
                 ) from error
             if isinstance(error, Exception):
-                raise cls._translate_error(error, 'Could not create Daytona sandbox') from error
+                raise cls.operation_error(error, 'Could not create Daytona sandbox') from error
             raise  # pragma: no cover - cancellation propagates after bounded client cleanup
         return cls(client, sandbox, owned=True, working_dir=working_dir)
 
@@ -400,7 +396,7 @@ class DaytonaSandboxBackend:
                     f'Daytona sandbox connection did not complete within {_CREATE_TIMEOUT}s.'
                 ) from error
             if isinstance(error, Exception):
-                raise cls._translate_error(
+                raise cls.operation_error(
                     error, f'Could not connect to Daytona sandbox {sandbox_id_or_name!r}', unavailable=True
                 ) from error
             raise  # pragma: no cover - cancellation propagates after bounded client cleanup
@@ -454,7 +450,7 @@ class DaytonaSandboxBackend:
         error = deletion_error or close_error
         if error is not None:
             await raise_after_cleanup(
-                self._translate_error(error, f'Could not close Daytona sandbox {self.sandbox_id!r}')
+                self.operation_error(error, f'Could not close Daytona sandbox {self.sandbox_id!r}')
             )
 
     @staticmethod
@@ -467,7 +463,7 @@ class DaytonaSandboxBackend:
         client = AsyncDaytona()
         operation_error: Exception | None = None
         try:
-            with anyio.fail_after(_CREATE_TIMEOUT):
+            with anyio.fail_after(_REQUEST_TIMEOUT):
                 sandbox = await client.get(sandbox_id, request_timeout=_REQUEST_TIMEOUT)
             operation_error = await cleanup_call(
                 functools.partial(client.delete, sandbox, timeout=_LIFECYCLE_TIMEOUT, wait=True),
@@ -481,12 +477,8 @@ class DaytonaSandboxBackend:
         error = operation_error or close_error
         if error is not None:
             await raise_after_cleanup(
-                DaytonaSandboxBackend._translate_error(error, f'Could not delete Daytona sandbox {sandbox_id!r}')
+                DaytonaSandboxBackend.operation_error(error, f'Could not delete Daytona sandbox {sandbox_id!r}')
             )
-
-    @functools.cached_property
-    def _working_dir_lock(self) -> anyio.Lock:
-        return anyio.Lock()
 
     async def working_dir(self) -> str:
         """Return the sandbox's native absolute working directory."""
@@ -512,11 +504,12 @@ class DaytonaSandboxBackend:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
-    ) -> _DaytonaResult:
+    ) -> CommandResult:
         process = await self.start(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
         try:
             return await process.wait()
         except SandboxTimeoutError:
+            # The timeout path already killed the session, so the generic handler must not kill it twice.
             raise
         except BaseException:
             await _kill_quietly(process)
@@ -547,7 +540,7 @@ class DaytonaSandboxBackend:
                 response = await process.execute_session_command(
                     session_id,
                     SessionExecuteRequest(command=line, run_async=True),
-                    timeout=int(_REQUEST_TIMEOUT),
+                    timeout=_REQUEST_TIMEOUT,
                 )
         except BaseException as error:
             if created:
@@ -577,11 +570,9 @@ class DaytonaSandboxBackend:
             started=started,
         )
 
-    def operation_error(self, error: Exception, context: str, *, unavailable: bool = False) -> DaytonaSandboxError:
-        return self._translate_error(error, context, unavailable=unavailable)
-
     @staticmethod
-    def _translate_error(error: Exception, context: str, *, unavailable: bool = False) -> DaytonaSandboxError:
+    def operation_error(error: Exception, context: str, *, unavailable: bool = False) -> DaytonaSandboxError:
+        # Daytona's NotFound is ambiguous: the call site knows whether it asked about a file or a sandbox.
         try:
             from daytona import DaytonaAuthenticationError, DaytonaAuthorizationError, DaytonaNotFoundError
         except ImportError:  # pragma: no cover - an active backend already imported Daytona

@@ -124,6 +124,4 @@ class TestConfiguration:
             'DaytonaSandboxError',
             'DaytonaSandboxUnavailableError',
         }
-        assert DaytonaSandboxBackend.create_or_connect.__name__ == 'create_or_connect'
-        assert DaytonaSandboxBackend.delete_by_id.__name__ == 'delete_by_id'
         assert DaytonaSandbox.get_serialization_name() == 'DaytonaSandbox'

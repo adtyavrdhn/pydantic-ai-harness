@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Protocol
 
@@ -20,14 +19,6 @@ class CreateParams(Protocol):
     network_block_all: bool | None
 
 
-@dataclass
-class ExecCall:
-    command: str
-    cwd: str | None
-    env: dict[str, str] | None
-    timeout: int | None
-
-
 class FakeProcess:
     def __init__(self, owner: FakeSandbox) -> None:
         self.owner = owner
@@ -40,12 +31,10 @@ class FakeProcess:
         timeout: int | None = None,
     ) -> SimpleNamespace:
         # The backend only uses one-shot exec for `write_bytes`'s parent-directory creation.
-        self.owner.exec_calls.append(ExecCall(command, cwd, env, timeout))
         assert command.startswith('mkdir -p -- ')
         return SimpleNamespace(result='', exit_code=self.owner.mkdir_exit_code)
 
     async def create_session(self, session_id: str, request_timeout: float | None = None) -> None:
-        self.owner.process_calls.append(('create', session_id, request_timeout))
         if self.owner.process_create_gate is not None:
             await self.owner.process_create_gate.wait()
         self.owner.process_sessions.add(session_id)
@@ -56,11 +45,9 @@ class FakeProcess:
         request: object,
         timeout: int | None = None,
     ) -> SimpleNamespace:
-        self.owner.process_calls.append(('execute', session_id, timeout))
         if self.owner.exec_error is not None:
             raise self.owner.exec_error
         self.owner.process_command = getattr(request, 'command')
-        self.owner.process_run_async = getattr(request, 'run_async')
         if not self.owner.process_stdout and not self.owner.process_stderr and not self.owner.process_hangs:
             output, self.owner.process_exit_code = self.owner.responder(self.owner.process_command, timeout)
             self.owner.process_stdout = [output]
@@ -73,7 +60,6 @@ class FakeProcess:
         on_stdout: Callable[[str], None],
         on_stderr: Callable[[str], None],
     ) -> None:
-        self.owner.process_calls.append(('logs', session_id, command_id))
         self.owner.process_logs_started.set()
         if self.owner.process_logs_error is not None:
             raise self.owner.process_logs_error
@@ -92,7 +78,6 @@ class FakeProcess:
         command_id: str,
         request_timeout: float | None = None,
     ) -> SimpleNamespace:
-        self.owner.process_calls.append(('status', session_id, command_id, request_timeout))
         if self.owner.process_status_gate is not None:
             await self.owner.process_status_gate.wait()
         if self.owner.process_status_error is not None:
@@ -100,7 +85,6 @@ class FakeProcess:
         return SimpleNamespace(exit_code=self.owner.process_exit_code)
 
     async def delete_session(self, session_id: str, request_timeout: float | None = None) -> None:
-        self.owner.process_calls.append(('delete', session_id, request_timeout))
         if self.owner.process_delete_error is not None:
             raise self.owner.process_delete_error
         self.owner.process_sessions.discard(session_id)
@@ -111,7 +95,6 @@ class FakeFileSystem:
         self.owner = owner
 
     async def get_file_info(self, path: str, request_timeout: float | None = None) -> SimpleNamespace:
-        self.owner.fs_calls.append(('stat', path, request_timeout))
         self._raise_if_needed()
         if path in self.owner.directories:
             return SimpleNamespace(size=0, is_dir=True)
@@ -121,7 +104,6 @@ class FakeFileSystem:
         return SimpleNamespace(size=len(data), is_dir=False)
 
     async def download_file(self, path: str, timeout: int | None = None) -> bytes:
-        self.owner.fs_calls.append(('download', path, timeout))
         self._raise_if_needed()
         data = self.owner.files.get(path)
         if data is None:
@@ -129,14 +111,12 @@ class FakeFileSystem:
         return data
 
     async def upload_file(self, data: bytes, path: str, timeout: int = 1800) -> None:
-        self.owner.fs_calls.append(('upload', path, timeout))
         self._raise_if_needed()
         self.owner.files[path] = data
 
     async def list_files(
         self, path: str, depth: int | None = None, request_timeout: float | None = None
     ) -> list[SimpleNamespace]:
-        self.owner.fs_calls.append(('list', path, depth, request_timeout))
         self._raise_if_needed()
         prefix = '' if path in ('', '.') else path.rstrip('/') + '/'
         entries: dict[str, bool] = {}
@@ -159,13 +139,11 @@ class FakeFileSystem:
         ]
 
     async def create_folder(self, path: str, mode: str, request_timeout: float | None = None) -> None:
-        self.owner.fs_calls.append(('mkdir', path, request_timeout))
         self._raise_if_needed()
         assert mode == '755'
         self.owner.directories.add(path)
 
     async def delete_file(self, path: str, recursive: bool = False, request_timeout: float | None = None) -> None:
-        self.owner.fs_calls.append(('delete', path, recursive, request_timeout))
         self._raise_if_needed()
         self.owner.files.pop(path, None)
         self.owner.directories.discard(path)
@@ -189,10 +167,8 @@ class FakeSandbox:
         self.start_gate: asyncio.Event | None = None
         self.files: dict[str, bytes] = {}
         self.directories: set[str] = set()
-        self.exec_calls: list[ExecCall] = []
         self.exec_error: Exception | None = None
         self.fs_error: Exception | None = None
-        self.fs_calls: list[tuple[object, ...]] = []
         self.workdir = '/srv/repo'
         self.workdir_error: Exception | None = None
         self.workdir_calls = 0
@@ -200,10 +176,8 @@ class FakeSandbox:
         self.workdir_started = asyncio.Event()
         self.mkdir_exit_code = 0
         self.responder: Callable[[str, int | None], tuple[str, int]] = lambda command, timeout: ('', 0)
-        self.process_calls: list[tuple[object, ...]] = []
         self.process_sessions: set[str] = set()
         self.process_command = ''
-        self.process_run_async: bool | None = None
         self.process_stdout: list[str] = []
         self.process_stderr: list[str] = []
         self.process_hangs = False
@@ -239,7 +213,6 @@ class FakeClient:
         self.closed = False
 
     async def create(self, params: CreateParams, *, timeout: float = 60) -> FakeSandbox:
-        self.owner.create_timeouts.append(timeout)
         if self.owner.create_gate is not None:
             await self.owner.create_gate.wait()
         if self.owner.create_error is not None:
@@ -250,15 +223,12 @@ class FakeClient:
         return sandbox
 
     async def get(self, sandbox_id: str, request_timeout: float | None = None) -> FakeSandbox:
-        self.owner.get_calls.append(sandbox_id)
-        self.owner.get_request_timeouts.append(request_timeout)
         for sandbox in self.owner.sandboxes:
             if sandbox.id == sandbox_id or sandbox.name == sandbox_id:
                 return sandbox
         raise DaytonaNotFoundError(f'no sandbox: {sandbox_id}')
 
     async def delete(self, sandbox: FakeSandbox, timeout: float, wait: bool) -> None:
-        self.owner.delete_calls.append((sandbox.id, timeout, wait))
         if self.owner.delete_error is not None:
             raise self.owner.delete_error
         sandbox.deleted = True
@@ -275,10 +245,6 @@ class FakeDaytona:
     def __init__(self) -> None:
         self.sandboxes: list[FakeSandbox] = []
         self.create_params: list[CreateParams] = []
-        self.create_timeouts: list[float] = []
-        self.delete_calls: list[tuple[str, float, bool]] = []
-        self.get_calls: list[str] = []
-        self.get_request_timeouts: list[float | None] = []
         self.closed_clients = 0
         self.create_error: Exception | None = None
         self.delete_error: Exception | None = None

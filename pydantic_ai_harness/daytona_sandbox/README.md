@@ -105,10 +105,9 @@ before expiry. Timeout or caller cancellation attempts to delete the remote
 process session before returning. A failed best-effort deletion does not replace
 the command's original outcome; the sandbox lifetime remains the cleanup backstop.
 
-Complete command output is buffered in memory. The backend does not add a second
-presentation policy or claim that transport is bounded. Model-facing tools should
-apply their own byte or line budget, and commands that can produce very large
-output should bound it at the source.
+Complete command output is buffered in memory. Model-facing tools should apply their
+own byte or line budget, and commands that can produce very large output should bound
+it at the source.
 
 The public error surface is deliberately narrow:
 
