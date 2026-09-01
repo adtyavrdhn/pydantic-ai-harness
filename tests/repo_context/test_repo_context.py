@@ -295,6 +295,12 @@ class TestScanAssets:
         assert inv.roots[0].settings is None
         assert inv.roots[0].notes is None
 
+    async def test_root_without_skills_directory(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        _write(tmp_path / '.claude' / 'agents' / 'helper.md', 'agent')
+        inv = await scan_assets(sandbox, tmp_path, ('.claude',))
+        assert inv.roots[0].skills == []
+        assert inv.roots[0].agents == ['.claude/agents/helper.md']
+
     @pytest.mark.parametrize('root', ('/outside', '../outside'))
     async def test_asset_roots_must_be_relative_to_workspace(self, tmp_path: Path, sandbox: Sandbox, root: str) -> None:
         with pytest.raises(ValueError, match='relative to the workspace'):
