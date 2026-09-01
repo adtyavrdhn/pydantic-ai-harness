@@ -175,12 +175,24 @@ class _DaytonaProcess:
                 stderr=''.join(self._stderr),
                 timeout=self._deadline,
             )
+        remaining = None if self._deadline is None else self._deadline - (time.monotonic() - self._started)
+        command = None
         try:
-            command = await self._process.get_session_command(
-                self._session_id, self._command_id, request_timeout=_REQUEST_TIMEOUT
-            )
+            with anyio.move_on_after(remaining):
+                command = await self._process.get_session_command(
+                    self._session_id, self._command_id, request_timeout=_REQUEST_TIMEOUT
+                )
         except Exception as error:
             raise self._backend.operation_error(error, 'Could not read the command result', unavailable=True) from error
+        if command is None:
+            await _kill_quietly(self)
+            assert self._deadline is not None
+            raise SandboxTimeoutError(
+                f'Command timed out after {self._deadline:g} seconds and was killed.',
+                stdout=''.join(self._stdout),
+                stderr=''.join(self._stderr),
+                timeout=self._deadline,
+            )
         if command.exit_code is None:
             raise DaytonaSandboxError('Daytona closed the command output before reporting an exit status.')
         result = _DaytonaResult(

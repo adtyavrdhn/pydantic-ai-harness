@@ -158,6 +158,16 @@ class TestCommands:
         )
         assert sandbox.process_sessions == set()
 
+    async def test_deadline_includes_exit_status_rpc(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_stdout = ['complete output']
+        sandbox.process_status_gate = asyncio.Event()
+        with pytest.raises(SandboxTimeoutError) as exc_info:
+            await backend.run(['true'], timeout=0.01)
+        assert (exc_info.value.stdout, exc_info.value.timeout) == ('complete output', 0.01)
+        assert sandbox.process_sessions == set()
+
     async def test_original_error_wins_when_kill_fails(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
         sandbox = fake_daytona.sandboxes[0]

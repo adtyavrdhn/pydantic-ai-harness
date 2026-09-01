@@ -100,6 +100,8 @@ class FakeProcess:
         request_timeout: float | None = None,
     ) -> SimpleNamespace:
         self.owner.process_calls.append(('status', session_id, command_id, request_timeout))
+        if self.owner.process_status_gate is not None:
+            await self.owner.process_status_gate.wait()
         if self.owner.process_status_error is not None:
             raise self.owner.process_status_error
         return SimpleNamespace(exit_code=self.owner.process_exit_code)
@@ -225,6 +227,7 @@ class FakeSandbox:
         self.process_delete_error: Exception | None = None
         self.process_create_error: Exception | None = None
         self.process_status_error: Exception | None = None
+        self.process_status_gate: asyncio.Event | None = None
         self.process_logs_error: Exception | None = None
         self.process_create_gate: asyncio.Event | None = None
         self.process_create_started = asyncio.Event()

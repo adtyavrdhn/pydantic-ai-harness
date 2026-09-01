@@ -61,6 +61,8 @@ Attach to a sandbox managed elsewhere by ID or name when the capability must not
 own its lifetime:
 
 ```python
+from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
+
 DaytonaSandbox(sandbox_id='existing', workdir='/workspace')
 ```
 
@@ -74,17 +76,24 @@ process space.
 its filesystem and process-start opt-ins:
 
 ```python
+import anyio
+
 from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxBackend
 
-backend = await DaytonaSandboxBackend.create(
-    snapshot='base',
-    auto_stop_minutes=60,
-)
-try:
-    result = await backend.run(['python', '--version'], timeout=60)
-    print(result.stdout)
-finally:
-    await backend.close(terminate=True)
+
+async def main() -> None:
+    backend = await DaytonaSandboxBackend.create(
+        snapshot='base',
+        auto_stop_minutes=60,
+    )
+    try:
+        result = await backend.run(['python', '--version'], timeout=60)
+        print(result.stdout)
+    finally:
+        await backend.close(terminate=True)
+
+
+anyio.run(main)
 ```
 
 Use `connect(sandbox_id_or_name)` for a fresh handle to an existing sandbox; it
@@ -124,6 +133,8 @@ Filesystem misses use the built-in `FileNotFoundError` contract.
 ## Configuration
 
 ```python
+from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
+
 DaytonaSandbox(
     sandbox_id=None,
     snapshot=None,
