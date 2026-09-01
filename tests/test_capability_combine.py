@@ -16,7 +16,8 @@ import warnings
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from importlib.util import find_spec
+from typing import Any, TypeGuard
 
 import pytest
 from pydantic_ai import Agent
@@ -195,6 +196,20 @@ COMBINE_POLICY: dict[str, Policy] = {
 }
 
 
+def _is_capability_class(obj: object) -> TypeGuard[type[AbstractCapability[Any]]]:
+    """Whether `obj` is a capability class, and not something that merely looks like one.
+
+    A module's namespace holds type aliases and parameterized generics beside its classes, and on
+    Python 3.10 some of those satisfy `inspect.isclass` while `issubclass` then raises on them.
+    """
+    if not isinstance(obj, type):
+        return False
+    try:
+        return issubclass(obj, AbstractCapability)
+    except TypeError:  # pragma: no cover
+        return False
+
+
 def _shipped_capability_types() -> dict[str, type[AbstractCapability[Any]]]:
     """Every capability class in `pydantic_ai_harness`, public or not.
 
@@ -211,11 +226,7 @@ def _shipped_capability_types() -> dict[str, type[AbstractCapability[Any]]]:
             except Exception:  # pragma: no cover
                 continue
             for obj in vars(module).values():
-                if (
-                    inspect.isclass(obj)
-                    and issubclass(obj, AbstractCapability)
-                    and obj.__module__.startswith(pydantic_ai_harness.__name__)
-                ):
+                if _is_capability_class(obj) and obj.__module__.startswith(pydantic_ai_harness.__name__):
                     found[obj.__name__] = obj
     return found
 
@@ -278,6 +289,10 @@ def test_capability_combine_policy_holds(name: str) -> None:
     policy.check(type(first).combine([first, second]))
 
 
+@pytest.mark.skipif(
+    find_spec('ddgs') is None or find_spec('markdownify') is None,
+    reason='`Researcher` needs the `researcher` optional group.',
+)
 async def test_coder_and_researcher_compose() -> None:
     """The composition #7781 was filed for: two packaged harnesses on one agent.
 
