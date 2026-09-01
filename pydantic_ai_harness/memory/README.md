@@ -2,14 +2,7 @@
 
 Give an agent a persistent notebook that it can update, search, and reuse across runs without loading every stored file into every prompt.
 
-> [!NOTE]
-> Import this capability from its submodule. It is not re-exported from `pydantic_ai_harness`:
->
-> ```python
-> from pydantic_ai_harness.memory import Memory
-> ```
-
-Memory is a released, non-experimental capability. Pydantic AI Harness is still on 0.x releases, so the API may change between minor releases. See the repository [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
+While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 ## Notebook model
 
@@ -29,7 +22,8 @@ The model gets four tools:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.memory import FileStore, Memory
+from pydantic_ai_harness import Memory
+from pydantic_ai_harness.memory import FileStore
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -47,7 +41,8 @@ Automatic injection is enabled by default. Trusted usage guidance remains in mod
 When `heading` is set, the same `## {heading}` labels both the trusted guidance and the user-role memory block.
 
 ```python
-from pydantic_ai_harness.memory import FileStore, Memory
+from pydantic_ai_harness import Memory
+from pydantic_ai_harness.memory import FileStore
 
 memory = Memory(
     FileStore('.agent-memory'),
@@ -58,10 +53,11 @@ memory = Memory(
 
 Only the current request retains the injected user-role part, so copies do not accumulate in message history. Each model request receives the latest bounded snapshot, including after `write_memory` or an external update changes `MEMORY.md`.
 
-Set `inject_memory=False` for cache-stable prompts or durable workflows. The tools remain available, and the model can fetch memory only when it needs it:
+Set `inject_memory=False` for cache-stable prompts. The tools remain available, and the model can fetch memory only when it needs it:
 
 ```python
-from pydantic_ai_harness.memory import FileStore, Memory
+from pydantic_ai_harness import Memory
+from pydantic_ai_harness.memory import FileStore
 
 memory = Memory(FileStore('.agent-memory'), inject_memory=False)
 ```
@@ -82,7 +78,8 @@ Every `MemoryStore.read` call includes a finite `max_chars`, and every `list_pat
 | `PostgresMemoryStore(pool)` | Durable shared storage; compare-and-swap and idempotency are enforced in database transactions. The caller owns the pool lifecycle. |
 
 ```python
-from pydantic_ai_harness.memory import FileStore, Memory, SqliteMemoryStore
+from pydantic_ai_harness import Memory
+from pydantic_ai_harness.memory import FileStore, SqliteMemoryStore
 
 local_memory = Memory(FileStore('.agent-memory'))
 sqlite_memory = Memory(SqliteMemoryStore(database='.agent-memory.db'))
@@ -97,7 +94,8 @@ sqlite_memory = Memory(SqliteMemoryStore(database='.agent-memory.db'))
 ```python
 import asyncpg
 
-from pydantic_ai_harness.memory import Memory, PostgresMemoryStore
+from pydantic_ai_harness import Memory
+from pydantic_ai_harness.memory import PostgresMemoryStore
 
 
 async def build_memory() -> tuple[Memory[None], asyncpg.Pool]:
@@ -116,7 +114,8 @@ Use a namespace resolver when one `Agent` serves multiple users. It runs once pe
 from dataclasses import dataclass
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.memory import FileStore, Memory
+from pydantic_ai_harness import Memory
+from pydantic_ai_harness.memory import FileStore
 
 
 @dataclass
@@ -149,7 +148,8 @@ An agent can carry several `Memory` capabilities at once, for example a personal
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.memory import FileStore, Memory
+from pydantic_ai_harness import Memory
+from pydantic_ai_harness.memory import FileStore
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -176,7 +176,8 @@ Before backend dispatch, queries are limited to 1,000 characters and 32 unique w
 ## Configuration
 
 ```python
-from pydantic_ai_harness.memory import FileStore, Memory
+from pydantic_ai_harness import Memory
+from pydantic_ai_harness.memory import FileStore
 
 Memory(
     FileStore('.agent-memory'),
@@ -202,7 +203,7 @@ Register `Memory` as a custom capability type when constructing an agent from a 
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.memory import Memory
+from pydantic_ai_harness import Memory
 
 agent = Agent.from_spec(
     {
@@ -223,10 +224,12 @@ The serializable backends are `memory`, `file`, and `sqlite`. A namespace callab
 | Execution mode | Support |
 | --- | --- |
 | Normal `Agent.run` calls | Supported with automatic injection or on-demand tools. |
-| Temporal and Prefect | Use `inject_memory=False` with a statically configured store and on-demand tools. Automatic injection performs backend I/O in a model-request hook and is not workflow-safe. |
-| DBOS | Normal execution works, but ordinary `FunctionToolset` calls are not DBOS-durable. Wrap memory operations in application-provided DBOS steps when durability is required. |
+| Temporal and Prefect | Automatic snapshot loading is a journaled capability operation. On replay, the recorded snapshot is reused. `store_resolver` and a callable `namespace` run before that operation, so they must be deterministic and free of backend I/O; a per-tenant resolver that queries a backend is not workflow-safe. |
+| DBOS | Automatic snapshot loading is a DBOS step. Ordinary `FunctionToolset` calls are not DBOS-durable; wrap memory tool operations in application-provided DBOS steps when required. |
 
-The memory backend and the workflow state backend are independent. Durable execution does not make an in-memory notebook persistent.
+`Memory` carries the stable default `id='memory'`, so durable recovery works without configuration. The memory backend and workflow state backend remain independent: durable execution does not make an in-memory notebook persistent.
+
+Each model request that uses automatic snapshot loading records one bounded snapshot result in workflow history, so choose `max_memory_size` and `max_tokens` with the engine's history limits in mind.
 
 ## Security and provenance
 

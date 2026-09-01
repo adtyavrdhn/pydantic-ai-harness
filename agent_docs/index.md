@@ -23,6 +23,7 @@ For any code change:
   Component"
 - Deciding what a capability emits to OpenTelemetry, or documenting that it
   emits nothing: `capability-authoring.md` "Telemetry"
+- README, `docs/` pages, or capability READMEs: `docs-conventions.md`
 - Review, pre-PR check, or final self-check: `review-checklist.md`
 - Commands/parsers, processes/containers, network endpoints, resource cleanup,
   output limits, or CI trust boundaries: `review-checklist.md` "Executable
