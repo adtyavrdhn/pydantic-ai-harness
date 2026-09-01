@@ -309,11 +309,13 @@ def _tool_schema_text(tool: ToolDefinition) -> str:
     return ''.join((tool.name, tool.description or '', dumps(tool.parameters_json_schema, sort_keys=True)))
 
 
-def record_compaction_reclaim(request_context: ModelRequestContext, before: int, after: int) -> None:
-    """Record a conservative correction for a later usage reporter in this hook chain."""
+def record_compaction_reclaim(
+    previous_context: ModelRequestContext, request_context: ModelRequestContext, before: int, after: int
+) -> None:
+    """Carry the reclaim correction from one request-context view to its replacement."""
     previous = _COMPACTION_RECLAIM.get()
     reclaimed = max(before - after, 0)
-    if previous is not None and previous[0]() is request_context:
+    if previous is not None and previous[0]() is previous_context:
         reclaimed += previous[1]
     _COMPACTION_RECLAIM.set((ref(request_context), reclaimed))
 

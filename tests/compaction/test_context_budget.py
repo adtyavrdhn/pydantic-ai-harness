@@ -959,10 +959,11 @@ class TestReportContextUsage:
         monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
         second_monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
         before = estimate_token_count(messages)
+        ctx = _ctx(messages=messages)
 
-        await compactor.before_model_request(_ctx(), request_context)
-        await monitor.before_model_request(_ctx(), request_context)
-        await second_monitor.before_model_request(_ctx(), request_context)
+        request_context = await compactor.before_model_request(ctx, request_context)
+        await monitor.before_model_request(ctx, request_context)
+        await second_monitor.before_model_request(ctx, request_context)
 
         expected = estimate_context_tokens(messages) - (before - estimate_token_count(request_context.messages))
         assert [usage.used_tokens for usage in seen] == [expected, expected]
@@ -988,10 +989,11 @@ class TestReportContextUsage:
         )
         monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
         before = estimate_token_count(messages)
+        ctx = _ctx(messages=messages)
 
-        await first_compactor.before_model_request(_ctx(), request_context)
-        await second_compactor.before_model_request(_ctx(), request_context)
-        await monitor.before_model_request(_ctx(), request_context)
+        request_context = await first_compactor.before_model_request(ctx, request_context)
+        request_context = await second_compactor.before_model_request(ctx, request_context)
+        await monitor.before_model_request(ctx, request_context)
 
         expected = estimate_context_tokens(messages) - (before - estimate_token_count(request_context.messages))
         assert [usage.used_tokens for usage in seen] == [expected]
@@ -1020,7 +1022,9 @@ class TestReportContextUsage:
             ]
         )
 
-        await compactor.before_model_request(_ctx(), compacted_context)
+        compacted_context = await compactor.before_model_request(
+            _ctx(messages=compacted_context.messages), compacted_context
+        )
         await monitor.before_model_request(_ctx(), unrelated_context)
 
         assert [usage.used_tokens for usage in seen] == [estimate_context_tokens(unrelated_context.messages)]
@@ -1038,9 +1042,10 @@ class TestReportContextUsage:
             max_messages=2, keep_messages=2, preserve_first_user_message=False
         )
         monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
+        ctx = _ctx(messages=messages)
 
-        await compactor.before_model_request(_ctx(), request_context)
-        await monitor.before_model_request(_ctx(), request_context)
+        request_context = await compactor.before_model_request(ctx, request_context)
+        await monitor.before_model_request(ctx, request_context)
 
         assert seen[0].used_tokens == estimate_context_tokens(request_context.messages)
 

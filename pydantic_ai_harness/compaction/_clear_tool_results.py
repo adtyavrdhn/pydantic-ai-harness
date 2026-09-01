@@ -173,10 +173,12 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
             compact=lambda: self.compact(messages, request_ctx),
             tokenizer=self.tokenizer,
         )
+        ctx.messages[:] = compacted
+        compacted_context = replace(request_context, messages=list(ctx.messages))
         record_compaction_reclaim(
             request_context,
+            compacted_context,
             estimate_token_count(messages, self.tokenizer),
             estimate_token_count(compacted, self.tokenizer),
         )
-        ctx.messages[:] = compacted
-        return replace(request_context, messages=list(ctx.messages))
+        return compacted_context
