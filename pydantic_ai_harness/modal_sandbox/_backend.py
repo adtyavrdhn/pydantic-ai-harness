@@ -35,7 +35,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import anyio
-from pydantic_ai.sandboxes import CommandResult, FileEntry, SandboxTimeoutError, SandboxUnavailableError
+from pydantic_ai.sandboxes import (
+    CommandResult,
+    FileEntry,
+    SandboxBackend,
+    SandboxTimeoutError,
+    SandboxUnavailableError,
+)
 from typing_extensions import Self
 
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
@@ -45,7 +51,6 @@ if TYPE_CHECKING:
     import modal.container_process
     import modal.io_streams
     from pydantic_ai.sandboxes import (
-        SandboxBackend,
         SandboxCommand,
         SandboxFilesystem,
         SandboxProcess,
@@ -399,7 +404,7 @@ def _file_entry(entry: modal.types.FileInfo, path: str) -> FileEntry:
     return FileEntry(name=entry.name, path=path, is_dir=is_dir, size=None if is_dir else entry.size)
 
 
-class ModalSandboxBackend:
+class ModalSandboxBackend(SandboxBackend):
     """A [Modal](https://modal.com) sandbox as a Pydantic AI [`SandboxBackend`][pydantic_ai.sandboxes.SandboxBackend].
 
     Commands and file operations run inside a Modal container, so the host is never exposed.
@@ -416,8 +421,8 @@ class ModalSandboxBackend:
     runs on until its deadline, or until the sandbox is terminated. Modal takes whole seconds,
     so a fractional `timeout=` rounds up to the deadline actually applied.
 
-    Deliberately no base class: it conforms to the protocol structurally, like any third-party
-    backend would.
+    The protocol is structural, but subclassing it here makes a signature drift fail the type
+    check on this class instead of at a distant `Sandbox.wrap` call.
 
     Args:
         sandbox: A live `modal.Sandbox`. Whoever created it owns terminating it.
@@ -427,7 +432,12 @@ class ModalSandboxBackend:
             expired sandbox. `None` for a sandbox this process did not create.
     """
 
-    provider = PROVIDER
+    sandbox: modal.Sandbox
+    """The underlying `modal.Sandbox`, for provider-specific functionality."""
+
+    @property
+    def provider(self) -> str:
+        return PROVIDER
 
     def __init__(
         self,
@@ -438,7 +448,6 @@ class ModalSandboxBackend:
     ) -> None:
         working_dir = absolute_path('working_dir', working_dir)
         self.sandbox = sandbox
-        """The underlying `modal.Sandbox`, for provider-specific functionality."""
         self.fs = _ModalFilesystem(self)
         self._working_dir = working_dir
         self._sandbox_timeout = sandbox_timeout

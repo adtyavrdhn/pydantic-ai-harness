@@ -116,9 +116,6 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     _seen_dirs: set[str] = field(default_factory=set[str], init=False, repr=False, compare=False)
     """Run-scoped set of directories already surfaced by Strategy 3."""
 
-    _pending_dirs: set[str] = field(default_factory=set[str], init=False, repr=False, compare=False)
-    """Directories whose context is currently being loaded by another tool result."""
-
     _resolved_workspace_dir: Path | None = field(default=None, init=False, repr=False, compare=False)
     """Absolute sandbox path used for this run."""
 
@@ -187,13 +184,11 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         sandbox = sandbox_or_local(ctx.sandbox)
         directory = await self._resolve_directory(sandbox, raw_path)
         key = str(directory)
-        if key in self._seen_dirs or key in self._pending_dirs:
+        if key in self._seen_dirs:
             return result
-        self._pending_dirs.add(key)
-        try:
-            context_file = await find_dir_context_file(sandbox, directory, self.filenames)
-        finally:
-            self._pending_dirs.discard(key)
+        context_file = await find_dir_context_file(sandbox, directory, self.filenames)
+        # Parallel tool calls may both probe an unseen directory; the re-check after the
+        # await keeps the note single.
         if context_file is None or key in self._seen_dirs:
             return result
         self._seen_dirs.add(key)

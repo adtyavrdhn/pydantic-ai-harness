@@ -29,14 +29,10 @@ agent = Agent(
 ```
 
 All configured paths and discovered files refer to the run sandbox. Relative paths use its
-working directory.
-
-On POSIX, the framework's default no-sandbox state continues to inspect the agent process's
-filesystem for backward compatibility. An `UnavailableSandbox` with an application-specific
-reason remains unavailable; the framework's two default reasons are reserved for compatibility
-detection. Windows requires an attached sandbox. The backward-compatible host fallback expands
-`~`; an attached sandbox does not. Use an absolute sandbox path or one relative to the sandbox
-working directory.
+working directory, and `~` is not expanded -- use an absolute sandbox path or one relative to
+the sandbox working directory. When the run has no sandbox attached, the capability reads the
+agent process's filesystem directly, as before (POSIX only; on Windows, attach a sandbox). An
+explicitly configured `UnavailableSandbox` does not fall back.
 
 ### 1. Walk-up instruction autoload (on by default)
 
@@ -59,9 +55,7 @@ does not parse them, leaving translation to the orchestrator.
 
 Rename the tool with `inventory_tool_name`, or scope which roots it scans with
 `asset_roots`.
-Roots must be relative to `workspace_dir`. For each root, inventory visits at most 10,000
-entries below `skills/`, lists at most 10,000 entries directly below `agents/`, and descends at
-most eight directory levels below `skills/`.
+Roots must be relative to `workspace_dir`.
 
 ### 3. Nested-on-traversal (off by default)
 
