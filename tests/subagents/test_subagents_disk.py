@@ -16,6 +16,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AgentToolset, FunctionToolset
 
+from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness.subagents import (
     MINIMUM_EFFORT_FLOOR,
     AgentOverride,
@@ -233,6 +234,55 @@ class TestDiskLoading:
         instructions = cap.get_instructions()
         assert isinstance(instructions, str)
         assert '- r: Researches' in instructions
+
+
+class TestExplicitAgentsDiskDefault:
+    """An unset `agent_folders` loads from disk only in discovery mode (issue #607).
+
+    Programmatic composition (`SubAgents(agents=[...])`) previously had to pass
+    `agent_folders=None` or it also picked up markdown definitions from the
+    conventional folders. Now an explicit `agents` list turns disk loading off,
+    and the change announces itself only when it actually drops definitions.
+    """
+
+    def test_explicit_agents_skip_convention_and_warn(self) -> None:
+        # The surprise from #607: this construction used to load `planner` too.
+        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        explicit = Agent(TestModel(), name='worker')
+        with pytest.warns(HarnessDeprecationWarning) as record:
+            cap: SubAgents[object] = SubAgents(agents=[SubAgent(explicit)])
+        assert list(cap._by_name) == ['worker']
+        message = str(record[0].message)
+        assert "agent_folders='agents'" in message
+        assert 'agent_folders=None' in message
+
+    def test_explicit_agents_with_no_disk_definitions_stay_silent(self) -> None:
+        # An existing-but-empty convention folder means behavior did not change,
+        # so the composing caller the fix is for gets no warning to silence.
+        (Path.home() / '.agents' / 'agents').mkdir(parents=True)
+        explicit = Agent(TestModel(), name='worker')
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')  # any warning at all fails this test
+            cap: SubAgents[object] = SubAgents(agents=[SubAgent(explicit)])
+        assert list(cap._by_name) == ['worker']
+
+    def test_explicit_agent_folders_still_combines_with_agents(self) -> None:
+        # Choosing the convention explicitly keeps both sources, without a warning.
+        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        explicit = Agent(TestModel(), name='worker')
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            cap: SubAgents[object] = SubAgents(agents=[SubAgent(explicit)], agent_folders='agents')
+        assert list(cap._by_name) == ['worker', 'planner']
+
+    def test_explicit_none_stays_silent(self) -> None:
+        # `agent_folders=None` is the other explicit choice; neither warns.
+        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        explicit = Agent(TestModel(), name='worker')
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            cap: SubAgents[object] = SubAgents(agents=[SubAgent(explicit)], agent_folders=None)
+        assert list(cap._by_name) == ['worker']
 
 
 class TestPrecedence:
