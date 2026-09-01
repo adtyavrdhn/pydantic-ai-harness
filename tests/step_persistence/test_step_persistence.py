@@ -786,17 +786,18 @@ class TestStepPersistenceCapability:
         for prior_msg, replayed in zip(history, msgs[: len(history)]):
             assert type(prior_msg) is type(replayed)
 
-    async def test_agent_name_derived_run_id_prefix(self) -> None:
-        """No explicit run_id + agent_name -> `{agent_name}-{8-hex}`."""
-        store = InMemoryStepStore()
-        agent = make_simple_agent([StepPersistence(store=store, agent_name='librarian')])
-        await agent.run('add 1 and 2')
+    async def test_agent_name_derived_run_id_uses_whole_context_id_deterministically(self) -> None:
+        """The same context run id derives the same untruncated store id on replay."""
+        capability: StepPersistence[object] = StepPersistence(agent_name='librarian')
+        context_run_id = 'caller-chosen-run-id-with-a-shared-suffix'
 
-        runs = await store.list_runs()
-        assert len(runs) == 1
-        assert runs[0].run_id.startswith('librarian-')
-        # 'librarian-' + 8 hex chars.
-        assert len(runs[0].run_id) == len('librarian-') + 8
+        first = await capability.for_run(build_run_context(run_id=context_run_id))
+        replay = await capability.for_run(build_run_context(run_id=context_run_id))
+
+        assert isinstance(first, StepPersistence)
+        assert isinstance(replay, StepPersistence)
+        assert first.run_id == f'librarian-{context_run_id}'
+        assert replay.run_id == first.run_id
 
     async def test_single_capability_instance_reused_gets_fresh_ids(self) -> None:
         """One `StepPersistence(agent_name=...)` reused for two runs -> two distinct ids."""
@@ -1421,14 +1422,16 @@ class TestCapabilityHookBranches:
         assert events[0].error is not None and 'nope' in events[0].error
         assert await store.latest_snapshot(run_id='r1') is None
 
-    async def test_for_run_returns_self_when_resolution_is_no_op(self) -> None:
-        """When `run_id` is explicit and no contextvar is set, `for_run` returns `self`."""
+    async def test_for_run_creates_fresh_counter_owner_when_resolution_is_no_op(self) -> None:
+        """Each run gets a capability instance whose deterministic sequences start at zero."""
         store = InMemoryStepStore()
         cap: StepPersistence[object] = StepPersistence(store=store, run_id='fixed')
         ctx = build_run_context(deps=None, run_id='ignored')
 
         result = await cap.for_run(ctx)
-        assert result is cap
+        assert isinstance(result, StepPersistence)
+        assert result is not cap
+        assert result.run_id == 'fixed'
 
     async def test_run_record_load_with_missing_metadata(self, tmp_path: Path) -> None:
         """`_str_str_dict(None)` returns `{}` when metadata is absent in storage."""

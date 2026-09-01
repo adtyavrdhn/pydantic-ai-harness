@@ -214,13 +214,23 @@ class InMemoryStepStore:
         return sorted(records, key=lambda r: r.started_at)
 
     async def append_event(self, event: StepEvent) -> None:
-        self._events[event.run_id].append(event)
+        events = self._events[event.run_id]
+        if event.idempotency_key is not None:
+            for prior in events:
+                if prior.idempotency_key == event.idempotency_key:
+                    return
+        events.append(event)
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
         return list(self._events.get(run_id, ()))
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         snaps = self._snapshots[snapshot.run_id]
+        if snapshot.idempotency_key is not None:
+            # Applied keys live only beside their run's records, so deleting a run also removes
+            # the suppression state and no independent retention policy is needed.
+            if any(prior.idempotency_key == snapshot.idempotency_key for prior in snaps):
+                return
         snaps.append(snapshot)
         if self._max_snapshots_per_run is None or len(snaps) <= self._max_snapshots_per_run:
             return
@@ -320,6 +330,7 @@ def _event_to_dict(event: StepEvent) -> dict[str, object]:
         'tool_name': event.tool_name,
         'error': event.error,
         'metadata': dict(event.metadata),
+        'idempotency_key': event.idempotency_key,
     }
 
 
@@ -350,6 +361,7 @@ def _event_from_dict(data: dict[str, object]) -> StepEvent:
         tool_name=_opt_str(data.get('tool_name')),
         error=_opt_str(data.get('error')),
         metadata=_str_str_dict(data.get('metadata')),
+        idempotency_key=_opt_str(data.get('idempotency_key')),
     )
 
 

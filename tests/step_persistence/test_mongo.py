@@ -26,7 +26,6 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.test import TestModel
 from pymongo import AsyncMongoClient
-from pymongo.errors import DuplicateKeyError
 
 import pydantic_ai_harness.step_persistence as sp
 from pydantic_ai_harness.conversation_search import SnapshotHistorySource
@@ -122,11 +121,12 @@ class TestMongoStepStoreProtocol:
         assert fetched.conversation_id == 'c1'
         assert fetched.metadata == {'k': 'v'}
 
-    async def test_register_duplicate_run_raises(self) -> None:
+    async def test_register_duplicate_run_replaces_record(self) -> None:
         store = MongoStepStore(client=_mock_client(), database='t', media_store=None)
         await store.register_run(RunRecord(run_id='r1'))
-        with pytest.raises(DuplicateKeyError):
-            await store.register_run(RunRecord(run_id='r1'))
+        await store.register_run(RunRecord(run_id='r1', agent_name='replayed'))
+        record = await store.get_run(run_id='r1')
+        assert record is not None and record.agent_name == 'replayed'
 
     async def test_list_runs_chronological(self) -> None:
         store = MongoStepStore(client=_mock_client(), database='t', media_store=None)
@@ -205,6 +205,37 @@ class TestMongoStepStoreProtocol:
         snap = await store.latest_snapshot(run_id='r1')
         assert snap is not None
         assert snap.step_index == 0  # last write wins, not the highest step_index
+
+    async def test_keyed_snapshot_replays_preserve_complete_and_interrupted_at_same_step(self) -> None:
+        store = MongoStepStore(client=_mock_client(), database='t', media_store=None)
+        msgs: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart(content='a')])]
+        complete = ContinuableSnapshot(
+            run_id='r1', step_index=2, messages=msgs, state='complete', idempotency_key='2:complete'
+        )
+        interrupted = ContinuableSnapshot(
+            run_id='r1', step_index=2, messages=msgs, state='interrupted', idempotency_key='2:interrupted'
+        )
+
+        await store.save_snapshot(complete)
+        await store.save_snapshot(interrupted)
+        await store.save_snapshot(complete)
+        await store.save_snapshot(interrupted)
+
+        snapshots = await store.list_snapshots(run_id='r1', include_interrupted=True)
+        assert [(snapshot.step_index, snapshot.state) for snapshot in snapshots] == [
+            (2, 'complete'),
+            (2, 'interrupted'),
+        ]
+        assert await store.latest_snapshot(run_id='r1') == complete
+
+    async def test_keyed_event_replay_is_suppressed_but_unkeyed_events_append(self) -> None:
+        store = MongoStepStore(client=_mock_client(), database='t', media_store=None)
+        keyed = StepEvent(run_id='r1', kind='run_started', step_index=0, idempotency_key='event:0')
+        await store.append_event(keyed)
+        await store.append_event(keyed)
+        await store.append_event(StepEvent(run_id='r1', kind='run_started', step_index=0))
+        await store.append_event(StepEvent(run_id='r1', kind='run_started', step_index=0))
+        assert len(await store.list_events(run_id='r1')) == 3
 
     async def test_tool_effect_upsert_and_scope(self) -> None:
         store = MongoStepStore(client=_mock_client(), database='t', media_store=None)

@@ -129,7 +129,17 @@ class MongoStepStore:
         await self._db['runs'].create_index('parent_run_id', sparse=True)
         await self._db['runs'].create_index('started_at')
         await self._db['events'].create_index([('run_id', 1), ('seq', 1)])
+        await self._db['events'].create_index(
+            [('run_id', 1), ('idempotency_key', 1)],
+            unique=True,
+            partialFilterExpression={'idempotency_key': {'$type': 'string'}},
+        )
         await self._db['snapshots'].create_index([('run_id', 1), ('seq', -1)])
+        await self._db['snapshots'].create_index(
+            [('run_id', 1), ('idempotency_key', 1)],
+            unique=True,
+            partialFilterExpression={'idempotency_key': {'$type': 'string'}},
+        )
         await self._db['snapshots'].create_index([('run_id', 1), ('state', 1), ('seq', -1)])
         await self._db['tool_effects'].create_index([('run_id', 1), ('tool_call_id', 1)], unique=True)
         await self._db['tool_effects'].create_index([('run_id', 1), ('status', 1)])
@@ -149,7 +159,9 @@ class MongoStepStore:
 
     async def register_run(self, record: RunRecord) -> None:
         await self._ensure_indexes()
-        await self._db['runs'].insert_one({'_id': record.run_id, **_run_to_dict(record)})
+        await self._db['runs'].replace_one(
+            {'_id': record.run_id}, {'_id': record.run_id, **_run_to_dict(record)}, upsert=True
+        )
 
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         doc = await self._db['runs'].find_one({'_id': run_id})
@@ -177,8 +189,16 @@ class MongoStepStore:
     async def append_event(self, event: StepEvent) -> None:
         await self._ensure_indexes()
         doc = _event_to_dict(event)
-        doc['seq'] = await self._next_seq('events')
-        await self._db['events'].insert_one(doc)
+        if event.idempotency_key is None:
+            del doc['idempotency_key']
+            doc['seq'] = await self._next_seq('events')
+            await self._db['events'].insert_one(doc)
+            return
+        await self._db['events'].update_one(
+            {'run_id': event.run_id, 'idempotency_key': event.idempotency_key},
+            {'$setOnInsert': {**doc, 'seq': await self._next_seq('events')}},
+            upsert=True,
+        )
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
         cursor = self._db['events'].find({'run_id': run_id}).sort('seq', 1)
@@ -193,19 +213,29 @@ class MongoStepStore:
                 media_store=self._media_store,
                 threshold_bytes=self._media_threshold_bytes,
             )
-        await self._db['snapshots'].insert_one(
-            {
-                'seq': await self._next_seq('snapshots'),
-                'run_id': snapshot.run_id,
-                'step_index': snapshot.step_index,
-                'conversation_id': snapshot.conversation_id,
-                'parent_run_id': snapshot.parent_run_id,
-                'agent_name': snapshot.agent_name,
-                'timestamp': snapshot.timestamp.isoformat(),
-                'state': snapshot.state,
-                'messages': json.dumps(messages_json),
-            }
-        )
+        doc: _MongoDocument = {
+            'run_id': snapshot.run_id,
+            'step_index': snapshot.step_index,
+            'conversation_id': snapshot.conversation_id,
+            'parent_run_id': snapshot.parent_run_id,
+            'agent_name': snapshot.agent_name,
+            'timestamp': snapshot.timestamp.isoformat(),
+            'state': snapshot.state,
+            'messages': json.dumps(messages_json),
+            'idempotency_key': snapshot.idempotency_key,
+        }
+        if snapshot.idempotency_key is None:
+            del doc['idempotency_key']
+            doc['seq'] = await self._next_seq('snapshots')
+            await self._db['snapshots'].insert_one(doc)
+        else:
+            # The unique key is scoped by run_id and stored on the run's own document, so it
+            # disappears with that run and needs no separate retention policy.
+            await self._db['snapshots'].update_one(
+                {'run_id': snapshot.run_id, 'idempotency_key': snapshot.idempotency_key},
+                {'$setOnInsert': {**doc, 'seq': await self._next_seq('snapshots')}},
+                upsert=True,
+            )
         await self._prune_snapshots(snapshot.run_id)
 
     async def _prune_snapshots(self, run_id: str) -> None:
@@ -251,6 +281,7 @@ class MongoStepStore:
             agent_name=_opt_str(doc.get('agent_name')),
             timestamp=datetime.fromisoformat(timestamp_raw),
             state=_snapshot_state(doc.get('state')),
+            idempotency_key=_opt_str(doc.get('idempotency_key')),
         )
 
     async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
