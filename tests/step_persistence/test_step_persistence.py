@@ -368,6 +368,16 @@ class TestFileStepStore:
 
         assert await store.list_snapshots(run_id='r1') == [snapshot]
 
+    async def test_snapshot_key_line_separator_does_not_suppress_distinct_key(self, tmp_path: Path) -> None:
+        store = FileStepStore(tmp_path)
+        first = ContinuableSnapshot(run_id='r1', step_index=1, messages=[], idempotency_key='first\nsecond')
+        second = ContinuableSnapshot(run_id='r1', step_index=2, messages=[], idempotency_key='second')
+
+        await store.save_snapshot(first)
+        await store.save_snapshot(second)
+
+        assert await store.list_snapshots(run_id='r1') == [first, second]
+
     async def test_runs_round_trip(self, tmp_path: Path) -> None:
         store = FileStepStore(tmp_path)
         await store.register_run(RunRecord(run_id='r1', parent_run_id='p1', agent_name='a', metadata={'k': 'v'}))
@@ -714,6 +724,14 @@ class TestFileStepStore:
 
 
 class TestStepPersistenceCapability:
+    def test_store_remains_positional(self) -> None:
+        store = InMemoryStepStore()
+
+        persistence: StepPersistence[object] = StepPersistence(store)
+
+        assert persistence.store is store
+        assert persistence.id == 'step_persistence'
+
     async def test_interrupted_run_resumes_from_completed_tool_boundary(self) -> None:
         store = InMemoryStepStore()
         interrupt = InterruptBeforeSecondModelRequest()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import KW_ONLY, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
@@ -87,8 +87,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     """
 
     # Override the inherited default ID because durable-operation recovery needs a stable identity.
-    _: KW_ONLY
-    id: str | None = 'step_persistence'
+    id: str | None = field(default='step_persistence', kw_only=True)
 
     store: StepStore = field(default_factory=InMemoryStepStore)
     """Backend that records events, snapshots, and tool effects."""

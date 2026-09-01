@@ -331,6 +331,7 @@ def _snapshot_fields_ok(data: dict[str, object]) -> bool:
 
 _STR_STR_DICT_ADAPTER: TypeAdapter[dict[str, str]] = TypeAdapter(dict[str, str])
 _OBJECT_DICT_ADAPTER: TypeAdapter[dict[str, object]] = TypeAdapter(dict[str, object])
+_STRING_ADAPTER: TypeAdapter[str] = TypeAdapter(str)
 
 
 def _str_str_dict(value: object) -> dict[str, str]:
@@ -612,7 +613,12 @@ class FileStepStore:
         snap_dir.mkdir(parents=True, exist_ok=True)
         key_path = run_dir / 'snapshot-keys.jsonl'
         if snapshot.idempotency_key is not None and key_path.exists():
-            if snapshot.idempotency_key in key_path.read_text(encoding='utf-8').splitlines():
+            recorded_keys = {
+                _STRING_ADAPTER.validate_json(raw)
+                for raw in key_path.read_text(encoding='utf-8').splitlines()
+                if raw.strip()
+            }
+            if snapshot.idempotency_key in recorded_keys:
                 return
         if snapshot.idempotency_key is not None:
             for path in snap_dir.glob('*.json'):
@@ -637,7 +643,7 @@ class FileStepStore:
         _atomic_write_text(snap_dir / f'{seq}.json', json.dumps(payload))
         if snapshot.idempotency_key is not None:
             with key_path.open('a', encoding='utf-8') as fp:
-                fp.write(snapshot.idempotency_key + '\n')
+                fp.write(json.dumps(snapshot.idempotency_key) + '\n')
         self._sync_prune_snapshots(snap_dir)
 
     def _sync_prune_snapshots(self, snap_dir: Path) -> None:
