@@ -153,7 +153,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         `*args`/`**kwargs`, so a catch-all signature publishes the bare string
         `'StepPersistence'` and an editor marks every configured block as
         invalid even though it loads (#537). The `AbstractCapability` fields
-        (`id`, `description`, `defer_loading`) are re-declared for the same
+        (`id`, `description`, `defer_loading`) are redeclared for the same
         reason -- they only reach the schema through this signature.
 
         Supports `backend='memory'` (default), `backend='file'` (with
