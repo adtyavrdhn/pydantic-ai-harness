@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import KW_ONLY, dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic_ai import CallToolsNode, ModelRequestNode
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
@@ -115,7 +117,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
        deterministic tool-call ids, so a silent collision would erase
        the `unknown_after_crash` signal. Use `conversation_id=` on
        `Agent.run` for multi-turn grouping.
-    2. **`agent_name` set, `run_id` unset** -> `{agent_name}-{ctx.run_id}`.
+    2. **`agent_name` set, `run_id` unset** -> path-safe encoding of both values.
        Reusing the capability instance yields distinct ids because the agent
        graph assigns each run its own id.
     3. **Neither set** -> `ctx.run_id` per `.run()`.
@@ -198,7 +200,13 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         if ctx.run_id is None:
             raise RuntimeError('StepPersistence needs the agent graph to assign `RunContext.run_id`.')
         if self.agent_name is not None:
-            return f'{self.agent_name}-{ctx.run_id}'
+            agent_name_bytes = self.agent_name.encode()
+            payload = f'{len(agent_name_bytes)}:{self.agent_name}{ctx.run_id}'.encode()
+            encoded = base64.urlsafe_b64encode(payload).decode().rstrip('=')
+            derived = f'sp-{encoded}'
+            if len(derived) > 200:
+                raise ValueError("derived StepPersistence run_id exceeds FileStepStore's 200-character limit")
+            return derived
         return ctx.run_id
 
     def _effective_run_id(self, ctx: RunContext[AgentDepsT]) -> str:
@@ -209,14 +217,39 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         raise RuntimeError('StepPersistence run id was not materialized by `for_run`.')
 
     @durable_operation('register_run')
-    async def _register_run(self, record: RunRecord, reject_existing: bool) -> None:
-        if reject_existing and await self.store.get_run(run_id=record.run_id) is not None:
+    async def _register_run(
+        self,
+        *,
+        run_id: str,
+        conversation_id: str | None,
+        parent_run_id: str | None,
+        agent_name: str | None,
+        metadata: dict[str, str],
+        registration_id: str,
+    ) -> None:
+        existing = await self.store.get_run(run_id=run_id)
+        if existing is not None and existing.registration_id == registration_id:
+            return
+        if existing is not None:
             raise ValueError(
-                f'StepPersistence: run_id {record.run_id!r} is already in the store. '
-                'Explicit `run_id` is single-shot; pass `conversation_id=` to '
+                f'StepPersistence: run_id {run_id!r} is already in the store. '
+                '`run_id` is single-shot; pass `conversation_id=` to '
                 '`Agent.run` for multi-turn grouping instead.'
             )
-        await self.store.register_run(record)
+        await self.store.register_run(
+            RunRecord(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                parent_run_id=parent_run_id,
+                agent_name=agent_name,
+                metadata=metadata,
+                registration_id=registration_id,
+            )
+        )
+
+    @durable_operation('registration_id')
+    async def _registration_id(self) -> str:
+        return str(uuid4())
 
     @durable_operation('append_event')
     async def _append_event(
@@ -336,8 +369,10 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         )
 
     @durable_operation('record_tool_effect')
-    async def _record_tool_effect(self, effect: ToolEffectRecord) -> None:
-        await self.store.record_tool_effect(effect)
+    async def _record_tool_effect(self, run_id: str, tool_call_id: str, tool_name: str) -> None:
+        await self.store.record_tool_effect(
+            ToolEffectRecord(tool_call_id=tool_call_id, tool_name=tool_name, run_id=run_id, status='started')
+        )
 
     @durable_operation('finish_tool_effect')
     async def _finish_tool_effect(
@@ -385,23 +420,21 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Register run lineage and emit `run_started`.
 
-        When the caller pinned an explicit `run_id`, reject reuse -- the
+        Reject reuse by a distinct registration -- the
         tool-effect ledger keys on `(run_id, tool_call_id)` and providers
         reuse deterministic tool-call ids, so a second `Agent.run` with
-        the same explicit `run_id` would silently collide. The auto-derived
-        cases cannot trigger this check because each call materialises a
-        fresh id in `for_run`.
+        the same `run_id` would silently collide. A journaled registration id
+        distinguishes a retry of this durable operation from a new run.
         """
         run_id = self._effective_run_id(ctx)
+        registration_id = await self._registration_id()
         await self._register_run(
-            RunRecord(
-                run_id=run_id,
-                conversation_id=ctx.conversation_id,
-                parent_run_id=self.parent_run_id,
-                agent_name=self.agent_name,
-                metadata=dict(self.metadata),
-            ),
-            reject_existing=self.run_id is not None and self.run_id != ctx.run_id,
+            run_id=run_id,
+            conversation_id=ctx.conversation_id,
+            parent_run_id=self.parent_run_id,
+            agent_name=self.agent_name,
+            metadata=dict(self.metadata),
+            registration_id=registration_id,
         )
         await self._record_event(ctx, kind='run_started')
 
@@ -555,14 +588,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         args: dict[str, Any],
     ) -> dict[str, Any]:
         run_id = self._effective_run_id(ctx)
-        await self._record_tool_effect(
-            ToolEffectRecord(
-                tool_call_id=call.tool_call_id,
-                tool_name=tool_def.name,
-                run_id=run_id,
-                status='started',
-            )
-        )
+        await self._record_tool_effect(run_id, call.tool_call_id, tool_def.name)
         await self._record_event(
             ctx,
             kind='tool_call_started',

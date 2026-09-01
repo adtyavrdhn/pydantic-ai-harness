@@ -113,6 +113,29 @@ class TestMongoStepStoreConstruction:
 
 
 class TestMongoStepStoreProtocol:
+    async def test_pruned_snapshot_key_remains_suppressed(self) -> None:
+        store = MongoStepStore(client=_mock_client(), database='t', media_store=None, max_snapshots_per_run=1)
+        older = ContinuableSnapshot(run_id='r1', step_index=1, messages=[], idempotency_key='0:1:complete')
+        newer = ContinuableSnapshot(run_id='r1', step_index=2, messages=[], idempotency_key='1:2:complete')
+
+        await store.save_snapshot(older)
+        await store.save_snapshot(newer)
+        await store.save_snapshot(older)
+
+        assert await store.latest_snapshot(run_id='r1') == newer
+
+    async def test_snapshot_document_repairs_missing_suppression_ledger(self) -> None:
+        client = _mock_client()
+        store = MongoStepStore(client=client, database='t', media_store=None)
+        snapshot = ContinuableSnapshot(run_id='r1', step_index=1, messages=[], idempotency_key='0:1:complete')
+        await store.save_snapshot(snapshot)
+        await client['t']['snapshot_idempotency_keys'].delete_many({})
+
+        await store.save_snapshot(snapshot)
+
+        assert await store.list_snapshots(run_id='r1') == [snapshot]
+        assert await client['t']['snapshot_idempotency_keys'].count_documents({}) == 1
+
     async def test_register_and_get_run(self) -> None:
         store = MongoStepStore(client=_mock_client(), database='t', media_store=None)
         await store.register_run(RunRecord(run_id='r1', conversation_id='c1', agent_name='agent', metadata={'k': 'v'}))
@@ -121,12 +144,11 @@ class TestMongoStepStoreProtocol:
         assert fetched.conversation_id == 'c1'
         assert fetched.metadata == {'k': 'v'}
 
-    async def test_register_duplicate_run_replaces_record(self) -> None:
+    async def test_register_duplicate_run_raises_value_error(self) -> None:
         store = MongoStepStore(client=_mock_client(), database='t', media_store=None)
         await store.register_run(RunRecord(run_id='r1'))
-        await store.register_run(RunRecord(run_id='r1', agent_name='replayed'))
-        record = await store.get_run(run_id='r1')
-        assert record is not None and record.agent_name == 'replayed'
+        with pytest.raises(ValueError, match="run_id 'r1' is already in the store"):
+            await store.register_run(RunRecord(run_id='r1', agent_name='racing-run'))
 
     async def test_list_runs_chronological(self) -> None:
         store = MongoStepStore(client=_mock_client(), database='t', media_store=None)

@@ -145,3 +145,5 @@ class RunRecord:
     agent_name: str | None = None
     metadata: dict[str, str] = field(default_factory=_empty_str_dict)
     started_at: datetime = field(default_factory=_utcnow)
+    registration_id: str | None = None
+    """Durable registration invocation that claimed this run id."""

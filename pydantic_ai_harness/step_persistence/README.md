@@ -75,9 +75,12 @@ primitive for it (see [Three-level identity](#three-level-identity)).
   ids, so a silent collision would erase the `unknown_after_crash`
   signal. Use `conversation_id=` for multi-turn grouping instead.
 - **`agent_name` set, `run_id` unset** derives
-  `'{agent_name}-{ctx.run_id}'`, using the whole context run id. Replaying
-  the same durable run therefore addresses the same stored run, while a new
-  `Agent.run` gets a distinct id.
+  a path-safe base64url encoding of the complete `(agent_name, ctx.run_id)`
+  pair. The encoding is injective within `FileStepStore`'s 200-character
+  limit, so replay addresses the same stored run without collisions between
+  distinct accepted context ids. A longer derived id raises `ValueError`
+  before backend selection, including with the memory, SQLite, and Mongo
+  stores.
 - **Neither set** uses `ctx.run_id` unchanged. A missing context run id raises
   `RuntimeError` because inventing one would disconnect replayed writes.
 
@@ -88,15 +91,17 @@ be attached alongside a Pydantic AI durability capability without passing
 `id=`. Pass an explicit id only when the same agent has more than one
 `StepPersistence` instance.
 
-Five store boundaries are durable operations: run registration, event append,
-snapshot save, tool-effect start, and tool-effect completion or failure. Event
-and snapshot timestamps are read inside those operations, so replay uses the
-journaled timestamp instead of reading the workflow wall clock again.
+Six store boundaries are durable operations: registration identity, run
+registration, event append, snapshot save, tool-effect start, and tool-effect
+completion or failure. Every persisted timestamp is read inside one of those
+operations, so replay uses the journaled value instead of reading the workflow
+wall clock again. The journaled registration identity makes a retried
+registration idempotent while a distinct reuse of the same run id still fails.
 
 Events and snapshots written by the capability carry deterministic per-run
-idempotency keys. `InMemoryStepStore` and `MongoStepStore` suppress a key they
-already applied, while records created directly with `idempotency_key=None`
-retain append behavior. Snapshot keys use a per-run save sequence together with
+idempotency keys. Every built-in store suppresses a key it already applied,
+while records created directly with `idempotency_key=None` retain append
+behavior. Snapshot keys use a per-run save sequence together with
 `step_index` and `state`. Replay produces the same sequence, while distinct
 snapshots at the same step and state retain their write order and newer history.
 
@@ -331,12 +336,14 @@ configured retention can delete older snapshots.
     - `run.json` -- `RunRecord` (lineage)
     - `events.jsonl` -- append-only `StepEvent`s
     - `tool_effects.jsonl` -- append-only `ToolEffectRecord`s, scoped to this run
+    - `snapshot-keys.jsonl` -- replay-suppression keys retained independently
+      of snapshot pruning
     - `snapshots/{seq}.json` -- `ContinuableSnapshot`s, named by a per-run
       monotonic counter (NOT `step_index`, which would collide when the
       same `run_id` is reused across `Agent.run` calls -- `ctx.run_step`
       resets to 0 each call).
 - `SqliteStepStore(database='runs.db')` -- single SQLite file with tables
-  `runs`, `events`, `snapshots`, `tool_effects`, and a sibling `media`
+  `runs`, `events`, `snapshots`, `snapshot_idempotency_keys`, `tool_effects`, and a sibling `media`
   table for externalized blobs (see [Persisting media](#persisting-media)
   below). WAL mode is enabled; `tool_effects` upserts per
   `(run_id, tool_call_id)` so the latest state wins; snapshots use
@@ -348,10 +355,10 @@ configured retention can delete older snapshots.
   `check_same_thread=False` because hook calls are dispatched onto a
   worker thread.
 - `MongoStepStore(client= or db_url=, database=...)` -- MongoDB collections
-  `runs`, `events`, `snapshots`, `tool_effects`, and `counters` (atomic
-  `$inc` for monotonic `seq`). Run registration upserts by `runs._id = run_id`;
-  the capability separately enforces the explicit single-shot `run_id`
-  contract. Needs the `mongodb` extra
+  `runs`, `events`, `snapshots`, `snapshot_idempotency_keys`, `tool_effects`,
+  and `counters` (atomic `$inc` for monotonic `seq`). Run registration uses an
+  atomic insert by `runs._id = run_id`; duplicate ids raise `ValueError`.
+  Needs the `mongodb` extra
   (`pip install pydantic-ai-harness[mongodb]`, which installs
   `pymongo>=4.17.0`); pass a shared `AsyncMongoClient` as `client=`, or a
   connection string as `db_url=` (the store then owns the client -- call

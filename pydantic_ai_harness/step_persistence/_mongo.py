@@ -11,13 +11,13 @@ parts.
 
 Collections (created lazily on first write):
 
-- `runs` -- `_id = run_id`; `insert_one` enforces the single-shot `run_id`
-  contract (duplicate `run_id` raises `pymongo.errors.DuplicateKeyError`,
-  which `StepPersistence.before_run` forestalls with a friendlier check).
+- `runs` -- `_id = run_id`; `insert_one` atomically enforces the single-shot
+  `run_id` contract (duplicates surface as `ValueError`).
 - `events` -- one document per event, ordered by a monotonic `seq`.
 - `snapshots` -- one document per snapshot; latest-per-run is the highest
   `seq`, matching `SqliteStepStore`'s `AUTOINCREMENT seq` so a reused
   `run_id` whose `step_index` reset to 0 cannot clobber an earlier snapshot.
+- `snapshot_idempotency_keys` -- replay suppression retained after pruning.
 - `tool_effects` -- upsert per `(run_id, tool_call_id)`.
 - `counters` -- one document per sequence name, incremented atomically with
   `$inc` to allocate `seq` values.
@@ -32,6 +32,7 @@ from datetime import datetime
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 from pymongo import AsyncMongoClient, ReturnDocument
 from pymongo.asynchronous.database import AsyncDatabase
+from pymongo.errors import DuplicateKeyError
 
 from pydantic_ai_harness.media import MediaStore, externalize_media, restore_media
 from pydantic_ai_harness.media._mongo import MongoMediaStore  # pyright: ignore[reportPrivateUsage]
@@ -159,9 +160,10 @@ class MongoStepStore:
 
     async def register_run(self, record: RunRecord) -> None:
         await self._ensure_indexes()
-        await self._db['runs'].replace_one(
-            {'_id': record.run_id}, {'_id': record.run_id, **_run_to_dict(record)}, upsert=True
-        )
+        try:
+            await self._db['runs'].insert_one({'_id': record.run_id, **_run_to_dict(record)})
+        except DuplicateKeyError as exc:
+            raise ValueError(f'run_id {record.run_id!r} is already in the store') from exc
 
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         doc = await self._db['runs'].find_one({'_id': run_id})
@@ -229,12 +231,21 @@ class MongoStepStore:
             doc['seq'] = await self._next_seq('snapshots')
             await self._db['snapshots'].insert_one(doc)
         else:
-            # The unique key is scoped by run_id and stored on the run's own document, so it
-            # disappears with that run and needs no separate retention policy.
-            await self._db['snapshots'].update_one(
-                {'run_id': snapshot.run_id, 'idempotency_key': snapshot.idempotency_key},
-                {'$setOnInsert': {**doc, 'seq': await self._next_seq('snapshots')}},
-                upsert=True,
+            key_id: _MongoDocument = {'run_id': snapshot.run_id, 'key': snapshot.idempotency_key}
+            if await self._db['snapshot_idempotency_keys'].find_one({'_id': key_id}) is not None:
+                return
+            doc['seq'] = await self._next_seq('snapshots')
+            try:
+                await self._db['snapshots'].insert_one(doc)
+            except DuplicateKeyError:
+                await self._db['snapshot_idempotency_keys'].update_one(
+                    {'_id': key_id}, {'$setOnInsert': {'_id': key_id}}, upsert=True
+                )
+                return
+            # This ledger is independent of retained snapshot documents, so pruning cannot
+            # make a previously applied key eligible again. Its size is bounded by keyed saves.
+            await self._db['snapshot_idempotency_keys'].update_one(
+                {'_id': key_id}, {'$setOnInsert': {'_id': key_id}}, upsert=True
             )
         await self._prune_snapshots(snapshot.run_id)
 

@@ -143,6 +143,32 @@ async def test_same_step_complete_snapshots_keep_newer_history_and_suppress_repl
 
 
 @pytest.mark.anyio
+async def test_pruned_snapshot_key_remains_suppressed() -> None:
+    store = InMemoryStepStore(max_snapshots_per_run=1)
+    messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart('hello')])]
+    older = ContinuableSnapshot(run_id='run', step_index=1, messages=messages, idempotency_key='0:1:complete')
+    newer = ContinuableSnapshot(run_id='run', step_index=2, messages=messages, idempotency_key='1:2:complete')
+
+    await store.save_snapshot(older)
+    await store.save_snapshot(newer)
+    await store.save_snapshot(older)
+
+    assert await store.latest_snapshot(run_id='run') == newer
+
+
+@pytest.mark.anyio
+async def test_opaque_and_invalid_snapshot_keys_use_retained_record_suppression() -> None:
+    store = InMemoryStepStore()
+    messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart('hello')])]
+    for key in ('opaque', 'not-an-int:complete', '-1:complete'):
+        snapshot = ContinuableSnapshot(run_id='run', step_index=1, messages=messages, idempotency_key=key)
+        await store.save_snapshot(snapshot)
+        await store.save_snapshot(snapshot)
+
+    assert len(await store.list_snapshots(run_id='run')) == 3
+
+
+@pytest.mark.anyio
 async def test_dbos_replay_reuses_run_and_journaled_writes(dbos: DBOS) -> None:
     workflow_id = str(uuid.uuid4())
 
@@ -152,6 +178,7 @@ async def test_dbos_replay_reuses_run_and_journaled_writes(dbos: DBOS) -> None:
     runs = await _store.list_runs()
     assert len(runs) == 1
     run_id = runs[0].run_id
+    run_started_at = runs[0].started_at
     events = await _store.list_events(run_id=run_id)
     timestamps = [event.timestamp for event in events]
     snapshots = await _store.list_snapshots(run_id=run_id, include_interrupted=True)
@@ -162,10 +189,16 @@ async def test_dbos_replay_reuses_run_and_journaled_writes(dbos: DBOS) -> None:
         assert await _workflow() == 'done'
 
     assert [run.run_id for run in await _store.list_runs()] == [run_id]
+    replayed_run = await _store.get_run(run_id=run_id)
+    assert replayed_run is not None
+    assert replayed_run.started_at == run_started_at
     replayed_events = await _store.list_events(run_id=run_id)
     assert [event.timestamp for event in replayed_events] == timestamps
     assert await _store.list_snapshots(run_id=run_id, include_interrupted=True) == snapshots
     assert await _store.get_tool_effect(run_id=run_id, tool_call_id=effect.tool_call_id) == effect
+    replayed_effect = await _store.get_tool_effect(run_id=run_id, tool_call_id=effect.tool_call_id)
+    assert replayed_effect is not None
+    assert replayed_effect.started_at == effect.started_at
 
     steps = await dbos.list_workflow_steps_async(workflow_id)
     operation_names = {step['function_name'] for step in steps}
@@ -174,3 +207,4 @@ async def test_dbos_replay_reuses_run_and_journaled_writes(dbos: DBOS) -> None:
     assert 'durable_steps__capability__step_persistence.record_tool_effect' in operation_names
     assert 'durable_steps__capability__step_persistence.finish_tool_effect' in operation_names
     assert 'durable_steps__capability__step_persistence.register_run' in operation_names
+    assert 'durable_steps__capability__step_persistence.registration_id' in operation_names
