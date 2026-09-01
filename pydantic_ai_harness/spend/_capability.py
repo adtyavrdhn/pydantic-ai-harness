@@ -76,11 +76,11 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
     With no budgets the capability only reports, through `on_spend`. Add a
     `Budget` with no ceiling to keep a running total that never blocks.
 
-    What the gate guarantees: no request **starts** after a budget is
-    exhausted. What it does not: that spend stays under the ceiling. The
-    request that crosses the line completes, and concurrent runs can each pass
-    the check before any of them records anything. This is a brake on a runaway
-    loop, not an accounting ledger.
+    Once a recorded response spends a window, `SpendLimits` refuses the next
+    request. It does not guarantee that spend stays under the ceiling: the request
+    that crosses the line completes, and concurrent runs can each pass the check
+    before any of them records anything. This is a brake on a runaway loop, not an
+    accounting ledger.
 
     State lives across runs on purpose, so `for_run` is left alone: a daily
     budget that reset every run would not be a daily budget. Per-run isolation
