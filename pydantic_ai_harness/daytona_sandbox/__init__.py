@@ -1,21 +1,17 @@
 """Daytona backend and lifecycle capability for Pydantic AI sandboxes."""
 
-from ._backend import DaytonaSandboxBackend
-from ._capability import DaytonaSandbox
-from ._session import (
+from ._backend import (
     DaytonaSandboxAuthError,
-    DaytonaSandboxCommandTimeoutError,
+    DaytonaSandboxBackend,
     DaytonaSandboxError,
-    DaytonaSandboxTerminalError,
     DaytonaSandboxUnavailableError,
 )
+from ._capability import DaytonaSandbox
 
 __all__ = (
     'DaytonaSandbox',
     'DaytonaSandboxAuthError',
     'DaytonaSandboxBackend',
-    'DaytonaSandboxCommandTimeoutError',
     'DaytonaSandboxError',
-    'DaytonaSandboxTerminalError',
     'DaytonaSandboxUnavailableError',
 )

@@ -66,8 +66,7 @@ class FakeProcess:
             raise self.owner.exec_error
         self.owner.process_command = getattr(request, 'command')
         self.owner.process_run_async = getattr(request, 'run_async')
-        self.owner.process_suppress_input_echo = getattr(request, 'suppress_input_echo')
-        if not self.owner.process_stdout and not self.owner.process_stderr and not self.owner.process_waits_for_input:
+        if not self.owner.process_stdout and not self.owner.process_stderr and not self.owner.process_hangs:
             output, self.owner.process_exit_code = self.owner.responder(self.owner.process_command, timeout)
             self.owner.process_stdout = [output]
         return SimpleNamespace(cmd_id='cmd-1')
@@ -81,6 +80,8 @@ class FakeProcess:
     ) -> None:
         self.owner.process_calls.append(('logs', session_id, command_id))
         self.owner.process_logs_started.set()
+        if self.owner.process_logs_error is not None:
+            raise self.owner.process_logs_error
         for handler, chunks in (
             (on_stdout, self.owner.process_stdout),
             (on_stderr, self.owner.process_stderr),
@@ -89,28 +90,8 @@ class FakeProcess:
                 result = handler(chunk)
                 if inspect.isawaitable(result):
                     await result
-        if self.owner.process_waits_for_input:
-            await self.owner.process_input_event.wait()
-        for handler, chunks in (
-            (on_stdout, self.owner.process_stdout_after_input),
-            (on_stderr, self.owner.process_stderr_after_input),
-        ):
-            for chunk in chunks:
-                result = handler(chunk)
-                if inspect.isawaitable(result):
-                    await result
-
-    async def send_session_command_input(
-        self,
-        session_id: str,
-        command_id: str,
-        data: str,
-        request_timeout: float | None = None,
-    ) -> None:
-        self.owner.process_calls.append(('input', session_id, command_id, data, request_timeout))
-        if self.owner.process_input_error is not None:
-            raise self.owner.process_input_error
-        self.owner.process_input_event.set()
+        if self.owner.process_hangs:
+            await asyncio.Event().wait()
 
     async def get_session_command(
         self,
@@ -128,7 +109,6 @@ class FakeProcess:
         if self.owner.process_delete_error is not None:
             raise self.owner.process_delete_error
         self.owner.process_sessions.discard(session_id)
-        self.owner.process_input_event.set()
 
 
 class FakeFileSystem:
@@ -238,18 +218,14 @@ class FakeSandbox:
         self.process_sessions: set[str] = set()
         self.process_command = ''
         self.process_run_async: bool | None = None
-        self.process_suppress_input_echo: bool | None = None
         self.process_stdout: list[str] = []
         self.process_stderr: list[str] = []
-        self.process_stdout_after_input: list[str] = []
-        self.process_stderr_after_input: list[str] = []
-        self.process_waits_for_input = False
-        self.process_input_event = asyncio.Event()
+        self.process_hangs = False
         self.process_exit_code: int | None = 0
         self.process_delete_error: Exception | None = None
         self.process_create_error: Exception | None = None
-        self.process_input_error: Exception | None = None
         self.process_status_error: Exception | None = None
+        self.process_logs_error: Exception | None = None
         self.process_create_gate: asyncio.Event | None = None
         self.process_create_started = asyncio.Event()
         self.process_logs_started = asyncio.Event()

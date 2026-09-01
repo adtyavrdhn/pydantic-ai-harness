@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import posixpath
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -11,10 +10,11 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.sandboxes import SandboxBackend, SandboxRef
 from pydantic_ai.tools import AgentDepsT, RunContext
 
-from pydantic_ai_harness.daytona_sandbox._backend import PROVIDER, DaytonaSandboxBackend
-from pydantic_ai_harness.daytona_sandbox._session import (
+from pydantic_ai_harness._sandbox_provider import absolute_path
+from pydantic_ai_harness.daytona_sandbox._backend import (
     DEFAULT_AUTO_STOP_MINUTES,
-    _delete_sandbox,  # pyright: ignore[reportPrivateUsage]
+    PROVIDER,
+    DaytonaSandboxBackend,
 )
 
 
@@ -50,14 +50,9 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
     """Whether to block outbound traffic from an owned sandbox."""
 
     def __post_init__(self) -> None:
-        if type(self.auto_stop_minutes) is not int or self.auto_stop_minutes <= 0:
+        if self.auto_stop_minutes <= 0:
             raise ValueError(f'auto_stop_minutes must be a positive integer, got {self.auto_stop_minutes!r}.')
-        if self.workdir is not None and not posixpath.isabs(self.workdir):
-            raise ValueError(f'workdir must be an absolute sandbox path or None, got {self.workdir!r}.')
-        if self.workdir is not None:
-            self.workdir = posixpath.normpath(self.workdir)
-        if type(self.network_block_all) is not bool:
-            raise ValueError(f'network_block_all must be a boolean, got {self.network_block_all!r}.')
+        self.workdir = absolute_path('workdir', self.workdir)
         if self.env is not None:
             self.env = dict(self.env)
         if self.sandbox_id is None:
@@ -83,7 +78,7 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
             return SandboxRef(provider=PROVIDER, sandbox_id=self.sandbox_id)
         if ctx.run_id is None:  # pragma: no cover - core assigns it before acquisition
             raise RuntimeError('Daytona sandbox acquisition requires a run ID.')
-        backend = await DaytonaSandboxBackend._create_or_connect(  # pyright: ignore[reportPrivateUsage]
+        backend = await DaytonaSandboxBackend.create_or_connect(
             name=_sandbox_name(ctx.run_id),
             snapshot=self.snapshot,
             auto_stop_minutes=self.auto_stop_minutes,
@@ -92,14 +87,7 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
             network_block_all=self.network_block_all,
         )
         ref = SandboxRef(provider=PROVIDER, sandbox_id=backend.sandbox_id)
-        try:
-            await backend.close(terminate=False)
-        except BaseException:
-            try:
-                await backend._cleanup_failed_acquisition()  # pyright: ignore[reportPrivateUsage]
-            except Exception:
-                pass
-            raise
+        await backend.close(terminate=False)
         return ref
 
     async def get_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef | None) -> SandboxBackend | None:
@@ -110,4 +98,4 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
     async def release_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> None:
         if self.sandbox_id is not None or ref.provider != PROVIDER:
             return
-        await _delete_sandbox(ref.sandbox_id)
+        await DaytonaSandboxBackend.delete_by_id(ref.sandbox_id)
