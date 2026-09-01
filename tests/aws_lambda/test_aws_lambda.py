@@ -15,6 +15,8 @@ import pytest
 from aws_durable_execution_sdk_python import durable_execution  # pyright: ignore[reportUnknownVariableType]
 from aws_durable_execution_sdk_python.config import StepSemantics
 from aws_durable_execution_sdk_python.exceptions import ExecutionError
+from aws_durable_execution_sdk_python.retries import RetryPresets
+from aws_durable_execution_sdk_python.serdes import DEFAULT_JSON_SERDES
 from pydantic_ai import Agent, RunContext
 from pydantic_ai._run_context import get_current_run_context  # pyright: ignore[reportPrivateUsage]
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
@@ -375,6 +377,13 @@ class TestStepConfig:
         configs = [op.config for op in ctx.operations]
         assert all(c is not None and c.step_semantics is StepSemantics.AT_MOST_ONCE_PER_RETRY for c in configs)
 
+    def test_base_config_accepts_valid_retry_strategy_and_serdes(self) -> None:
+        capability = AWSLambdaDurability(
+            step_config={'retry_strategy': RetryPresets.none(), 'serdes': DEFAULT_JSON_SERDES}
+        )
+
+        assert capability is not None
+
     def test_per_tool_metadata_overrides_the_base_config_key_by_key(self) -> None:
         toolset = FunctionToolset[object](id='tools')
 
@@ -409,6 +418,23 @@ class TestStepConfig:
         with pytest.raises(UserError, match="Unknown 'aws_lambda' step config key 'retries'"):
             AWSLambdaDurability(step_config={'retries': 3})
 
+    @pytest.mark.parametrize(
+        ('key', 'value', 'expected'),
+        [
+            ('retry_strategy', 3, 'a callable or None'),
+            ('step_semantics', 'at-least-once', 'StepSemantics'),
+            ('serdes', 3, 'SerDes or None'),
+        ],
+    )
+    def test_wrong_base_config_value_type_is_rejected_at_construction(
+        self, key: str, value: object, expected: str
+    ) -> None:
+        with pytest.raises(
+            UserError,
+            match=rf"Invalid 'aws_lambda' step config value for '{key}': expected {expected}, got",
+        ):
+            AWSLambdaDurability(step_config={key: value})
+
     def test_unknown_per_tool_config_key_is_rejected(self) -> None:
         toolset = FunctionToolset[object](id='tools')
         toolset.add_function(act, metadata={'aws_lambda': {'retries': 3}})
@@ -417,6 +443,19 @@ class TestStepConfig:
         ctx = FakeDurableContext()
 
         with pytest.raises(UserError, match="Unknown 'aws_lambda' step config key 'retries'"):
+            run_durable(lambda: agent.run('go'), context=ctx)
+
+    def test_wrong_per_tool_config_value_type_is_rejected(self) -> None:
+        toolset = FunctionToolset[object](id='tools')
+        toolset.add_function(act, metadata={'aws_lambda': {'step_semantics': 'at-least-once'}})
+
+        agent = Agent(tool_then_text(), name='a', toolsets=[toolset], capabilities=[AWSLambdaDurability()])
+        ctx = FakeDurableContext()
+
+        with pytest.raises(
+            UserError,
+            match="Invalid 'aws_lambda' step config value for 'step_semantics': expected StepSemantics, got str",
+        ):
             run_durable(lambda: agent.run('go'), context=ctx)
 
     def test_non_mapping_per_tool_config_is_rejected(self) -> None:

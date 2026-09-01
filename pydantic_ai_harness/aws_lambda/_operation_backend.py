@@ -4,8 +4,10 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import fields
 from typing import Any, Literal
 
-from aws_durable_execution_sdk_python.config import StepConfig
-from pydantic import TypeAdapter
+from aws_durable_execution_sdk_python.config import StepConfig, StepSemantics
+from aws_durable_execution_sdk_python.retries import RetryDecision
+from aws_durable_execution_sdk_python.serdes import SerDes
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 from pydantic_ai.durable_exec import (
     DurableOperationId,
     JournalCallableOperationBackend,
@@ -20,6 +22,14 @@ _TOOL_CONFIG_KEY = 'aws_lambda'
 # Derived rather than listed so a new SDK `StepConfig` field is accepted, not rejected as unknown.
 _STEP_CONFIG_FIELDS = frozenset(field.name for field in fields(StepConfig))
 _STEP_CONFIG_MAPPING_ADAPTER = TypeAdapter(dict[str, object])
+_RETRY_STRATEGY_ADAPTER: TypeAdapter[Callable[[Exception, int], RetryDecision] | None] = TypeAdapter(
+    Callable[[Exception, int], RetryDecision] | None,
+    config=ConfigDict(arbitrary_types_allowed=True),
+)  # pyright: ignore[reportUnknownArgumentType]
+_STEP_SEMANTICS_ADAPTER = TypeAdapter(StepSemantics)
+_SERDES_ADAPTER: TypeAdapter[SerDes[object] | None] = TypeAdapter(
+    SerDes | None, config=ConfigDict(arbitrary_types_allowed=True)
+)  # pyright: ignore[reportUnknownArgumentType]
 
 
 class AWSLambdaOperationConfig(RoleBasedOperationConfig[StepConfig | None]):
@@ -87,7 +97,31 @@ def _parse_step_config(config: Mapping[str, Any] | None) -> StepConfig | None:
             f'{", ".join(repr(key) for key in unknown)}. Supported keys are '
             f'{", ".join(repr(field) for field in sorted(_STEP_CONFIG_FIELDS))}.'
         )
+    for key, value in config.items():
+        _validate_step_config_value(key, value)
     return StepConfig(**config)
+
+
+def _validate_step_config_value(key: str, value: object) -> None:
+    try:
+        if key == 'retry_strategy':
+            _RETRY_STRATEGY_ADAPTER.validate_python(value, strict=True)
+            return
+        if key == 'step_semantics':
+            _STEP_SEMANTICS_ADAPTER.validate_python(value, strict=True)
+            return
+        _SERDES_ADAPTER.validate_python(value, strict=True)
+        return
+    except ValidationError:
+        expected = {
+            'retry_strategy': 'a callable or None',
+            'step_semantics': 'StepSemantics',
+            'serdes': 'SerDes or None',
+        }[key]
+        raise UserError(
+            f'Invalid {_TOOL_CONFIG_KEY!r} step config value for {key!r}: expected {expected}, '
+            f'got {type(value).__name__}.'
+        ) from None
 
 
 def _toolset_tool(value: object | None) -> ToolsetTool[Any] | None:
