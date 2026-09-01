@@ -953,13 +953,18 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         if isinstance(output, str) and not part.output_capped:
             # Each feed's capture is bounded by the sandbox, but the feeds accumulate here on
             # the host; without a total cap a statement-per-print snippet grows without limit.
-            # Counted in encoded bytes, marker included, so the cap is what it says.
-            room = _EAGER_OUTPUT_CAP - len(part.output.encode()) - len(_EAGER_TRUNCATION_MARKER.encode())
+            # Counted in encoded bytes, marker included, and tracked incrementally on the
+            # part so each feed's work is linear in its own fragment.
+            marker_bytes = len(_EAGER_TRUNCATION_MARKER.encode())
+            room = _EAGER_OUTPUT_CAP - part.output_bytes - marker_bytes
             encoded = output.encode()
             if len(encoded) <= room:
                 part.output += output
+                part.output_bytes += len(encoded)
             else:
-                part.output += encoded[: max(room, 0)].decode('utf-8', 'ignore') + _EAGER_TRUNCATION_MARKER
+                kept = encoded[: max(room, 0)].decode('utf-8', 'ignore')
+                part.output += kept + _EAGER_TRUNCATION_MARKER
+                part.output_bytes += len(kept.encode()) + marker_bytes
                 part.output_capped = True
         metadata: Any = result.metadata
         assert metadata is not None, 'run_code always attaches code_mode metadata'

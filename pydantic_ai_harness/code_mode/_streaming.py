@@ -24,6 +24,13 @@ class _PartialArgs(TypedDict):
 
 _PARTIAL_ARGS_ADAPTER: TypeAdapter[_PartialArgs] = TypeAdapter(_PartialArgs)
 
+_MAX_SCAN_BYTES = 1 << 18
+"""Largest streamed prefix the host will `ast.parse`; larger snippets run whole at dispatch.
+
+The host parser has no sandbox around it, so its work must be bounded: repeated parses of a
+growing prefix are quadratic, and adversarial nesting exercises parser depth limits.
+"""
+
 
 def decode_partial_code(args_text: str) -> str | None:
     """Recover the `code` string prefix from partially streamed JSON arguments."""
@@ -51,13 +58,17 @@ def closed_statements(code: str, consumed: int) -> tuple[list[ast.stmt], int]:
     the known upgrade path.
     """
     end = code.rfind('\n')
-    if end < 0:
+    if end < 0 or end >= _MAX_SCAN_BYTES:
+        # Oversized prefixes skip host-side parsing entirely: the dispatch hands the code to
+        # the sandbox parser, which applies its own resource limits. The cost is losing
+        # eagerness for snippets this large, not correctness.
         return [], consumed
     try:
         tree = ast.parse(code[: end + 1])
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
         # `ValueError` covers source `ast.parse` rejects before parsing, such as a NUL
-        # character that JSON happily encodes; the dispatch feed surfaces the real error.
+        # character that JSON happily encodes; `RecursionError`/`MemoryError` cover parser
+        # depth limits on adversarial nesting. The dispatch feed surfaces the real error.
         return [], consumed
     closed: list[ast.stmt] = []
     for stmt, following in zip(tree.body, tree.body[1:]):
