@@ -103,10 +103,12 @@ commands that may produce very large output should bound it at the source.
 The public error surface is deliberately narrow:
 
 - `E2BSandboxError` for provider operations that fail.
-- `E2BSandboxTerminalError` as the catchable base for failures a retry cannot fix.
-- `E2BSandboxAuthError` when credentials are rejected.
-- `E2BSandboxUnavailableError` when the referenced sandbox is not running.
-- `E2BSandboxCommandTimeoutError` for command deadlines, also a built-in `TimeoutError`.
+- `E2BSandboxAuthError` when credentials are rejected, also a
+  `pydantic_ai.sandboxes.SandboxUnavailableError`.
+- `E2BSandboxUnavailableError` when the referenced sandbox is not running, also a
+  `pydantic_ai.sandboxes.SandboxUnavailableError`.
+- `pydantic_ai.sandboxes.SandboxTimeoutError` for command deadlines, with the partial
+  `stdout`, `stderr`, and enforced `timeout`.
 
 Filesystem misses use the built-in `FileNotFoundError` contract.
 

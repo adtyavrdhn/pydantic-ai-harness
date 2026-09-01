@@ -37,11 +37,10 @@ from pathlib import Path
 
 import anyio
 import pytest
-from pydantic_ai.sandboxes import Sandbox
+from pydantic_ai.sandboxes import Sandbox, SandboxTimeoutError
 
 from pydantic_ai_harness.modal_sandbox import (
     ModalSandboxBackend,
-    ModalSandboxCommandTimeoutError,
     ModalSandboxUnavailableError,
 )
 
@@ -112,7 +111,7 @@ class TestRealExecution:
 
     async def test_timeout_preserves_pre_deadline_output(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the fake-encoded assumption that output printed before an infra timeout is preserved."""
-        with pytest.raises(ModalSandboxCommandTimeoutError) as exc_info:
+        with pytest.raises(SandboxTimeoutError) as exc_info:
             await sandbox.run('echo DIAGNOSTIC; sleep 30', shell=True, timeout=2)
 
         assert 'DIAGNOSTIC' in exc_info.value.stdout
@@ -124,7 +123,7 @@ class TestRealExecution:
         wins the race, as a plain 137 exit; the backend recognizes both (137 counts once the
         command consumed its whole deadline window).
         """
-        with pytest.raises(ModalSandboxCommandTimeoutError) as exc_info:
+        with pytest.raises(SandboxTimeoutError) as exc_info:
             await sandbox.run('echo STDERR-DIAGNOSTIC 1>&2; sleep 30', shell=True, timeout=2)
 
         assert 'STDERR-DIAGNOSTIC' in exc_info.value.stderr

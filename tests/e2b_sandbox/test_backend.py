@@ -2,23 +2,34 @@
 
 from __future__ import annotations
 
-import asyncio
 import builtins
 import sys
 
 import anyio
 import pytest
-import sniffio
-from pydantic_ai.sandboxes import Sandbox, SandboxBackend, SupportsFilesystem, SupportsStart, SupportsStream
+from pydantic_ai.sandboxes import (
+    Sandbox,
+    SandboxBackend,
+    SandboxTimeoutError,
+    SandboxUnavailableError,
+    SupportsFilesystem,
+    SupportsStart,
+    SupportsStream,
+)
 
 from pydantic_ai_harness.e2b_sandbox import (
+    E2BSandboxAuthError,
     E2BSandboxBackend,
-    E2BSandboxCommandTimeoutError,
     E2BSandboxError,
-    E2BSandboxTerminalError,
     E2BSandboxUnavailableError,
 )
 
+from ..sandbox_conformance import (
+    check_command_validation,
+    check_missing_file,
+    check_process_results,
+    check_timeout,
+)
 from .fake_e2b import FakeE2B
 
 
@@ -57,6 +68,20 @@ class TestConformance:
         assert backend.sandbox_id == 'sbx-1'
         assert backend.sandbox is fake_e2b.sandboxes[0]
 
+    async def test_shared_command_validation(self, fake_e2b: FakeE2B) -> None:
+        await check_command_validation(E2BSandboxBackend.create)
+
+    async def test_shared_missing_file(self, fake_e2b: FakeE2B) -> None:
+        await check_missing_file(E2BSandboxBackend.create)
+
+    async def test_shared_timeout(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.command_hangs = True
+        await check_timeout(E2BSandboxBackend.create)
+
+    async def test_shared_wait_and_nonzero_result(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.responder = lambda command, timeout: ('', '', 2)
+        await check_process_results(E2BSandboxBackend.create)
+
 
 class TestCreate:
     async def test_creates_from_config(self, fake_e2b: FakeE2B) -> None:
@@ -91,94 +116,18 @@ class TestCreate:
 
     async def test_auth_error_is_terminal(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.create_error = fake_e2b.auth_type('bad key')
-        with pytest.raises(E2BSandboxTerminalError, match='E2B rejected the credentials'):
+        with pytest.raises(E2BSandboxAuthError, match='E2B rejected the credentials'):
             await E2BSandboxBackend.create()
 
     async def test_hanging_create_does_not_hang_the_caller(
         self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Creation is shielded, so its own deadline is the only bound between a wedged
-        # control plane and a hung process.
+        # The client-side bound prevents a wedged control plane from hanging acquisition.
         monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend._CREATE_TIMEOUT', 0.05)
         fake_e2b.create_hangs = True
         with anyio.fail_after(5):
             with pytest.raises(E2BSandboxError, match='did not complete within'):
                 await E2BSandboxBackend.create()
-
-    async def test_cancel_during_create_kills_the_new_sandbox(self, fake_e2b: FakeE2B) -> None:
-        # A caller cancelled mid-create must not orphan the sandbox: creation is shielded so
-        # the handle survives, then the cancellation tears it down here instead of leaving it
-        # for `sandbox_timeout` to reap.
-        with anyio.CancelScope() as scope:
-            scope.cancel()
-            await E2BSandboxBackend.create()
-        assert fake_e2b.sandboxes[0].killed is True
-
-    async def test_cancel_during_create_preserves_cancellation_when_cleanup_fails(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.kill_error = RuntimeError('cleanup failed')
-        with anyio.CancelScope() as scope:
-            scope.cancel()
-            await E2BSandboxBackend.create()
-
-    async def test_cancel_during_create_preserves_cancellation_when_cleanup_extra_disappears(
-        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        create = fake_e2b.module.AsyncSandbox.create
-
-        async def create_then_hide_extra(**kwargs: object) -> object:
-            sandbox = await create(**kwargs)
-            _hide_e2b(monkeypatch)
-            return sandbox
-
-        monkeypatch.setattr(fake_e2b.module.AsyncSandbox, 'create', create_then_hide_extra)
-        with anyio.CancelScope() as scope:
-            scope.cancel()
-            await E2BSandboxBackend.create()
-
-    async def test_task_cancellation_during_create_kills_the_new_sandbox(self, fake_e2b: FakeE2B) -> None:
-        if sniffio.current_async_library() != 'asyncio':
-            pytest.skip('raw asyncio task cancellation requires asyncio')
-        fake_e2b.create_gate = asyncio.Event()
-        creating = asyncio.create_task(E2BSandboxBackend.create())
-        await fake_e2b.create_started.wait()
-
-        creating.cancel()
-        fake_e2b.create_gate.set()
-
-        with pytest.raises(asyncio.CancelledError):
-            await creating
-        assert fake_e2b.sandboxes[0].killed is True
-
-    async def test_task_cancellation_during_hung_create_is_bounded(
-        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        if sniffio.current_async_library() != 'asyncio':
-            pytest.skip('raw asyncio task cancellation requires asyncio')
-        monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend._CREATE_TIMEOUT', 0.05)
-        fake_e2b.create_gate = asyncio.Event()
-        creating = asyncio.create_task(E2BSandboxBackend.create())
-        await fake_e2b.create_started.wait()
-
-        creating.cancel()
-
-        with anyio.fail_after(1):
-            with pytest.raises(asyncio.CancelledError):
-                await creating
-        assert fake_e2b.sandboxes == []
-
-    async def test_task_cancellation_is_not_masked_by_cleanup_failure(self, fake_e2b: FakeE2B) -> None:
-        if sniffio.current_async_library() != 'asyncio':
-            pytest.skip('raw asyncio task cancellation requires asyncio')
-        fake_e2b.create_gate = asyncio.Event()
-        fake_e2b.kill_error = RuntimeError('cleanup failed')
-        creating = asyncio.create_task(E2BSandboxBackend.create())
-        await fake_e2b.create_started.wait()
-
-        creating.cancel()
-        fake_e2b.create_gate.set()
-
-        with pytest.raises(asyncio.CancelledError):
-            await creating
 
     async def test_rejects_relative_working_dir(self, fake_e2b: FakeE2B) -> None:
         with pytest.raises(ValueError, match='working_dir must be an absolute sandbox path'):
@@ -204,14 +153,14 @@ class TestConnect:
 
     async def test_connect_auth_error_is_terminal(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.connect_error = fake_e2b.auth_type('bad key')
-        with pytest.raises(E2BSandboxTerminalError, match='E2B rejected the credentials'):
+        with pytest.raises(E2BSandboxAuthError, match='E2B rejected the credentials'):
             await E2BSandboxBackend.connect('sbx-keep')
 
     async def test_other_connect_failures_are_recoverable(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.connect_error = fake_e2b.error_type('service unavailable')
         with pytest.raises(E2BSandboxError, match='Could not connect to E2B sandbox') as exc:
             await E2BSandboxBackend.connect('sbx-keep')
-        assert not isinstance(exc.value, E2BSandboxTerminalError)
+        assert not isinstance(exc.value, SandboxUnavailableError)
 
     async def test_missing_e2b_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _hide_e2b(monkeypatch)
@@ -247,7 +196,7 @@ class TestClose:
         backend = await E2BSandboxBackend.create()
         fake_e2b.kill_error = fake_e2b.auth_type('bad key')
 
-        with pytest.raises(E2BSandboxTerminalError, match='E2B rejected the credentials'):
+        with pytest.raises(E2BSandboxAuthError, match='E2B rejected the credentials'):
             await backend.close(terminate=True)
 
     async def test_close_names_the_missing_extra(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -267,7 +216,7 @@ class TestClose:
         _hide_e2b(monkeypatch)
 
         with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
-            await E2BSandboxBackend._kill_by_id('missing')  # pyright: ignore[reportPrivateUsage]
+            await E2BSandboxBackend.kill_by_id('missing')
 
     async def test_hanging_kill_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
         # Teardown runs shielded, so a hanging kill would be uncancellable; its own deadline
@@ -355,7 +304,7 @@ class TestRun:
         fake_e2b.responder = lambda command, timeout: ('partial', 'oops', 0)
         fake_e2b.command_hangs = True
         backend = await E2BSandboxBackend.create()
-        with pytest.raises(E2BSandboxCommandTimeoutError) as exc:
+        with pytest.raises(SandboxTimeoutError) as exc:
             await backend.run(['sleep', '99'], timeout=0.05)
         assert isinstance(exc.value, TimeoutError)
         assert (exc.value.stdout, exc.value.stderr, exc.value.timeout) == ('partial', 'oops', 0.05)
@@ -374,7 +323,7 @@ class TestRun:
         fake_e2b.command_hangs = True
         fake_e2b.kill_command_error = fake_e2b.error_type('kill refused')
         backend = await E2BSandboxBackend.create()
-        with pytest.raises(E2BSandboxCommandTimeoutError):
+        with pytest.raises(SandboxTimeoutError):
             await backend.run(['sleep', '99'], timeout=0.05)
 
     async def test_run_failure_is_a_recoverable_sandbox_error(self, fake_e2b: FakeE2B) -> None:
@@ -382,7 +331,7 @@ class TestRun:
         backend = await E2BSandboxBackend.create()
         with pytest.raises(E2BSandboxError, match='Command could not run in the sandbox: transient blip') as exc:
             await backend.run(['x'])
-        assert not isinstance(exc.value, E2BSandboxTerminalError)
+        assert not isinstance(exc.value, SandboxUnavailableError)
 
     async def test_a_non_e2b_failure_names_its_type(self, fake_e2b: FakeE2B) -> None:
         # Transport failures are not `SandboxException`; they must still surface as a typed,
@@ -403,7 +352,7 @@ class TestRun:
         exc_type: type[Exception] = getattr(fake_e2b, exc_property)
         fake_e2b.run_error = exc_type('terminal failure')
         backend = await E2BSandboxBackend.create()
-        with pytest.raises(E2BSandboxTerminalError, match=match):
+        with pytest.raises(SandboxUnavailableError, match=match):
             await backend.run(['x'])
 
     async def test_a_dead_sandbox_behind_a_timeout_is_terminal(self, fake_e2b: FakeE2B) -> None:
@@ -421,7 +370,7 @@ class TestRun:
         backend = await E2BSandboxBackend.create()
         with pytest.raises(E2BSandboxError, match='slow') as exc:
             await backend.run(['x'])
-        assert not isinstance(exc.value, E2BSandboxTerminalError)
+        assert not isinstance(exc.value, SandboxUnavailableError)
 
     async def test_a_failing_health_probe_preserves_the_original_error(self, fake_e2b: FakeE2B) -> None:
         # The classifying probe can itself fail with a raw transport error; that must not
@@ -464,9 +413,9 @@ class TestProcess:
         fake_e2b.command_hangs = True
         backend = await E2BSandboxBackend.create()
         process = await backend.start(['x'], timeout=0.05)
-        with pytest.raises(E2BSandboxCommandTimeoutError) as first:
+        with pytest.raises(SandboxTimeoutError) as first:
             await process.wait()
-        with pytest.raises(E2BSandboxCommandTimeoutError) as second:
+        with pytest.raises(SandboxTimeoutError) as second:
             await process.wait()
         assert first.value is second.value
 
@@ -478,7 +427,7 @@ class TestProcess:
         process = await backend.start(['x'], timeout=0.05)
         await anyio.sleep(0.1)
         with anyio.fail_after(1):
-            with pytest.raises(E2BSandboxCommandTimeoutError):
+            with pytest.raises(SandboxTimeoutError):
                 await process.wait()
 
     async def test_the_pid_is_reported(self, fake_e2b: FakeE2B) -> None:
@@ -521,7 +470,7 @@ class TestWorkingDir:
         fake_e2b.command_hangs = True
         backend = await E2BSandboxBackend.create()
         with anyio.fail_after(5):
-            with pytest.raises(E2BSandboxCommandTimeoutError):
+            with pytest.raises(SandboxTimeoutError):
                 await backend.working_dir()
 
     async def test_concurrent_callers_probe_once(self, fake_e2b: FakeE2B) -> None:
@@ -607,7 +556,7 @@ class TestFilesystem:
         fake_e2b.fs_error = fake_e2b.error_type('Permission denied')
         with pytest.raises(E2BSandboxError, match='Permission denied') as exc:
             await backend.fs.write_bytes('/root/x', b'data')
-        assert not isinstance(exc.value, E2BSandboxTerminalError)
+        assert not isinstance(exc.value, SandboxUnavailableError)
 
     async def test_a_filesystem_error_on_a_dead_sandbox_is_terminal(self, fake_e2b: FakeE2B) -> None:
         # E2B reports an envd request the sandbox never answered as a timeout, whether it is
@@ -627,7 +576,7 @@ class TestFilesystem:
     async def test_an_auth_failure_is_terminal(self, fake_e2b: FakeE2B) -> None:
         backend = await E2BSandboxBackend.create()
         fake_e2b.fs_error = fake_e2b.auth_type('bad key')
-        with pytest.raises(E2BSandboxTerminalError, match='E2B rejected the credentials'):
+        with pytest.raises(E2BSandboxAuthError, match='E2B rejected the credentials'):
             await backend.fs.make_dir('/x')
 
     async def test_exists_still_reports_other_failures(self, fake_e2b: FakeE2B) -> None:

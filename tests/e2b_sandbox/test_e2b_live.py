@@ -35,11 +35,10 @@ from contextlib import asynccontextmanager
 
 import anyio
 import pytest
-from pydantic_ai.sandboxes import Sandbox
+from pydantic_ai.sandboxes import Sandbox, SandboxTimeoutError
 
 from pydantic_ai_harness.e2b_sandbox import (
     E2BSandboxBackend,
-    E2BSandboxCommandTimeoutError,
     E2BSandboxUnavailableError,
 )
 
@@ -115,7 +114,7 @@ class TestRealExecution:
         the command would have written after the deadline must never appear.
         """
         marker = f'/tmp/{_unique("after-deadline")}'
-        with pytest.raises(E2BSandboxCommandTimeoutError) as exc_info:
+        with pytest.raises(SandboxTimeoutError) as exc_info:
             await sandbox.run(f'echo DIAGNOSTIC; sleep 20; touch {marker}', shell=True, timeout=2)
 
         assert 'DIAGNOSTIC' in exc_info.value.stdout
@@ -130,7 +129,7 @@ class TestRealExecution:
         the limitation can be removed from the docs.
         """
         marker = f'/tmp/{_unique("orphan")}'
-        with pytest.raises(E2BSandboxCommandTimeoutError):
+        with pytest.raises(SandboxTimeoutError):
             await sandbox.run(f'(sleep 5; touch {marker}) & sleep 30', shell=True, timeout=2)
 
         await anyio.sleep(10)

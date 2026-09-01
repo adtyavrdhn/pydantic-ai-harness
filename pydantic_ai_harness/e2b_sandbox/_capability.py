@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import posixpath
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -10,6 +9,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.sandboxes import SandboxBackend, SandboxRef
 from pydantic_ai.tools import AgentDepsT, RunContext
 
+from pydantic_ai_harness._sandbox_provider import absolute_path
 from pydantic_ai_harness.e2b_sandbox._backend import (
     DEFAULT_SANDBOX_TIMEOUT,
     PROVIDER,
@@ -54,14 +54,9 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
     """Whether an owned sandbox may reach the internet."""
 
     def __post_init__(self) -> None:
-        if type(self.sandbox_timeout) is not int or self.sandbox_timeout <= 0:
+        if self.sandbox_timeout <= 0:
             raise ValueError(f'sandbox_timeout must be a positive integer, got {self.sandbox_timeout!r}.')
-        if self.workdir is not None and not posixpath.isabs(self.workdir):
-            raise ValueError(f'workdir must be an absolute sandbox path or None, got {self.workdir!r}.')
-        if self.workdir is not None:
-            self.workdir = posixpath.normpath(self.workdir)
-        if type(self.allow_internet_access) is not bool:
-            raise ValueError(f'allow_internet_access must be a boolean, got {self.allow_internet_access!r}.')
+        self.workdir = absolute_path('workdir', self.workdir)
         if self.env is not None:
             self.env = dict(self.env)
         if self.metadata is not None:
@@ -95,7 +90,7 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
             raise RuntimeError('E2B sandbox acquisition requires a run ID.')
         metadata = dict(self.metadata or ())
         metadata[_RUN_ID_METADATA_KEY] = ctx.run_id
-        backend = await E2BSandboxBackend._create_or_connect(  # pyright: ignore[reportPrivateUsage]
+        backend = await E2BSandboxBackend.create_or_connect(
             identity={_RUN_ID_METADATA_KEY: ctx.run_id},
             template=self.template,
             sandbox_timeout=self.sandbox_timeout,
@@ -116,4 +111,4 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
         """Kill an owned sandbox; leave an attached sandbox to its owner."""
         if self.sandbox_id is not None or ref.provider != PROVIDER:
             return
-        await E2BSandboxBackend._kill_by_id(ref.sandbox_id)  # pyright: ignore[reportPrivateUsage]
+        await E2BSandboxBackend.kill_by_id(ref.sandbox_id)
