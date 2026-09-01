@@ -12,6 +12,19 @@ from pydantic_ai.durable_exec import (
     JournalOperationNamer,
     OperationConfigRole,
 )
+from pydantic_ai.exceptions import UserError
+from pydantic_ai.tools import RunContext
+
+
+class RestrictedRunContext(RunContext[None]):
+    """Run context stand-in that rejects fields excluded from a worker payload."""
+
+    unavailable_fields: frozenset[str] = frozenset()
+
+    def __getattribute__(self, name: str) -> object:
+        if name in object.__getattribute__(self, 'unavailable_fields'):
+            raise UserError(f'{name!r} is not available in this durable operation')
+        return super().__getattribute__(name)
 
 
 class _RecordingConfig:
