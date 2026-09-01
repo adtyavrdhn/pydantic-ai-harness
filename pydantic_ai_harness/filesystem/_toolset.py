@@ -7,6 +7,7 @@ import fnmatch
 import functools
 import hashlib
 import os
+import posixpath
 import re
 import stat
 from collections.abc import Awaitable, Callable, Sequence
@@ -14,8 +15,11 @@ from pathlib import Path
 from typing import Concatenate, ParamSpec
 
 from pydantic_ai.exceptions import ModelRetry
-from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.sandboxes import SandboxUnavailableError
+from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
+
+from pydantic_ai_harness._sandbox import is_framework_unavailable
 
 _P = ParamSpec('_P')
 
@@ -115,7 +119,9 @@ def _recoverable(
     return wrapper
 
 
-def _format_lines(lines: Sequence[str], offset: int, limit: int) -> str:
+def _format_lines(
+    lines: Sequence[str], offset: int, limit: int, *, line_number_offset: int = 0, has_more: bool = False
+) -> str:
     """Format pre-split lines with line numbers and continuation hint."""
     total = len(lines)
 
@@ -126,15 +132,18 @@ def _format_lines(lines: Sequence[str], offset: int, limit: int) -> str:
         raise ValueError(f'Offset {offset} exceeds file length ({total} lines).')
 
     selected = lines[offset : offset + limit]
-    numbered = [f'{i:>6}\t{line}' for i, line in enumerate(selected, start=offset + 1)]
+    numbered = [f'{i:>6}\t{line}' for i, line in enumerate(selected, start=line_number_offset + offset + 1)]
     result = ''.join(numbered)
     if not result.endswith('\n'):
         result += '\n'
 
     remaining = total - (offset + len(selected))
     if remaining > 0:
-        next_offset = offset + len(selected)
+        next_offset = line_number_offset + offset + len(selected)
         result += f'... ({remaining} more lines. Use offset={next_offset} to continue reading.)\n'
+    elif has_more:
+        next_offset = line_number_offset + offset + len(selected)
+        result += f'... (more lines. Use offset={next_offset} to continue reading.)\n'
 
     return result
 
@@ -189,6 +198,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         max_find_results: int,
     ) -> None:
         super().__init__()
+        # `root_dir` applies to host mode only.
         self._root = root_dir.resolve()
         self._real_root = Path(os.path.realpath(self._root))
         self._allowed_patterns = list(allowed_patterns)
@@ -198,15 +208,16 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         self._max_list_results = max_list_results
         self._max_search_results = max_search_results
         self._max_find_results = max_find_results
+        self._sandbox_root: str | None = None
 
-        self.add_function(self.read_file, name='read_file')
-        self.add_function(self.write_file, name='write_file')
-        self.add_function(self.edit_file, name='edit_file')
-        self.add_function(self.list_directory, name='list_directory')
-        self.add_function(self.search_files, name='search_files')
-        self.add_function(self.find_files, name='find_files')
-        self.add_function(self.create_directory, name='create_directory')
-        self.add_function(self.file_info, name='file_info')
+        self.add_function(self._read_file_tool, name='read_file')
+        self.add_function(self._write_file_tool, name='write_file')
+        self.add_function(self._edit_file_tool, name='edit_file')
+        self.add_function(self._list_directory_tool, name='list_directory')
+        self.add_function(self._search_files_tool, name='search_files')
+        self.add_function(self._find_files_tool, name='find_files')
+        self.add_function(self._create_directory_tool, name='create_directory')
+        self.add_function(self._file_info_tool, name='file_info')
 
     def _matches(self, path: str, pattern: str) -> bool:
         """Glob-match a relative path, treating a leading `**/` as 'any directory, including the root'.
@@ -318,6 +329,475 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         resolved = self._resolve_path(path)
         self._check_access(self._relative_to_root(resolved), write=write, check_allowed=check_allowed)
         return resolved
+
+    async def _dispatch(
+        self,
+        ctx: RunContext[AgentDepsT],
+        host_call: Callable[[], Awaitable[str]],
+        sandbox_call: Callable[[], Awaitable[str]],
+    ) -> str:
+        if is_framework_unavailable(ctx.sandbox):
+            return await host_call()
+        try:
+            return await sandbox_call()
+        # Unavailability is terminal; other backend runtime failures are recoverable.
+        except SandboxUnavailableError:
+            raise
+        except RuntimeError as e:
+            raise ModelRetry(str(e)) from e
+
+    async def _sandbox_resolve(
+        self,
+        ctx: RunContext[AgentDepsT],
+        path: str,
+        *,
+        write: bool = False,
+        check_allowed: bool = True,
+    ) -> tuple[str, str]:
+        if self._sandbox_root is None:
+            self._sandbox_root = posixpath.normpath(await ctx.sandbox.working_dir())
+        sandbox_root = self._sandbox_root
+        resolved = await ctx.sandbox.resolve(path, base=sandbox_root)
+        # `resolve` is spelling, not confinement (its own contract): the containment check is
+        # ours, and it shapes policy only -- the sandbox, symlinks included, is the isolation
+        # boundary.
+        if resolved != sandbox_root and not resolved.startswith(sandbox_root + '/'):
+            raise PermissionError(f'Path {path!r} resolves outside the root directory.')
+        relative = posixpath.relpath(resolved, sandbox_root)
+        self._check_access(relative, write=write, check_allowed=check_allowed)
+        return resolved, relative
+
+    @_recoverable
+    async def _read_file_tool(
+        self,
+        ctx: RunContext[AgentDepsT],
+        path: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> str:
+        """Read a text file with line numbers.
+
+        Args:
+            ctx: The current agent run context.
+            path: File path relative to the root directory.
+            offset: Zero-based line offset to start reading from.
+            limit: Maximum number of lines to return (default: 2000).
+
+        Returns:
+            File content with line numbers, plus metadata header.
+        """
+        return await self._dispatch(
+            ctx,
+            lambda: self.read_file(path, offset=offset, limit=limit),
+            lambda: self._sandbox_read_file(ctx, path, offset=offset, limit=limit),
+        )
+
+    @_recoverable
+    async def _write_file_tool(
+        self,
+        ctx: RunContext[AgentDepsT],
+        path: str,
+        content: str,
+        *,
+        expected_hash: str | None = None,
+    ) -> str:
+        """Create or overwrite a file with conflict detection.
+
+        Args:
+            ctx: The current agent run context.
+            path: File path relative to the root directory.
+            content: The text content to write.
+            expected_hash: If provided, the write is rejected when the file exists
+                and its current hash doesn't match (optimistic concurrency).
+
+        Returns:
+            Confirmation message with new hash.
+        """
+        return await self._dispatch(
+            ctx,
+            lambda: self.write_file(path, content, expected_hash=expected_hash),
+            lambda: self._sandbox_write_file(ctx, path, content, expected_hash=expected_hash),
+        )
+
+    @_recoverable
+    async def _edit_file_tool(
+        self,
+        ctx: RunContext[AgentDepsT],
+        path: str,
+        old_text: str,
+        new_text: str,
+        *,
+        expected_hash: str | None = None,
+    ) -> str:
+        """Edit a file by exact string replacement with conflict detection.
+
+        The old_text must appear exactly once in the file. Include surrounding
+        context lines to ensure uniqueness.
+
+        Args:
+            ctx: The current agent run context.
+            path: File path relative to the root directory.
+            old_text: The exact text to find (must appear exactly once).
+            new_text: The replacement text.
+            expected_hash: If provided, rejects the edit when the file's
+                current hash doesn't match (optimistic concurrency).
+
+        Returns:
+            Summary with new hash for subsequent operations.
+        """
+        return await self._dispatch(
+            ctx,
+            lambda: self.edit_file(path, old_text, new_text, expected_hash=expected_hash),
+            lambda: self._sandbox_edit_file(ctx, path, old_text, new_text, expected_hash=expected_hash),
+        )
+
+    @_recoverable
+    async def _list_directory_tool(self, ctx: RunContext[AgentDepsT], path: str = '.') -> str:
+        """List the contents of a directory.
+
+        Args:
+            ctx: The current agent run context.
+            path: Directory path relative to the root directory.
+
+        Returns:
+            A newline-separated listing with type indicators and sizes.
+        """
+        return await self._dispatch(
+            ctx,
+            lambda: self.list_directory(path),
+            lambda: self._sandbox_list_directory(ctx, path),
+        )
+
+    @_recoverable
+    async def _search_files_tool(
+        self,
+        ctx: RunContext[AgentDepsT],
+        pattern: str,
+        *,
+        path: str = '.',
+        include_glob: str | None = None,
+    ) -> str:
+        """Search file contents using a regular expression.
+
+        Args:
+            ctx: The current agent run context.
+            pattern: Regex pattern to search for.
+            path: Directory to search in, relative to the root directory.
+            include_glob: If provided, only search files matching this glob (e.g. '*.py').
+
+        Returns:
+            str: Matching lines formatted as file:line_number:text.
+        """
+        return await self._dispatch(
+            ctx,
+            lambda: self.search_files(pattern, path=path, include_glob=include_glob),
+            lambda: self._sandbox_search_files(ctx, pattern, path=path, include_glob=include_glob),
+        )
+
+    @_recoverable
+    async def _find_files_tool(self, ctx: RunContext[AgentDepsT], pattern: str, *, path: str = '.') -> str:
+        """Find files by glob pattern (name matching, not content search).
+
+        Args:
+            ctx: The current agent run context.
+            pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
+                '**/*.json'). Absolute patterns are rejected.
+            path: Directory to search in, relative to the root directory.
+
+        Returns:
+            Newline-separated list of matching file paths relative to root.
+        """
+        return await self._dispatch(
+            ctx,
+            lambda: self.find_files(pattern, path=path),
+            lambda: self._sandbox_find_files(ctx, pattern, path=path),
+        )
+
+    @_recoverable
+    async def _create_directory_tool(self, ctx: RunContext[AgentDepsT], path: str) -> str:
+        """Create a directory and any missing parents.
+
+        Args:
+            ctx: The current agent run context.
+            path: Directory path relative to the root directory.
+
+        Returns:
+            Confirmation message.
+        """
+        return await self._dispatch(
+            ctx,
+            lambda: self.create_directory(path),
+            lambda: self._sandbox_create_directory(ctx, path),
+        )
+
+    @_recoverable
+    async def _file_info_tool(self, ctx: RunContext[AgentDepsT], path: str) -> str:
+        """Get metadata about a file or directory.
+
+        Args:
+            ctx: The current agent run context.
+            path: File or directory path relative to the root directory.
+
+        Returns:
+            Formatted metadata including size, type, and permissions.
+        """
+        return await self._dispatch(
+            ctx,
+            lambda: self.file_info(path),
+            lambda: self._sandbox_file_info(ctx, path),
+        )
+
+    async def _sandbox_read_file(
+        self,
+        ctx: RunContext[AgentDepsT],
+        path: str,
+        *,
+        offset: int,
+        limit: int | None,
+    ) -> str:
+        if limit is None:
+            limit = self._max_read_lines
+        resolved, _ = await self._sandbox_resolve(ctx, path)
+        try:
+            window = await ctx.sandbox.read_file(resolved, offset=offset + 1, limit=limit)
+        except IsADirectoryError as e:
+            raise FileNotFoundError(f"'{path}' is a directory, not a file.") from e
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f'File not found: {path}') from e
+
+        if offset > 0 and not window.lines:
+            # Reading the file just to count its lines would defeat the bounded read.
+            raise ValueError(f'Offset {offset} exceeds file length.')
+
+        # The facade decodes with replacement, so binary detection uses the returned text window.
+        if '\ufffd' in window.text or '\x00' in window.text:
+            entry = await ctx.sandbox.fs.stat(resolved)
+            size = entry.size or 0
+            return f'[Binary file: {size} bytes. Use a binary-aware tool to inspect.]'
+
+        lines = tuple(f'{line}\n' for line in window.lines)
+        if offset == 0 and not window.has_more:
+            # The window is the whole file, so the hash matches what write_file and edit_file
+            # compute; a partial window's hash never would, so it is omitted.
+            header = f'[{path} | {len(lines)} lines | hash:{_content_hash(window.text)}]\n'
+        else:
+            header = f'[{path} | lines {offset + 1}-{offset + len(lines)}]\n'
+        return header + _format_lines(lines, 0, limit, line_number_offset=offset, has_more=window.has_more)
+
+    async def _sandbox_write_file(
+        self,
+        ctx: RunContext[AgentDepsT],
+        path: str,
+        content: str,
+        *,
+        expected_hash: str | None,
+    ) -> str:
+        resolved, _ = await self._sandbox_resolve(ctx, path, write=True)
+        try:
+            entry = await ctx.sandbox.fs.stat(resolved)
+        except (FileNotFoundError, NotADirectoryError):
+            entry = None
+        if entry is not None and entry.is_dir:
+            raise ModelRetry(f'Path {path!r} exists and is not a regular file.')
+
+        parent = posixpath.dirname(resolved)
+        try:
+            parent_entry = await ctx.sandbox.fs.stat(parent)
+        except FileNotFoundError as e:
+            parent_rel = self._sandbox_relative(parent)
+            raise FileNotFoundError(
+                f"Parent directory '{parent_rel}' does not exist. Use create_directory first."
+            ) from e
+        if not parent_entry.is_dir:
+            parent_rel = self._sandbox_relative(parent)
+            raise FileNotFoundError(f"Parent directory '{parent_rel}' does not exist. Use create_directory first.")
+
+        if expected_hash is not None and entry is not None:
+            current = (await ctx.sandbox.fs.read_bytes(resolved)).decode('utf-8', errors='replace')
+            current_hash = _content_hash(current)
+            if current_hash != expected_hash:
+                raise ValueError(
+                    f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
+                    f'got hash:{current_hash}). Re-read the file and retry.'
+                )
+
+        await ctx.sandbox.fs.write_bytes(resolved, content.encode('utf-8'))
+        new_hash = _content_hash(content)
+        lines = len(content.splitlines())
+        return f'Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]'
+
+    async def _sandbox_edit_file(
+        self,
+        ctx: RunContext[AgentDepsT],
+        path: str,
+        old_text: str,
+        new_text: str,
+        *,
+        expected_hash: str | None,
+    ) -> str:
+        resolved, _ = await self._sandbox_resolve(ctx, path, write=True)
+        try:
+            raw = await ctx.sandbox.fs.read_bytes(resolved)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f'File not found: {path}') from e
+        text = raw.decode('utf-8', errors='replace')
+        current_hash = _content_hash(text)
+        if expected_hash is not None and current_hash != expected_hash:
+            raise ValueError(
+                f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
+                f'got hash:{current_hash}). Re-read the file and retry.'
+            )
+
+        count = text.count(old_text)
+        if count == 0:
+            raise ValueError(f'old_text not found in {path}.')
+        if count > 1:
+            raise ValueError(
+                f'old_text found {count} times in {path}. Include more surrounding context to make the match unique.'
+            )
+
+        new_content = text.replace(old_text, new_text, 1)
+        await ctx.sandbox.fs.write_bytes(resolved, new_content.encode('utf-8'))
+        return f'Edited {path}. [hash:{_content_hash(new_content)}]'
+
+    async def _sandbox_list_directory(self, ctx: RunContext[AgentDepsT], path: str) -> str:
+        resolved, _ = await self._sandbox_resolve(ctx, path, check_allowed=False)
+        try:
+            root_entry = await ctx.sandbox.fs.stat(resolved)
+        except FileNotFoundError as e:
+            raise NotADirectoryError(f'Not a directory: {path}') from e
+        if not root_entry.is_dir:
+            raise NotADirectoryError(f'Not a directory: {path}')
+
+        entries: list[str] = []
+        for entry in sorted(await ctx.sandbox.fs.list_dir(resolved), key=lambda item: item.path):
+            rel = self._sandbox_relative(entry.path)
+            if self._is_hidden(rel) or not self._is_accessible(rel):
+                continue
+            line = f'{rel}/' if entry.is_dir else f'{rel}  ({entry.size or 0} bytes)'
+            if len(entries) >= self._max_list_results:
+                entries.append(f'[... truncated at {self._max_list_results} entries]')
+                break
+            entries.append(line)
+        return '\n'.join(entries) if entries else '(empty directory)'
+
+    async def _sandbox_search_files(
+        self,
+        ctx: RunContext[AgentDepsT],
+        pattern: str,
+        *,
+        path: str,
+        include_glob: str | None,
+    ) -> str:
+        resolved, _ = await self._sandbox_resolve(ctx, path, check_allowed=False)
+        per_file_cap = max(1, self._max_search_results + 1)
+        result = await ctx.sandbox.run(
+            ['grep', '-rn', '-I', '-m', str(per_file_cap), '--', pattern, resolved],
+            timeout=30,
+        )
+        if result.exit_code >= 2:
+            raise ModelRetry(result.stderr.strip() or f'grep exited with code {result.exit_code}.')
+        if result.exit_code != 0 and not result.stdout:
+            return 'No matches found.'
+
+        matches: list[str] = []
+        for line in result.stdout.splitlines():
+            parts = line.split(':', 2)
+            if len(parts) != 3:
+                continue
+            absolute, line_number, text = parts
+            rel = self._sandbox_relative(absolute)
+            if self._is_hidden(rel) or not self._is_accessible(rel):
+                continue
+            if include_glob is not None and not self._matches(rel, include_glob):
+                continue
+            if len(matches) >= self._max_search_results:
+                matches.append(f'[... truncated at {self._max_search_results} matches]')
+                break
+            matches.append(f'{rel}:{line_number}:{text}')
+        return '\n'.join(matches) if matches else 'No matches found.'
+
+    async def _sandbox_find_files(
+        self,
+        ctx: RunContext[AgentDepsT],
+        pattern: str,
+        *,
+        path: str,
+    ) -> str:
+        if posixpath.isabs(pattern):
+            raise ValueError(f'Pattern {pattern!r} must be relative to the search path, not absolute.')
+        resolved, _ = await self._sandbox_resolve(ctx, path, check_allowed=False)
+        try:
+            root_entry = await ctx.sandbox.fs.stat(resolved)
+        except FileNotFoundError as e:
+            raise NotADirectoryError(f'Not a directory: {path}') from e
+        if not root_entry.is_dir:
+            raise NotADirectoryError(f'Not a directory: {path}')
+
+        # Host mode uses pathlib glob semantics: `*` stays in one directory and `**/`
+        # recurses. `find -name` always recurses, so translate the two documented pattern
+        # shapes; other shapes anchor on `-path` (whose `*` may cross separators).
+        if pattern.startswith('**/') and '/' not in pattern[3:]:
+            argv = ['find', resolved, '-name', pattern[3:]]
+        elif '/' not in pattern:
+            argv = ['find', resolved, '-mindepth', '1', '-maxdepth', '1', '-name', pattern]
+        else:
+            argv = ['find', resolved, '-path', posixpath.join(resolved, pattern)]
+        result = await ctx.sandbox.run(argv, timeout=30)
+        if result.exit_code != 0:
+            raise ModelRetry(result.stderr.strip() or f'find exited with code {result.exit_code}.')
+
+        matches: list[str] = []
+        for absolute in sorted(result.stdout.splitlines()):
+            rel = self._sandbox_relative(absolute)
+            if self._is_hidden(rel) or not self._is_accessible(rel):
+                continue
+            if len(matches) >= self._max_find_results:
+                matches.append(f'[... truncated at {self._max_find_results} matches]')
+                break
+            try:
+                entry = await ctx.sandbox.fs.stat(absolute)
+            except FileNotFoundError:  # deleted mid-walk
+                continue
+            matches.append(f'{rel}{"/" if entry.is_dir else ""}')
+        return '\n'.join(matches) if matches else 'No matches found.'
+
+    async def _sandbox_create_directory(self, ctx: RunContext[AgentDepsT], path: str) -> str:
+        resolved, _ = await self._sandbox_resolve(ctx, path, write=True)
+        await ctx.sandbox.fs.make_dir(resolved)
+        return f'Created directory: {path}'
+
+    async def _sandbox_file_info(self, ctx: RunContext[AgentDepsT], path: str) -> str:
+        resolved, _ = await self._sandbox_resolve(ctx, path)
+        try:
+            entry = await ctx.sandbox.fs.stat(resolved)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f'Path not found: {path}') from e
+
+        parts = [
+            f'path: {path}',
+            f'type: {"directory" if entry.is_dir else "file"}',
+            f'size: {entry.size or 0} bytes',
+        ]
+        if not entry.is_dir:
+            raw = await ctx.sandbox.fs.read_bytes(resolved)
+            is_bin = _is_binary(raw)
+            parts.append(f'binary: {is_bin}')
+            if not is_bin:
+                text = raw.decode('utf-8', errors='replace')
+                parts.append(f'lines: {len(text.splitlines())}')
+                parts.append(f'hash: {_content_hash(text)}')
+        return '\n'.join(parts)
+
+    def _sandbox_relative(self, path: str) -> str:
+        sandbox_root = self._sandbox_root
+        assert sandbox_root is not None
+        return posixpath.relpath(posixpath.normpath(path), sandbox_root)
+
+    @staticmethod
+    def _is_hidden(path: str) -> bool:
+        return any(part.startswith('.') and part != '.' for part in path.split('/'))
 
     @_recoverable
     async def read_file(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
