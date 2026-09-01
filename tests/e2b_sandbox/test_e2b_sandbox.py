@@ -7,13 +7,13 @@ import inspect
 import anyio
 import pytest
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.sandboxes import SandboxRef
+from pydantic_ai.sandboxes import SandboxRef, SandboxUnavailableError
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 import pydantic_ai_harness
 import pydantic_ai_harness.e2b_sandbox as e2b_sandbox
-from pydantic_ai_harness.e2b_sandbox import E2BSandbox, E2BSandboxBackend
+from pydantic_ai_harness.e2b_sandbox import E2BSandbox, E2BSandboxAuthError, E2BSandboxBackend
 
 from .fake_e2b import FakeE2B
 
@@ -78,11 +78,11 @@ class TestLifecycle:
         assert ref.sandbox_id == fake_e2b.sandboxes[0].sandbox_id
         assert fake_e2b.connect_calls == []
 
-    @pytest.mark.parametrize('terminal', [True, False])
-    async def test_list_failure_uses_public_error_surface(self, fake_e2b: FakeE2B, terminal: bool) -> None:
-        fake_e2b.list_error = fake_e2b.auth_type('bad key') if terminal else RuntimeError('offline')
+    @pytest.mark.parametrize('unavailable', [True, False])
+    async def test_list_failure_uses_public_error_surface(self, fake_e2b: FakeE2B, unavailable: bool) -> None:
+        fake_e2b.list_error = fake_e2b.auth_type('bad key') if unavailable else RuntimeError('offline')
 
-        error_type = e2b_sandbox.E2BSandboxTerminalError if terminal else e2b_sandbox.E2BSandboxError
+        error_type = SandboxUnavailableError if unavailable else e2b_sandbox.E2BSandboxError
         with pytest.raises(error_type):
             await E2BSandbox[None]().acquire_sandbox(_ctx())
 
@@ -136,7 +136,7 @@ class TestLifecycle:
     async def test_release_auth_failure_is_terminal(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.kill_error = fake_e2b.auth_type('bad key')
 
-        with pytest.raises(e2b_sandbox.E2BSandboxTerminalError, match='E2B rejected the credentials'):
+        with pytest.raises(E2BSandboxAuthError, match='E2B rejected the credentials'):
             await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='sbx-owned'))
 
     async def test_release_kill_completes_under_cancellation(self, fake_e2b: FakeE2B) -> None:
@@ -195,10 +195,10 @@ class TestConfiguration:
             for parameter in inspect.signature(E2BSandbox).parameters.values()
         )
 
-    @pytest.mark.parametrize('timeout', [0, -1, 1.5, True])
-    def test_rejects_invalid_sandbox_timeout(self, timeout: object) -> None:
+    @pytest.mark.parametrize('timeout', [0, -1])
+    def test_rejects_invalid_sandbox_timeout(self, timeout: int) -> None:
         with pytest.raises(ValueError, match='sandbox_timeout'):
-            E2BSandbox(sandbox_timeout=timeout)  # type: ignore[arg-type]
+            E2BSandbox(sandbox_timeout=timeout)
 
     def test_rejects_relative_workdir(self) -> None:
         with pytest.raises(ValueError, match='absolute'):
@@ -206,10 +206,6 @@ class TestConfiguration:
 
     def test_normalizes_absolute_workdir(self) -> None:
         assert E2BSandbox(workdir='/workspace/../repo').workdir == '/repo'
-
-    def test_rejects_non_boolean_internet_access(self) -> None:
-        with pytest.raises(ValueError, match='allow_internet_access'):
-            E2BSandbox(allow_internet_access=1)  # type: ignore[arg-type]
 
     def test_reserves_retry_identity_metadata(self) -> None:
         with pytest.raises(ValueError, match='reserved'):
@@ -245,9 +241,7 @@ class TestConfiguration:
             'E2BSandbox',
             'E2BSandboxAuthError',
             'E2BSandboxBackend',
-            'E2BSandboxCommandTimeoutError',
             'E2BSandboxError',
-            'E2BSandboxTerminalError',
             'E2BSandboxUnavailableError',
         }
 

@@ -15,7 +15,6 @@ exception. Flattering the code under test here would hide production failures.
 
 from __future__ import annotations
 
-import asyncio
 import posixpath
 import types
 from collections.abc import Callable
@@ -352,9 +351,6 @@ class FakeAsyncSandboxFactory:
         self._control.create_calls.append(
             FakeCreateCall(template, timeout, metadata, envs, secure, allow_internet_access)
         )
-        self._control.create_started.set()
-        if self._control.create_gate is not None:
-            await self._control.create_gate.wait()
         if self._control.create_hangs:
             await anyio.sleep_forever()
         await anyio.lowlevel.checkpoint()
@@ -443,8 +439,6 @@ class FakeE2B:
     list_error: Exception | None = None
     create_error: Exception | None = None
     create_hangs: bool = False
-    create_gate: asyncio.Event | None = None
-    create_started: asyncio.Event = field(default_factory=asyncio.Event)
     connect_error: Exception | None = None
     kill_error: Exception | None = None
     kill_hangs: bool = False
