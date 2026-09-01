@@ -977,3 +977,29 @@ class TestEagerRewriteAndDurability:
         taken = eager.pop_watch('c1', big)
         assert taken is not None
         assert taken.feed_count == 0 and not taken.queue
+
+    async def test_oversized_streamed_arguments_halt_the_watch(self):
+        """Past the scan cap the watch stops decoding, feeding, and accumulating."""
+        ctx = build_run_context(None)
+        capability = CodeMode[None](eager=True)
+        run_capability = await capability.for_run(ctx)
+        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[]))
+        assert isinstance(toolset, CodeModeToolset)
+        eager = toolset.eager
+        assert eager is not None
+
+        big = '{"code": "' + 'x = 1\\n' * 60_000
+        # Streamed past the cap by a delta: the watch halts and later deltas are dropped.
+        await eager.observe(
+            PartStartEvent(index=0, part=ToolCallPart(tool_name='run_code', args='', tool_call_id='c1')), ctx
+        )
+        await eager.observe(PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=big, tool_call_id='c1')), ctx)
+        await eager.observe(PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta='junk', tool_call_id='c1')), ctx)
+        taken = eager.pop_watch('c1', 'anything')
+        assert taken is not None and taken.halted and taken.feed_count == 0
+        assert 'junk' not in taken.args_text
+        # Arriving oversized in one part-start event: the decoder refuses it outright.
+        await eager.observe(
+            PartStartEvent(index=1, part=ToolCallPart(tool_name='run_code', args=big, tool_call_id='c2')), ctx
+        )
+        assert eager.pop_watch('c2', 'anything') is not None

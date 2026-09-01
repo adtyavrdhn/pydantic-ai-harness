@@ -30,7 +30,7 @@ from pydantic_ai.messages import (
 )
 
 from ._events import emit_best_effort
-from ._streaming import closed_statements, decode_partial_code
+from ._streaming import MAX_SCAN_BYTES, closed_statements, decode_partial_code
 
 if TYPE_CHECKING:
     from ._toolset import CodeModeToolset
@@ -152,7 +152,9 @@ class EagerState:
                 self._scan(watch, ctx)
             case PartDeltaEvent(delta=ToolCallPartDelta() as delta):
                 watch = self._find_watch(delta.tool_call_id)
-                if watch is None:
+                if watch is None or watch.halted:
+                    # A halted watch stops accumulating too: past the scan cap (or after a
+                    # restart request) the buffered copy of the arguments has no reader.
                     return
                 args_delta = delta.args_delta
                 if isinstance(args_delta, str):
@@ -161,6 +163,9 @@ class EagerState:
                     merged = dict(watch.args_dict or {})
                     merged.update(args_delta)
                     watch.args_dict = merged
+                if len(watch.args_text) > MAX_SCAN_BYTES:
+                    watch.halted = True
+                    return
                 self._scan(watch, ctx)
             case _:
                 return
@@ -191,9 +196,11 @@ class EagerState:
         return '"restart"' in watch.args_text
 
     def _scan(self, watch: _EagerPart, ctx: RunContext[Any]) -> None:
-        """Re-parse the streamed code and enqueue any statements that newly closed."""
-        if watch.halted:
-            return
+        """Re-parse the streamed code and enqueue any statements that newly closed.
+
+        No `halted` guard here: `observe` drops deltas for halted watches, and every halt
+        cause (restart, prefix rewrite, oversized arguments) re-detects itself on a rescan.
+        """
         if self._restart_requested(watch):
             watch.halted = True
             return
