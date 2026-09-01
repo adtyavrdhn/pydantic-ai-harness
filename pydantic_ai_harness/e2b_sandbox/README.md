@@ -95,10 +95,9 @@ command. The backend therefore enforces deadlines client-side and sends SIGKILL
 when a command times out or the caller is cancelled. Background children may
 outlive the killed command until the sandbox itself is killed.
 
-Command results are buffered by E2B and returned in full. The backend does not
-invent a model-output policy or pretend the transport is bounded. Tools that put
-output into model context should enforce their own byte or line budget, and
-commands that may produce very large output should bound it at the source.
+Command results are buffered by E2B and returned in full. Tools should enforce
+their own byte or line budget, and commands that may produce very large output
+should bound it at the source.
 
 The public error surface is deliberately narrow:
 

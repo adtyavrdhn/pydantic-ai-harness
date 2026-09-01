@@ -34,11 +34,10 @@ import shlex
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import anyio
-from pydantic_ai.sandboxes import FileEntry, SandboxTimeoutError, SandboxUnavailableError
+from pydantic_ai.sandboxes import CommandResult, FileEntry, SandboxTimeoutError, SandboxUnavailableError
 from typing_extensions import Self
 
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
@@ -92,10 +91,7 @@ _SDK_STREAM_UNBOUNDED = 0
 
 async def _kill_sandbox(sandbox_id: str, kill: Callable[[], Awaitable[object]]) -> None:
     """Run an E2B kill to completion without letting cleanup replace cancellation."""
-    try:
-        import e2b
-    except ImportError as error:
-        raise E2BSandboxError(_MISSING_E2B) from error
+    import e2b
 
     error = await cleanup_call(kill, timeout=_TEARDOWN_TIMEOUT)
     if error is None or isinstance(error, e2b.SandboxNotFoundException):
@@ -130,13 +126,6 @@ class E2BSandboxAuthError(E2BSandboxError, SandboxUnavailableError):
     Fixing this is an operator action (configure `E2B_API_KEY`), not something a retry or a
     new run can do, which is why it is terminal.
     """
-
-
-@dataclass(frozen=True)
-class _E2BResult:
-    exit_code: int
-    stdout: str
-    stderr: str
 
 
 def _command_line(command: SandboxCommand, shell: bool) -> str:
@@ -181,13 +170,13 @@ class _E2BProcess:
         self._deadline = deadline
         self._started = started
         self._lock = anyio.Lock()
-        self._outcome: _E2BResult | Exception | None = None
+        self._outcome: CommandResult | Exception | None = None
 
     @property
     def pid(self) -> int | None:
         return self._handle.pid
 
-    async def wait(self) -> _E2BResult:
+    async def wait(self) -> CommandResult:
         """Wait for the command and return its result, the same one on every call."""
         # The deadline verdict below can only be reached once, so the first call's verdict is
         # the command's verdict: caching it is what makes repeated and concurrent waits agree.
@@ -201,7 +190,7 @@ class _E2BProcess:
             raise self._outcome
         return self._outcome
 
-    async def _settle(self) -> _E2BResult:
+    async def _settle(self) -> CommandResult:
         import e2b
 
         # Measured from `start()`, as the protocol requires, so a caller that waits late does
@@ -214,7 +203,7 @@ class _E2BProcess:
         except e2b.CommandExitException as e:
             # E2B raises on a non-zero exit; the protocol calls that a normal result, so it is
             # unwrapped rather than propagated.
-            return _E2BResult(exit_code=e.exit_code, stdout=e.stdout, stderr=e.stderr)
+            return CommandResult(exit_code=e.exit_code, stdout=e.stdout, stderr=e.stderr)
         except Exception as e:
             raise await self._backend.operation_error(
                 e, 'Could not read the command result (the command may still be running)'
@@ -225,14 +214,14 @@ class _E2BProcess:
             await _kill_quietly(self)
             assert self._deadline is not None
             raise SandboxTimeoutError(
-                f'Command timed out after {_format_seconds(self._deadline)} seconds and was killed.',
+                f'Command timed out after {self._deadline:g} seconds and was killed.',
                 # The handle accumulates decoded output as it arrives, so this is what the
                 # command printed before the kill.
                 stdout=self._handle.stdout,
                 stderr=self._handle.stderr,
                 timeout=self._deadline,
             )
-        return _E2BResult(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr)
+        return CommandResult(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr)
 
     async def kill(self) -> None:
         """Send SIGKILL to the command.
@@ -332,11 +321,6 @@ def _file_entry(entry: e2b.EntryInfo) -> FileEntry:
     return FileEntry(name=entry.name, path=entry.path, is_dir=is_dir, size=None if is_dir else entry.size)
 
 
-def _format_seconds(value: float) -> str:
-    """Render a deadline without a trailing `.0`, since E2B accepts fractional seconds."""
-    return f'{value:g}'
-
-
 class E2BSandboxBackend:
     """An [E2B](https://e2b.dev) sandbox as a Pydantic AI [`SandboxBackend`][pydantic_ai.sandboxes.SandboxBackend].
 
@@ -346,9 +330,7 @@ class E2BSandboxBackend:
     [`connect`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.connect]; the `E2BSandbox`
     capability does both for you.
 
-    One process opt-in is implemented: background commands (`SupportsStart`). Live output is
-    not: E2B delivers it through callbacks the SDK's own event pump awaits, with no async
-    iterator behind them, so there is no honest `SupportsStream` to offer.
+    One process opt-in is implemented: background commands (`SupportsStart`).
 
     Every command runs through `/bin/bash -l -c`, so an argv sequence is quoted into a single
     shell word string first and login startup files run before the command does. E2B's own
@@ -383,6 +365,7 @@ class E2BSandboxBackend:
         """The underlying `e2b.AsyncSandbox`, for provider-specific functionality."""
         self.fs = _E2BFilesystem(self)
         self._working_dir = working_dir
+        self._working_dir_lock = anyio.Lock()
         self._sandbox_timeout = sandbox_timeout
 
     @property
@@ -549,11 +532,6 @@ class E2BSandboxBackend:
             raise E2BSandboxError(_MISSING_E2B) from error
         await _kill_sandbox(sandbox_id, functools.partial(e2b.AsyncSandbox.kill, sandbox_id))
 
-    @functools.cached_property
-    def _working_dir_lock(self) -> anyio.Lock:
-        # `anyio.Lock` binds to the event loop on which it is first used.
-        return anyio.Lock()
-
     async def working_dir(self) -> str:
         """The sandbox's default working directory (absolute POSIX path)."""
         # E2B exposes no API for a sandbox's working directory -- it is the template's unless
@@ -584,7 +562,7 @@ class E2BSandboxBackend:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
-    ) -> _E2BResult:
+    ) -> CommandResult:
         """Execute a command and wait for it to complete.
 
         A cancelled wait kills the command rather than leaving it running, which is the
