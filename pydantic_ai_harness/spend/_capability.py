@@ -284,16 +284,23 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
         """Accrue every provider response committed while the wrapped lifecycle runs."""
+        initial_usage_responses: tuple[ModelResponse, ...] | None = getattr(request_context, 'usage_responses', None)
+        usage_response_offset = len(initial_usage_responses) if initial_usage_responses is not None else None
         response: ModelResponse | None = None
         try:
             response = await handler(request_context)
         finally:
             usage_responses: tuple[ModelResponse, ...] | None = getattr(request_context, 'usage_responses', None)
-            if usage_responses is None:
+            if usage_response_offset is None or usage_responses is None:
                 usage_responses = (response,) if response is not None else ()
+            else:
+                usage_responses = usage_responses[usage_response_offset:]
             first_error: Exception | None = None
             for usage_response in usage_responses:
-                error = await self._accrue_response(ctx, usage_response)
+                try:
+                    error = await self._accrue_response(ctx, usage_response)
+                except Exception as exc:
+                    error = exc
                 if first_error is None:
                     first_error = error
             if first_error is not None:
@@ -641,7 +648,10 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
         was asked to do -- the same reasoning `on_unpriced='raise'` already follows.
         """
         if self.price is not None:
-            supplied = self.price(response)
+            try:
+                supplied = self.price(response)
+            except Exception as exc:
+                return Decimal(0), False, f'raised {type(exc).__name__}: {exc}'
             if supplied is not None:
                 if not supplied.is_finite():
                     # Checked before the comparison below, which raises `InvalidOperation`

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import warnings
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any
@@ -133,16 +134,16 @@ async def _record(
 ) -> ModelResponse:
     """Drive one accrual by standing in for the provider call the capability wraps."""
     recorded = response if response is not None else _response(**kwargs)
+    request_context: Any = _UsageRequestContext()
 
     async def handler(request_context: ModelRequestContext) -> ModelResponse:
-        usage_responses = getattr(request_context, 'usage_responses', None)
-        if usage_responses is not None:  # pragma: lax no cover - exercised by pydantic-ai#7053 compat CI
-            setattr(request_context, 'usage_responses', (*usage_responses, recorded))
+        usage_responses: tuple[ModelResponse, ...] = getattr(request_context, 'usage_responses')
+        setattr(request_context, 'usage_responses', (*usage_responses, recorded))
         return recorded
 
     return await guard.wrap_model_request(
         ctx if ctx is not None else _run_ctx(),
-        request_context=_request_context(),
+        request_context=request_context,
         handler=handler,
     )
 
@@ -680,6 +681,74 @@ class TestOrdering:
 
         assert (await guard.status())[0].spent.requests == 2
 
+    async def test_each_wrapper_invocation_accrues_only_new_provider_responses(self):
+        snapshots: list[SpendSnapshot] = []
+        guard = SpendLimits(
+            budgets=[Budget(window='total')],
+            price=lambda response: Decimal('1'),
+            on_spend=snapshots.append,
+        )
+        request_context: Any = _UsageRequestContext()
+        responses = iter(
+            [
+                _response(provider_response_id='first'),
+                _response(provider_response_id='second'),
+            ]
+        )
+
+        async def handler(request_context: ModelRequestContext) -> ModelResponse:
+            response = next(responses)
+            usage_responses: tuple[ModelResponse, ...] = getattr(request_context, 'usage_responses')
+            setattr(request_context, 'usage_responses', (*usage_responses, response))
+            return response
+
+        await guard.wrap_model_request(_run_ctx(), request_context=request_context, handler=handler)
+        await guard.wrap_model_request(_run_ctx(), request_context=request_context, handler=handler)
+
+        assert (await guard.status())[0].spent.requests == 2
+        assert len(snapshots) == 2
+
+    async def test_warning_errors_are_deferred_until_every_provider_response_accrues(self):
+        guard = SpendLimits(budgets=[Budget(usd=Decimal('10'), window='total')])
+        first = _response(model_name='unknown:first', provider_response_id='first')
+        second = _response(model_name='unknown:second', provider_response_id='second')
+        request_context: Any = _UsageRequestContext()
+
+        async def handler(request_context: ModelRequestContext) -> ModelResponse:
+            setattr(request_context, 'usage_responses', (first, second))
+            return second
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UnpricedModelWarning)
+            with pytest.raises(UnpricedModelWarning):
+                await guard.wrap_model_request(_run_ctx(), request_context=request_context, handler=handler)
+
+        spent = (await guard.status())[0].spent
+        assert spent.requests == 2
+        assert spent.unpriced_requests == 2
+
+    async def test_pricing_errors_are_deferred_until_every_provider_response_accrues(self):
+        def price(response: ModelResponse) -> Decimal:
+            if response.provider_response_id == 'first':
+                raise RuntimeError('pricing failed')
+            return Decimal('1')
+
+        guard = SpendLimits(budgets=[Budget(window='total')], price=price)
+        first = _response(provider_response_id='first')
+        second = _response(provider_response_id='second')
+        request_context: Any = _UsageRequestContext()
+
+        async def handler(request_context: ModelRequestContext) -> ModelResponse:
+            setattr(request_context, 'usage_responses', (first, second))
+            return second
+
+        with pytest.raises(UserError, match='raised RuntimeError: pricing failed'):
+            await guard.wrap_model_request(_run_ctx(), request_context=request_context, handler=handler)
+
+        spent = (await guard.status())[0].spent
+        assert spent.requests == 2
+        assert spent.unpriced_requests == 1
+
     async def test_an_older_core_accrues_the_handler_response(self):
         guard = SpendLimits(budgets=[Budget(window='total')], price=lambda response: Decimal('1'))
         response = _response()
@@ -793,6 +862,29 @@ class TestOrdering:
 
         assert result.usage.requests == 2
         assert (await guard.status())[0].spent.requests == 2
+
+    async def test_outer_spend_observes_usage_through_an_inner_context_copy(  # pragma: lax no cover - unreleased core seam
+        self,
+    ):
+        if not hasattr(_request_context(), 'usage_responses'):
+            pytest.skip('requires provider-response accounting from pydantic-ai#7053')
+
+        class CopyContext(AbstractCapability[None]):
+            async def wrap_model_request(
+                self,
+                ctx: RunContext[None],
+                *,
+                request_context: ModelRequestContext,
+                handler: WrapModelRequestHandler,
+            ) -> ModelResponse:
+                return await handler(replace(request_context, messages=list(request_context.messages)))
+
+        guard = SpendLimits(budgets=[Budget(window='total')], price=lambda response: Decimal('1'))
+        agent = Agent(_scripted_usage(), deps_type=type(None), capabilities=[guard, CopyContext()])
+
+        await agent.run('hi')
+
+        assert (await guard.status())[0].spent.requests == 1
 
     async def test_listing_spend_limits_last_counts_every_billed_response(self):
         """The opposite wrapper ordering produces the same complete accrual."""
