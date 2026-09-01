@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import AbstractToolset
@@ -63,12 +63,14 @@ def _mount_from_spec(mount: CodeModeMountSpec | Sequence[CodeModeMountSpec] | No
     """
     if mount is None:
         return None
-    entries = mount if isinstance(mount, Sequence) else [mount]
+    entries = cast(Sequence[object], mount if isinstance(mount, Sequence) else [mount])
     allowed_keys = CodeModeMountSpec.__annotations__.keys()
     for entry in entries:
-        unknown_keys = entry.keys() - allowed_keys
-        if unknown_keys:
-            raise ValueError(f'Unknown mount spec key(s): {sorted(unknown_keys)}')
+        if isinstance(entry, dict):
+            entry_dict = cast(dict[str, object], entry)
+            unknown_keys = entry_dict.keys() - allowed_keys
+            if unknown_keys:
+                raise ValueError(f'Unknown mount spec key(s): {sorted(unknown_keys)}')
     validated = _MOUNT_SPEC_ADAPTER.validate_python(mount)
     if isinstance(validated, list):
         return [MountDir(**entry) for entry in validated]

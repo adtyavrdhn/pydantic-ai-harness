@@ -106,6 +106,11 @@ class TestFromSpec:
         with pytest.raises(ValueError, match=r"Unknown mount spec key\(s\): \['write_bytes_limt'\]"):
             CodeMode.from_spec(**bad)
 
+    @pytest.mark.parametrize('mount', ['not-a-mapping', ['not-a-mapping']])
+    def test_a_non_mapping_mount_entry_fails_validation(self, mount: Any) -> None:
+        with pytest.raises(ValidationError):
+            CodeMode.from_spec(**{'mount': mount})
+
     def test_live_os_access_is_rejected_by_name(self) -> None:
         bad: dict[str, Any] = {'os_access': object()}
         with pytest.raises(UserError, match='cannot be built from a spec with `os_access`'):
