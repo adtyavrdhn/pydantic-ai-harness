@@ -26,7 +26,6 @@ from pydantic_ai.messages import (
     ToolCallPartDelta,
     ToolReturnPart,
 )
-
 from pydantic_core import from_json
 
 from ._streaming import MAX_SCAN_CHARS, closed_statements, decode_partial_code
