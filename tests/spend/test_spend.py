@@ -2024,6 +2024,44 @@ class TestIdempotentAccrual:
 
         assert (await guard.status())[0].spent.requests == 3
 
+    async def test_non_serializable_metadata_does_not_prevent_accrual(self):
+        """Provider bookkeeping is not part of the replay identity."""
+        guard = SpendLimits(budgets=[Budget(window='total')], price=lambda r: Decimal('1'))
+        response = _response(provider_response_id='resp-1')
+        response.metadata = {'sentinel': object()}
+        response.provider_details = {'sentinel': object()}
+
+        await _record(guard, response=response)
+
+        assert (await guard.status())[0].spent.requests == 1
+
+    async def test_different_content_at_the_same_position_is_not_deduplicated(self):
+        """A repeated provider id does not hide a genuinely different response."""
+        guard = SpendLimits(budgets=[Budget(window='total')], price=lambda r: Decimal('1'))
+
+        await _record(guard, response=_response(provider_response_id='resp-1'))
+        changed = _response(provider_response_id='resp-1')
+        changed.parts = [TextPart(content='different')]
+        await _record(guard, response=changed)
+
+        assert (await guard.status())[0].spent.requests == 2
+
+    async def test_scope_drift_reports_the_durable_execution_requirement(self):
+        """A replayed accrual can carry totals keyed by the original scope."""
+
+        class ReplayedAccrual(SpendLimits[str]):
+            async def _accrue(self, entries: list[SpendEntry]) -> Mapping[str, Spent]:
+                del entries
+                return {'tenant|3:day|10:2026-07-26|8:original': Spent(requests=1)}
+
+        guard = ReplayedAccrual(
+            budgets=[Budget(window='day', name='tenant', scope=lambda ctx: ctx.deps)],
+            price=lambda r: Decimal('1'),
+        )
+
+        with pytest.raises(UserError, match='returned a different value on replay'):
+            await _record(guard, ctx=_run_ctx(deps='changed'))
+
     async def test_two_responses_of_one_run_both_count(self):
         """The marker identifies a response, so it must not swallow the next one."""
         guard = SpendLimits(budgets=[Budget(window='total')], price=lambda r: Decimal('1'))

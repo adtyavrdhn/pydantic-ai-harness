@@ -115,10 +115,18 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
     `UserError`, after the response's tokens and request count have been recorded:
     a credit would move a budget away from its ceiling, and a NaN or an infinity
     is a broken pricing function rather than a price.
+
+    Under durable execution this callable must return the same result when replayed
+    for the same response. It runs in orchestration after the durable model request,
+    outside the journaled accrual.
     """
 
     on_spend: SpendCallback | None = None
-    """Called with a `SpendSnapshot` after each response. May be sync or async."""
+    """Called with a `SpendSnapshot` after each response. May be sync or async.
+
+    Durable replay can invoke this callback again after the response's journaled
+    accrual has run only once, so the callback must be idempotent.
+    """
 
     on_unpriced: Literal['zero', 'raise'] = 'zero'
     """What to do when a response cannot be priced.
@@ -343,6 +351,13 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
         # Every window in one call, so a failure cannot leave the response counted
         # against the day and not the month. Nothing to apply is not a call: see `_read`.
         accrued = await self._accrue(list(entries.values()))
+        missing = sorted({key for _, key in keyed} - accrued.keys())
+        if missing:
+            raise UserError(
+                f'The spend accrual returned no total for key(s) {missing}. Under durable execution this can mean '
+                'a `Budget.scope` callable returned a different value on replay; scope and price callables must be '
+                'deterministic. Otherwise, the `BatchSpendStore` must return a total for every submitted key.'
+            )
         statuses = [_status(budget, key, accrued[key]) for budget, key in keyed]
 
         if self.on_spend is not None:
@@ -561,18 +576,27 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
         the same entry without consulting that journal, as long as it reaches the store that
         remembers the token.
 
-        `run_id` and `run_step` locate the response in the run. A digest of the complete
-        response distinguishes provider bugs such as a repeated response id without relying
-        on that id alone. `timestamp` is replaced before serialization because core creates
-        it from the local clock. `run_id` is also replaced because core stamps it only after
-        this wrapper returns; the context is the authoritative run identity here.
+        `run_id` and `run_step` locate the response in the run. The digest includes semantic
+        response parts to distinguish different content, usage to distinguish different
+        billing, and provider/model identity fields to distinguish otherwise equal responses
+        from different sources. This also distinguishes responses when a provider repeats an id.
 
-        The canonical Pydantic serialization covers every response part, usage field, and
-        provider detail. Length-prefixing keeps caller-chosen run ids from colliding with the
-        step and digest boundaries.
+        Provider details and metadata are deliberately excluded because providers may put
+        arbitrary non-serializable objects there. Timestamp is excluded because core creates it
+        from the local clock, and the response's run stamp is excluded because core adds it only
+        after this wrapper returns. Length-prefixing prevents boundary collisions.
         """
         stable_response = replace(
-            response, timestamp=datetime.min.replace(tzinfo=response.timestamp.tzinfo), run_id=None
+            response,
+            parts=[
+                replace(part, provider_details=None) if hasattr(part, 'provider_details') else part
+                for part in response.parts
+            ],
+            timestamp=datetime.min.replace(tzinfo=response.timestamp.tzinfo),
+            run_id=None,
+            conversation_id=None,
+            metadata=None,
+            provider_details=None,
         )
         digest = sha256(ModelMessagesTypeAdapter.dump_json([stable_response])).hexdigest()
         return delimited(ctx.run_id or '', str(ctx.run_step), digest)
