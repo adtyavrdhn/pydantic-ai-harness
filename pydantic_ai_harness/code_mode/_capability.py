@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator, AsyncIterable, Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
@@ -154,6 +155,19 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     calls beyond it (branch arms, calls behind a blocking statement), and the eager
     feeds' dispatches claim those launches. Enabling this puts runs in streaming mode,
     and has no effect under Temporal durable execution.
+
+    Two consequences of running before the call completes:
+
+    - Statements execute before the completed `run_code` call reaches `before_tool_execute`
+      hooks, so a guard capability that would block, rewrite, or defer `run_code` for
+      approval is applied only to the dispatch, after the streamed prefix already ran. Do
+      not enable `eager` on runs that gate `run_code` behind such a guard.
+    - A `restart: true` call re-executes the full snippet on a fresh session; the watcher
+      stops feeding as soon as `restart` appears in the streamed arguments, but statements
+      fed before the key streams have already run once, so their side effects repeat.
+
+    Requires the asyncio event loop; on other async backends (Trio) the watcher stays
+    inactive and `run_code` executes normally at dispatch.
     """
 
     speculation_stats: SpeculationStats = field(default_factory=SpeculationStats, init=False, repr=False)
@@ -275,6 +289,14 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         if _in_temporal_workflow(ctx):
             eager = None
             speculation = None
+        if eager is not None or speculation is not None:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # Not on asyncio (Trio via AnyIO): both tiers schedule asyncio tasks, so the
+                # watchers stay inactive and `run_code` executes normally at dispatch.
+                eager = None
+                speculation = None
         run_id = next((rid for rid, cap in ctx.capabilities.items() if cap is self), None)
         try:
             async for event in stream:

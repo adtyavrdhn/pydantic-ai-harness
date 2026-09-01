@@ -42,7 +42,7 @@ def closed_statements(code: str, consumed: int) -> tuple[list[ast.stmt], int]:
 
     Only fully streamed lines participate, and the final parsed statement always stays
     provisional: a trailing compound (`for`, `if`, `try`) can still grow an indented body, so a
-    statement counts as closed only once a later top-level statement follows it. A prefix that
+    statement counts as closed only once a later top-level statement starts on a later line. A prefix that
     does not parse yields nothing -- either an open bracket/triple-quote closes later, or the
     model wrote broken code and the real run will surface the error.
 
@@ -55,7 +55,16 @@ def closed_statements(code: str, consumed: int) -> tuple[list[ast.stmt], int]:
         return [], consumed
     try:
         tree = ast.parse(code[: end + 1])
-    except SyntaxError:
+    except (SyntaxError, ValueError):
+        # `ValueError` covers source `ast.parse` rejects before parsing, such as a NUL
+        # character that JSON happily encodes; the dispatch feed surfaces the real error.
         return [], consumed
-    closed = tree.body[:-1]
+    closed: list[ast.stmt] = []
+    for stmt, following in zip(tree.body, tree.body[1:]):
+        if following.lineno <= (stmt.end_lineno or stmt.lineno):
+            # Semicolon-separated statements share a line, and the executed prefix is a
+            # line slice: feeding this statement would drag the rest of its line (possibly
+            # the provisional final expression) along with it. Hold the whole line back.
+            break
+        closed.append(stmt)
     return closed[consumed:], max(consumed, len(closed))
