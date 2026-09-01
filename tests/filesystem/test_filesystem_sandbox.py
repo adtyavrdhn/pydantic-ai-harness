@@ -16,7 +16,6 @@ from pydantic_ai.sandboxes import (
     Sandbox,
     SandboxCommand,
     SandboxFileEntry,
-    SandboxFilesystem,
     SandboxResult,
     SandboxUnavailableError,
 )
@@ -91,28 +90,18 @@ async def _call(
 
 
 class _FailingFilesystem:
+    """Only the operations the tools reach before failing; `stat` guards most paths."""
+
     def __init__(self, error: RuntimeError) -> None:
         self.error = error
 
     async def read_bytes(self, path: str) -> bytes:
         raise self.error
 
-    async def write_bytes(self, path: str, data: bytes) -> None:
-        raise self.error
-
     async def stat(self, path: str) -> SandboxFileEntry:
         raise self.error
 
-    async def list_dir(self, path: str) -> Sequence[SandboxFileEntry]:
-        raise self.error
-
     async def make_dir(self, path: str) -> None:
-        raise self.error
-
-    async def remove(self, path: str) -> None:
-        raise self.error
-
-    async def exists(self, path: str) -> bool:
         raise self.error
 
 
@@ -122,7 +111,7 @@ class _FailingBackend:
 
     def __init__(self, error: RuntimeError) -> None:
         self.error = error
-        self.fs: SandboxFilesystem = _FailingFilesystem(error)
+        self.fs = _FailingFilesystem(error)
 
     async def working_dir(self) -> str:
         return '/work'
@@ -517,18 +506,33 @@ class TestSandboxPolicyAndErrors:
             (RuntimeError('temporary failure'), ModelRetry),
         ],
     )
+    @pytest.mark.parametrize(
+        ('name', 'args'),
+        [
+            ('read_file', {'path': 'file.txt'}),
+            ('write_file', {'path': 'file.txt', 'content': 'x'}),
+            ('edit_file', {'path': 'file.txt', 'old_text': 'a', 'new_text': 'b'}),
+            ('list_directory', {'path': '.'}),
+            ('search_files', {'pattern': 'x'}),
+            ('find_files', {'pattern': '*.py'}),
+            ('create_directory', {'path': 'sub'}),
+            ('file_info', {'path': 'file.txt'}),
+        ],
+    )
     async def test_backend_error_mapping(
         self,
         tmp_path: Path,
         error: RuntimeError,
         expected: type[RuntimeError],
+        name: str,
+        args: dict[str, object],
     ) -> None:
         with pytest.raises(expected, match=str(error)):
             await _call(
                 _toolset(tmp_path),
                 _ctx(Sandbox.wrap(_FailingBackend(error))),
-                'read_file',
-                {'path': 'file.txt'},
+                name,
+                args,
             )
 
     async def test_host_mode_smoke(self, tmp_path: Path) -> None:

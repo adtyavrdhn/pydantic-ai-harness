@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import os
-import shutil
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
 import anyio
@@ -17,7 +16,6 @@ from pydantic_ai.sandboxes import (
     LocalSandbox,
     Sandbox,
     SandboxCommand,
-    SandboxFileEntry,
     SandboxFilesystem,
     SandboxResult,
     SandboxTimeoutError,
@@ -111,25 +109,10 @@ class _ControllableFilesystem:
             raise self.read_error
         return await self.filesystem.read_bytes(path)
 
-    async def write_bytes(self, path: str, data: bytes) -> None:
-        await self.filesystem.write_bytes(path, data)
-
-    async def stat(self, path: str) -> SandboxFileEntry:
-        return await self.filesystem.stat(path)
-
-    async def list_dir(self, path: str) -> Sequence[SandboxFileEntry]:
-        return await self.filesystem.list_dir(path)
-
-    async def make_dir(self, path: str) -> None:
-        await self.filesystem.make_dir(path)
-
     async def remove(self, path: str) -> None:
         if self.remove_error is not None:
             raise self.remove_error
         await self.filesystem.remove(path)
-
-    async def exists(self, path: str) -> bool:
-        return await self.filesystem.exists(path)
 
 
 class _RecordingLocalBackend:
@@ -141,10 +124,7 @@ class _RecordingLocalBackend:
         self.environments: list[Mapping[str, str] | None] = []
         self.run_error: RuntimeError | None = None
         self.raise_after_kill = False
-
-    @property
-    def sandbox_id(self) -> str:
-        return self.backend.sandbox_id
+        self.sandbox_id = backend.sandbox_id
 
     async def working_dir(self) -> str:
         return await self.backend.working_dir()
@@ -356,26 +336,22 @@ class TestRunCommand:
         error: RuntimeError,
         expected: type[RuntimeError],
     ) -> None:
+        sandbox = Sandbox.wrap(_FailingBackend(error))
+        assert await sandbox.working_dir() == '/work'
         with pytest.raises(expected, match=str(error)):
-            await _call(
-                _toolset(tmp_path),
-                _ctx(Sandbox.wrap(_FailingBackend(error))),
-                'run_command',
-                {'command': 'echo hello'},
-            )
+            await _call(_toolset(tmp_path), _ctx(sandbox), 'run_command', {'command': 'echo hello'})
 
 
 def _background_toolset(tmp_path: Path) -> ShellToolset[None]:
-    env: dict[str, str] | None = None
-    if shutil.which('setsid') is None:
-        setsid = tmp_path / 'setsid'
-        setsid.write_text(
-            '#!/usr/bin/env python3\nimport os, sys\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])\n',
-            encoding='utf-8',
-        )
-        setsid.chmod(0o755)
-        env = {'PATH': f'{tmp_path}:{os.environ["PATH"]}'}
-    return _toolset(tmp_path, env=env)
+    # A python shim on PATH, unconditionally: macOS ships no setsid binary, and one code
+    # path for every platform keeps this file fully covered on all of them.
+    setsid = tmp_path / 'setsid'
+    setsid.write_text(
+        '#!/usr/bin/env python3\nimport os, sys\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])\n',
+        encoding='utf-8',
+    )
+    setsid.chmod(0o755)
+    return _toolset(tmp_path, env={'PATH': f'{tmp_path}:{os.environ["PATH"]}'})
 
 
 class TestBackgroundCommands:
@@ -384,13 +360,12 @@ class TestBackgroundCommands:
         ctx = _ctx(sandbox)
         command_id = _command_id(await _call(toolset, ctx, 'start_command', {'command': 'printf background; false'}))
 
-        for _ in range(100):
-            result = await _call(toolset, ctx, 'check_command', {'command_id': command_id})
-            if '[status: finished]' in result:
-                break
-            await anyio.sleep(0.02)
-        else:
-            pytest.fail('background command did not finish')
+        with anyio.fail_after(5):
+            while True:
+                result = await _call(toolset, ctx, 'check_command', {'command_id': command_id})
+                if '[status: finished]' in result:
+                    break
+                await anyio.sleep(0.02)
 
         assert result == '[stdout]\nbackground\n[status: finished]\n[exit code: 1]'
         await _call(toolset, ctx, 'stop_command', {'command_id': command_id})
@@ -403,13 +378,12 @@ class TestBackgroundCommands:
         )
         await sandbox.fs.write_bytes(f'/tmp/harness_{command_id}_ec', b'junk')
 
-        for _ in range(100):
-            result = await _call(toolset, ctx, 'check_command', {'command_id': command_id})
-            if '[stderr]\nproblem' in result:
-                break
-            await anyio.sleep(0.02)
-        else:
-            pytest.fail('background stderr was not written')
+        with anyio.fail_after(5):
+            while True:
+                result = await _call(toolset, ctx, 'check_command', {'command_id': command_id})
+                if '[stderr]\nproblem' in result:
+                    break
+                await anyio.sleep(0.02)
         assert result == '[stderr]\nproblem\n[status: running]'
         await _call(toolset, ctx, 'stop_command', {'command_id': command_id})
 
@@ -452,13 +426,12 @@ class TestBackgroundCommands:
         toolset = _background_toolset(tmp_path)
         ctx = _ctx(sandbox)
         command_id = _command_id(await _call(toolset, ctx, 'start_command', {'command': 'true'}))
-        for _ in range(100):
-            result = await _call(toolset, ctx, 'check_command', {'command_id': command_id})
-            if '[status: finished]' in result:
-                break
-            await anyio.sleep(0.02)
-        else:
-            pytest.fail('background command did not finish')
+        with anyio.fail_after(5):
+            while True:
+                result = await _call(toolset, ctx, 'check_command', {'command_id': command_id})
+                if '[status: finished]' in result:
+                    break
+                await anyio.sleep(0.02)
 
         await toolset.__aexit__(None, None, None)
         assert await _call(toolset, ctx, 'check_command', {'command_id': command_id}) == (
@@ -473,6 +446,9 @@ class TestBackgroundCommands:
             ctx = _ctx(sandbox)
             command_id = _command_id(await _call(toolset, ctx, 'start_command', {'command': 'sleep 30'}))
             backend.raise_after_kill = True
+            # The protocol members the shell tools never consult still work through the facade.
+            assert sandbox.sandbox_id == local.sandbox_id
+            assert await sandbox.working_dir() == str(tmp_path)
 
             await toolset.__aexit__(None, None, None)
 
