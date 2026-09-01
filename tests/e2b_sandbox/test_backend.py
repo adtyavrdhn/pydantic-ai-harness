@@ -461,14 +461,6 @@ class TestWorkingDir:
             with pytest.raises(SandboxTimeoutError):
                 await backend.working_dir()
 
-    async def test_concurrent_callers_probe_once(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.responder = lambda command, timeout: ('/home/user\n', '', 0)
-        backend = await E2BSandboxBackend.create()
-        async with anyio.create_task_group() as task_group:
-            for _ in range(4):
-                task_group.start_soon(backend.working_dir)
-        assert len(fake_e2b.sandboxes[0].commands.calls) == 1
-
     @pytest.mark.parametrize(
         ('stdout', 'exit_code'),
         [('', 0), ('relative/dir\n', 0), ('/home/user\n', 1)],

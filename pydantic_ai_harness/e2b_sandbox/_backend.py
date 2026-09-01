@@ -365,7 +365,6 @@ class E2BSandboxBackend:
         """The underlying `e2b.AsyncSandbox`, for provider-specific functionality."""
         self.fs = _E2BFilesystem(self)
         self._working_dir = working_dir
-        self._working_dir_lock = anyio.Lock()
         self._sandbox_timeout = sandbox_timeout
 
     @property
@@ -535,23 +534,21 @@ class E2BSandboxBackend:
     async def working_dir(self) -> str:
         """The sandbox's default working directory (absolute POSIX path)."""
         # E2B exposes no API for a sandbox's working directory -- it is the template's unless
-        # this backend was given one -- so ask the environment itself. It cannot change, so one
-        # answer serves the sandbox's whole life. The lock single-flights the probe: without it
-        # a batch of concurrent tool calls would each run their own `pwd`.
+        # this backend was given one -- so ask the environment itself. It cannot change, so the
+        # probe is an idempotent read: overlapping first calls may each run their own `pwd`,
+        # get the same answer, and the cache converges. No lock needed.
         if self._working_dir is None:
-            async with self._working_dir_lock:
-                if self._working_dir is None:
-                    result = await self.run(['pwd'], timeout=_INTERNAL_EXEC_TIMEOUT)
-                    printed = result.stdout.strip()
-                    # Only an absolute path is an answer. Caching whatever else the environment
-                    # printed would hand every later `resolve()` a working directory that is not
-                    # one, mis-resolving relative paths with no error.
-                    if result.exit_code != 0 or not posixpath.isabs(printed):
-                        raise E2BSandboxError(
-                            f'Could not determine the working directory of E2B sandbox {self.sandbox_id!r}: '
-                            f'`pwd` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
-                        )
-                    self._working_dir = printed
+            result = await self.run(['pwd'], timeout=_INTERNAL_EXEC_TIMEOUT)
+            printed = result.stdout.strip()
+            # Only an absolute path is an answer. Caching whatever else the environment
+            # printed would hand every later `resolve()` a working directory that is not
+            # one, mis-resolving relative paths with no error.
+            if result.exit_code != 0 or not posixpath.isabs(printed):
+                raise E2BSandboxError(
+                    f'Could not determine the working directory of E2B sandbox {self.sandbox_id!r}: '
+                    f'`pwd` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
+                )
+            self._working_dir = printed
         return self._working_dir
 
     async def run(
