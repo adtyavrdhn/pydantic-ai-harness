@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncGenerator, AsyncIterable, Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
@@ -120,28 +119,11 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     """
 
     eager: bool = False
-    """Execute streamed `run_code` statements in the live REPL as they close.
+    """Execute complete streamed statements before the `run_code` call finishes.
 
-    Experimental. The lighter streaming tier: no calls are predicted, so nothing can miss or
-    be wasted -- each top-level statement runs, in program order, as soon as it has fully
-    streamed, and the `run_code` dispatch only executes the remainder. Side effects land
-    before the tool call is committed and are not rolled back; a statement that fails leaves
-    the session exactly as a failed snippet does today (assignments before the failing line
-    persist) and surfaces the error as the `run_code` result. Enabling this puts runs in
-    streaming mode, and has no effect under durable execution.
-
-    Two consequences of running before the call completes:
-
-    - Statements execute before the completed `run_code` call reaches `before_tool_execute`
-      hooks, so a guard capability that would block, rewrite, or defer `run_code` for
-      approval is applied only to the dispatch, after the streamed prefix already ran. Do
-      not enable `eager` on runs that gate `run_code` behind such a guard.
-    - A `restart: true` call re-executes the full snippet on a fresh session; the watcher
-      stops feeding as soon as `restart` appears in the streamed arguments, but statements
-      fed before the key streams have already run once, so their side effects repeat.
-
-    Requires the asyncio event loop; on other async backends (Trio) the watcher stays
-    inactive and `run_code` executes normally at dispatch.
+    This experimental mode uses asyncio and is inactive under durable execution. Side effects
+    cannot be rolled back and run before approval hooks see the completed tool call. See the
+    Code Mode guide for the execution and `restart` semantics.
     """
 
     _eager_state: EagerState | None = field(default=None, init=False, repr=False)
@@ -235,13 +217,6 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         state = self._eager_state
         if state is not None and _in_durable_execution(ctx):
             state = None
-        if state is not None:
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                # Not on asyncio (Trio via AnyIO): the pump schedules asyncio tasks, so the
-                # watcher stays inactive and `run_code` executes normally at dispatch.
-                state = None
         try:
             async for event in stream:
                 yield event

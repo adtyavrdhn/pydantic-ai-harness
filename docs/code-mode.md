@@ -233,7 +233,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness.code_mode import CodeMode
 
 agent = Agent(
-    'openai:gpt-5',
+    'openai:gpt-5.6-sol',
     capabilities=[CodeMode(eager=True)],
 )
 ```
@@ -260,10 +260,9 @@ Two consequences of running before the call completes:
   stops feeding as soon as `restart` appears in the streamed arguments, but statements
   fed before the key streams have already run once, so their side effects repeat.
 
-Enabling `eager` puts runs in streaming mode. It requires the asyncio event loop; on
-other async backends (Trio) the watcher stays inactive and `run_code` executes normally
-at dispatch. Under durable execution (Temporal, DBOS) the option is likewise inactive:
-statements only run when the completed tool call executes.
+Enabling `eager` puts runs in streaming mode and uses asyncio tasks. Under durable
+execution (Temporal, DBOS), the option is inactive and statements run only when the
+completed tool call executes.
 
 ## Temporal durability
 
@@ -282,7 +281,7 @@ from pydantic_ai.durable_exec.temporal import TemporalDurability
 from pydantic_ai_harness import CodeMode
 
 agent = Agent(
-    'openai:gpt-5',
+    'openai:gpt-5.6-sol',
     name='coding-agent',
     capabilities=[CodeMode(), TemporalDurability()],
 )

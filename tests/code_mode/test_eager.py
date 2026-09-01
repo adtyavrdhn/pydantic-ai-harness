@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
-import types
 from collections.abc import AsyncIterator, Sequence
 from itertools import zip_longest
 
@@ -224,13 +223,31 @@ class TestEagerExecution:
         # The pumped prefix ran once, then restart re-ran the full snippet from scratch.
         assert calls == ['alpha', 'alpha']
 
-    async def test_diverged_code_resets_the_session(self):
-        """Execution with a different prefix than the pump ran raises a retry and resets."""
+    async def test_diverged_code_cancels_obsolete_queue_and_resets_session(self):
+        """A rewritten part cannot drain nested calls queued for the obsolete code."""
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        stale_calls: list[str] = []
+
+        async def block() -> None:
+            """Hold the first eager statement while dispatch receives rewritten code."""
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        def stale(value: str) -> None:
+            """Record an obsolete nested call if the eager queue reaches it."""
+            stale_calls.append(value)
+
         ctx = build_run_context(None)
         ctx.tool_manager = None
         capability = CodeMode[None](eager=True)
         run_capability = await capability.for_run(ctx)
-        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[]))
+        wrapped = FunctionToolset[None](tools=[Tool(block), Tool(stale)])
+        toolset = run_capability.get_wrapper_toolset(wrapped)
         assert isinstance(toolset, CodeModeToolset)
         assert toolset.eager is not None
         tools = await toolset.get_tools(ctx)
@@ -240,16 +257,23 @@ class TestEagerExecution:
         stream_ctx = dataclasses.replace(ctx)
         stream_ctx.tool_manager = exec_ctx.tool_manager
         async with toolset:
+            original = 'await block()\nawait stale(value="old")\nprint("old")'
             events = [
                 PartStartEvent(
                     index=0,
-                    part=ToolCallPart(tool_name='run_code', args={'code': 'x = 1\ny = 2\nprint(x)'}, tool_call_id='c1'),
+                    part=ToolCallPart(tool_name='run_code', args={'code': original}, tool_call_id='c1'),
                 ),
             ]
             async for _ in run_capability.wrap_run_event_stream(stream_ctx, stream=_PlainEventStream(events)):
                 pass
+            await asyncio.wait_for(started.wait(), timeout=5)
+
+            rewritten = 'z = 9\nw = 8\nprint(z)'
             with pytest.raises(ModelRetry, match='no longer matches'):
-                await toolset.call_tool('run_code', {'code': 'z = 9\nw = 8\nprint(z)'}, exec_ctx, tools['run_code'])
+                await toolset.call_tool('run_code', {'code': rewritten}, exec_ctx, tools['run_code'])
+
+            assert cancelled.is_set()
+            assert stale_calls == []
             # The diverged part was consumed; nothing is left to adopt.
             assert toolset.eager.pop_watch('cX', 'anything') is None
 
@@ -748,32 +772,6 @@ class TestEagerHardening:
             with pytest.raises(RuntimeError, match='boom'):
                 await run_capability.on_run_error(ctx, error=RuntimeError('boom'))
             assert taken.pump.done()
-
-    async def test_non_asyncio_backend_leaves_watcher_inactive(self, monkeypatch: pytest.MonkeyPatch):
-        """Without an asyncio loop (Trio), the stream passes through unwatched."""
-
-        def no_loop() -> None:
-            raise RuntimeError('no running event loop')
-
-        monkeypatch.setattr(
-            'pydantic_ai_harness.code_mode._capability.asyncio', types.SimpleNamespace(get_running_loop=no_loop)
-        )
-        ctx = build_run_context(None)
-        capability = CodeMode[None](eager=True)
-        run_capability = await capability.for_run(ctx)
-        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[]))
-        assert isinstance(toolset, CodeModeToolset)
-        assert toolset.eager is not None
-
-        events = [
-            PartStartEvent(
-                index=0,
-                part=ToolCallPart(tool_name='run_code', args={'code': 'x = 1\ny = 2\nprint(x)'}, tool_call_id='c1'),
-            ),
-        ]
-        seen = [event async for event in run_capability.wrap_run_event_stream(ctx, stream=_plain_stream(events))]
-        assert len(seen) == 1
-        assert toolset.eager.pop_watch('c1', 'x = 1\ny = 2\nprint(x)') is None
 
     async def test_fragment_output_is_capped(self, monkeypatch: pytest.MonkeyPatch):
         """Accumulated fragment prints stop growing at the cap instead of filling host memory."""

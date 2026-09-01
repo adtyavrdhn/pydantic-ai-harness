@@ -17,6 +17,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.messages import (
     AgentStreamEvent,
@@ -26,8 +27,8 @@ from pydantic_ai.messages import (
     ToolCallPartDelta,
     ToolReturnPart,
 )
-
 from pydantic_core import from_json
+from typing_extensions import NotRequired, TypedDict
 
 from ._streaming import MAX_SCAN_CHARS, closed_statements, decode_partial_code
 
@@ -35,9 +36,16 @@ if TYPE_CHECKING:
     from ._toolset import CodeModeToolset
 
 
-@dataclass(kw_only=True)
+class _RestartArgs(TypedDict):
+    restart: NotRequired[object]
+
+
+_RESTART_ARGS_ADAPTER: TypeAdapter[_RestartArgs] = TypeAdapter(_RestartArgs)
+
+
+@dataclass(kw_only=True, frozen=True)
 class _EagerPart:
-    """Accumulated state for one streamed `run_code` tool call part under eager execution."""
+    """Mutable internals for one streamed `run_code` call, with a stable object shape."""
 
     tool_call_id: str
     args_text: str = ''
@@ -88,15 +96,55 @@ class _EagerPart:
     nested_returns: dict[str, ToolReturnPart] = field(default_factory=dict[str, ToolReturnPart])
     """Their return parts, under the same nested tool call ids."""
 
+    def append_args_text(self, text: str) -> None:
+        object.__setattr__(self, 'args_text', self.args_text + text)
 
-@dataclass
+    def replace_args_dict(self, args: dict[str, Any]) -> None:
+        object.__setattr__(self, 'args_dict', args)
+
+    def halt(self, *, clear_queue: bool = False) -> None:
+        object.__setattr__(self, 'halted', True)
+        if clear_queue:
+            self.queue.clear()
+
+    def record_scan(self, source: str) -> None:
+        object.__setattr__(self, 'scanned_source', source)
+
+    def record_consumed(self, consumed: int) -> None:
+        object.__setattr__(self, 'consumed', consumed)
+
+    def record_statement(self, *, source: str, end_line: int) -> None:
+        self.queue.append(source)
+        object.__setattr__(self, 'fed_line_count', end_line)
+
+    def record_prefix(self, prefix: str) -> None:
+        object.__setattr__(self, 'fed_prefix', prefix)
+
+    def start_pump(self, pump: asyncio.Task[None]) -> None:
+        object.__setattr__(self, 'pump', pump)
+
+    def next_feed(self) -> int:
+        count = self.feed_count + 1
+        object.__setattr__(self, 'feed_count', count)
+        return count
+
+    def fail(self, error: BaseException) -> None:
+        object.__setattr__(self, 'error', error)
+        self.queue.clear()
+
+    def append_output(self, output: str, *, byte_count: int, capped: bool = False) -> None:
+        object.__setattr__(self, 'output', self.output + output)
+        object.__setattr__(self, 'output_bytes', self.output_bytes + byte_count)
+        if capped:
+            object.__setattr__(self, 'output_capped', True)
+
+
+@dataclass(frozen=True)
 class EagerState:
-    """Watch streamed `run_code` parts and feed closed statements into the REPL serially.
+    """Inject complete streamed `run_code` statements into the live REPL.
 
-    One instance per run, owned by the `CodeMode` clone and bound to its `CodeModeToolset`.
-    The stream watcher enqueues statement sources; a single pump task per part feeds them
-    through the toolset's normal `run_code` pipeline, so budget accounting, error mapping,
-    and tool hooks behave exactly as a model-issued snippet would.
+    Each run owns one state object. It serializes injected statements through the bound
+    `CodeModeToolset`, preserving program order and normal tool-call accounting.
     """
 
     _parts: dict[str, _EagerPart] = field(default_factory=dict[str, '_EagerPart'], init=False)
@@ -119,7 +167,7 @@ class EagerState:
 
     def bind(self, toolset: CodeModeToolset[Any]) -> None:
         """Attach the owning toolset; feeds go through its `run_code` pipeline."""
-        self._toolset = toolset
+        object.__setattr__(self, '_toolset', toolset)
 
     # -- stream side ------------------------------------------------------------------------
 
@@ -133,9 +181,9 @@ class EagerState:
                 watch = self._parts.setdefault(part_id, _EagerPart(tool_call_id=part_id))
                 args = part.args
                 if isinstance(args, str):
-                    watch.args_text += args
+                    watch.append_args_text(args)
                 elif isinstance(args, dict):
-                    watch.args_dict = args
+                    watch.replace_args_dict(args)
                 self._scan(watch, ctx)
             case PartDeltaEvent(delta=ToolCallPartDelta() as delta):
                 watch = self._find_watch(delta.tool_call_id)
@@ -145,13 +193,13 @@ class EagerState:
                     return
                 args_delta = delta.args_delta
                 if isinstance(args_delta, str):
-                    watch.args_text += args_delta
+                    watch.append_args_text(args_delta)
                 elif isinstance(args_delta, dict):
                     merged = dict(watch.args_dict or {})
                     merged.update(args_delta)
-                    watch.args_dict = merged
+                    watch.replace_args_dict(merged)
                 if len(watch.args_text) > MAX_SCAN_CHARS:
-                    watch.halted = True
+                    watch.halt()
                     return
                 self._scan(watch, ctx)
             case _:
@@ -187,12 +235,12 @@ class EagerState:
         if not watch.args_text or len(watch.args_text) > MAX_SCAN_CHARS:
             return False
         try:
-            decoded = from_json(watch.args_text, allow_partial='trailing-strings')
-        except ValueError:  # pragma: no cover - malformed JSON fragments that models don't emit
+            decoded = _RESTART_ARGS_ADAPTER.validate_python(
+                from_json(watch.args_text, allow_partial='trailing-strings')
+            )
+        except (ValueError, ValidationError):  # pragma: no cover - malformed JSON fragments that models don't emit
             return False
-        if isinstance(decoded, dict):
-            return bool(decoded.get('restart'))
-        return False
+        return bool(decoded.get('restart'))
 
     def _scan(self, watch: _EagerPart, ctx: RunContext[Any]) -> None:
         """Re-parse the streamed code and enqueue any statements that newly closed.
@@ -201,42 +249,42 @@ class EagerState:
         cause (restart, prefix rewrite, oversized arguments) re-detects itself on a rescan.
         """
         if self._restart_requested(watch):
-            watch.halted = True
+            watch.halt()
             return
         code = self._current_code(watch)
         if code is None:
             return
         if len(code) > MAX_SCAN_CHARS:
-            watch.halted = True
-            watch.queue.clear()
+            watch.halt(clear_queue=True)
             return
         source_prefix = code[: code.rfind('\n') + 1]
         if source_prefix == watch.scanned_source:
             return
-        watch.scanned_source = source_prefix
+        watch.record_scan(source_prefix)
         lines = code.split('\n')
         if watch.fed_line_count and '\n'.join(lines[: watch.fed_line_count]) != watch.fed_prefix:
             # A dict delta rewrote code that already executed. Keep `fed_prefix` as the text
             # that actually ran and stop feeding; the dispatch's divergence check resets the
             # session and asks the model to resend.
-            watch.halted = True
+            watch.halt()
             return
-        fresh, watch.consumed = closed_statements(code, watch.consumed)
+        fresh, consumed = closed_statements(code, watch.consumed)
+        watch.record_consumed(consumed)
         # Each queued source is a contiguous line slice from the end of the previous
         # statement, so comments and blank lines between statements feed with them and the
         # concatenation of all slices reproduces the prefix exactly.
         for statement in fresh:
             end = statement.end_lineno or statement.lineno
             source = '\n'.join(lines[watch.fed_line_count : end])
-            watch.queue.append(source)
-            watch.fed_line_count = end
-        watch.fed_prefix = '\n'.join(lines[: watch.fed_line_count])
+            watch.record_statement(source=source, end_line=end)
+        watch.record_prefix('\n'.join(lines[: watch.fed_line_count]))
         # One pump per part: enqueueing happens before this check, so a finished pump
         # always means an empty queue, and a live one will drain what was just added.
         if watch.queue and (watch.pump is None or watch.pump.done()):
-            watch.pump = asyncio.create_task(self._run_pump(watch, ctx))
-            self._pumps.add(watch.pump)
-            watch.pump.add_done_callback(self._pumps.discard)
+            pump = asyncio.create_task(self._run_pump(watch, ctx))
+            watch.start_pump(pump)
+            self._pumps.add(pump)
+            pump.add_done_callback(self._pumps.discard)
 
     async def _run_pump(self, watch: _EagerPart, ctx: RunContext[Any]) -> None:
         """Feed queued statements one at a time; an error stops the part for good."""
@@ -245,14 +293,13 @@ class EagerState:
             raise RuntimeError('`EagerState` is not bound to a `CodeModeToolset`; the toolset was never entered')
         while watch.queue and watch.error is None:
             source = watch.queue.popleft()
-            watch.feed_count += 1
-            feed_ctx = replace(ctx, tool_call_id=f'{watch.tool_call_id}~e{watch.feed_count}', tool_name='run_code')
+            feed_count = watch.next_feed()
+            feed_ctx = replace(ctx, tool_call_id=f'{watch.tool_call_id}~e{feed_count}', tool_name='run_code')
             try:
                 async with self.feed_lock:
                     await toolset.feed_eager_fragment(watch, source, feed_ctx)
             except Exception as e:  # cancellation propagates; everything else is held for the dispatch
-                watch.error = e
-                watch.queue.clear()
+                watch.fail(e)
 
     # -- execution side ---------------------------------------------------------------------
 
@@ -280,6 +327,19 @@ class EagerState:
         if watch.pump is not None:
             await watch.pump
 
+    async def discard(self, watch: _EagerPart) -> None:
+        """Cancel statements queued for a rewritten part."""
+        watch.queue.clear()
+        if watch.pump is not None:
+            await self._cancel_pump(watch.pump)
+
+    async def _cancel_pump(self, pump: asyncio.Task[None]) -> None:
+        pump.cancel()
+        try:
+            await pump
+        except (asyncio.CancelledError, Exception):  # pragma: no cover - cancellation race
+            pass
+
     async def close(self) -> None:
         """Cancel every live pump and drop all watches at run end.
 
@@ -288,12 +348,9 @@ class EagerState:
         the run fails, and an abandoned fragment must not keep invoking tools.
         """
         self._parts.clear()
-        pumps, self._pumps = list(self._pumps), set()
+        pumps = list(self._pumps)
+        self._pumps.clear()
         for pump in pumps:
             # The done-callback prunes finished pumps, so these are live; `cancel` on one
             # that finished in the meantime is a no-op and the await returns immediately.
-            pump.cancel()
-            try:
-                await pump
-            except (asyncio.CancelledError, Exception):  # pragma: no cover - cancellation race
-                pass
+            await self._cancel_pump(pump)

@@ -785,20 +785,30 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         part = None
         if isinstance(code, str) and not _in_durable_execution(ctx):
             part = self.eager.pop_watch(ctx.tool_call_id or 'pyd_ai_code_mode', code)
-        if part is not None:
-            await self.eager.drain(part)
         if part is None:
-            # Nothing streamed for this part (non-streaming run, Temporal, or a part the
-            # watcher never saw): the normal path handles it.
+            # Nothing streamed for this part (non-streaming run, durable execution, or a part
+            # the watcher never saw): the normal path handles it.
             return await self._call_tool_impl(name, tool_args, ctx, tool)
         assert isinstance(code, str), '`pop_watch` only runs for string code'
         if restart:
-            # The model asked for a fresh REPL; the reset discards the pumped prefix too. Any
-            # side effects the fed prefix produced have already landed and run again with the
-            # full snippet -- the watcher halts feeding when it sees `restart` in the streamed
-            # arguments, but a key that streams after the code arrives too late to help.
+            # Statements that finished before the key arrived have already landed. Cancel any
+            # queued residue before resetting and running the complete snippet.
+            await self.eager.discard(part)
             async with self.eager.feed_lock:
                 return await self._call_tool_impl(name, tool_args, ctx, tool)
+        lines = code.split('\n')
+        if '\n'.join(lines[: part.fed_line_count]) != part.fed_prefix:
+            # Do this before draining: queued statements belong to the obsolete program and
+            # may contain nested calls or other side effects that a session reset cannot undo.
+            await self.eager.discard(part)
+            run_state = self._run_state
+            assert run_state is not None, '`CodeModeToolset` must be entered before calling `run_code`'
+            run_state.reset()
+            raise ModelRetry(
+                'The submitted code no longer matches the prefix eager execution already ran, '
+                'so the session was restarted. Send the snippet again.'
+            )
+        await self.eager.drain(part)
         if part.error is not None:
             if part.output and isinstance(part.error, ModelRetry):
                 # Fragments that succeeded before the failure printed diagnostics the model
@@ -808,15 +818,6 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                     f'{part.error.message}'
                 ) from part.error
             raise part.error
-        lines = code.split('\n')
-        if '\n'.join(lines[: part.fed_line_count]) != part.fed_prefix:
-            run_state = self._run_state
-            assert run_state is not None, '`CodeModeToolset` must be entered before calling `run_code`'
-            run_state.reset()
-            raise ModelRetry(
-                'The submitted code no longer matches the prefix eager execution already ran, '
-                'so the session was restarted. Send the snippet again.'
-            )
         tail = '\n'.join(lines[part.fed_line_count :])
         # The same lock the pump holds per fragment: a later part's pump must not interleave
         # with this part's completion against the one live session.
@@ -862,13 +863,14 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             room = _EAGER_OUTPUT_CAP - part.output_bytes - marker_bytes
             encoded = output.encode()
             if len(encoded) <= room:
-                part.output += output
-                part.output_bytes += len(encoded)
+                part.append_output(output, byte_count=len(encoded))
             else:
                 kept = encoded[: max(room, 0)].decode('utf-8', 'ignore')
-                part.output += kept + _EAGER_TRUNCATION_MARKER
-                part.output_bytes += len(kept.encode()) + marker_bytes
-                part.output_capped = True
+                part.append_output(
+                    kept + _EAGER_TRUNCATION_MARKER,
+                    byte_count=len(kept.encode()) + marker_bytes,
+                    capped=True,
+                )
         metadata: Any = result.metadata
         assert metadata is not None, 'run_code always attaches code_mode metadata'
         fragment_calls: dict[str, ToolCallPart] = metadata['tool_calls']
