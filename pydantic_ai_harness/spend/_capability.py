@@ -307,7 +307,11 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
                     error = exc
                 if first_error is None:
                     first_error = error
-            if first_error is not None:
+            # Only on the success path: pricing-policy and callback errors have never been
+            # able to outrank the request's own exception, and a retryable failure such as
+            # `ModelRetry` must keep propagating so the run retries instead of dying on a
+            # reporting error. The responses are accrued above either way.
+            if first_error is not None and response is not None:
                 raise first_error
         assert response is not None
         return response

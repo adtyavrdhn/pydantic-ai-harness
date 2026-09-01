@@ -681,6 +681,29 @@ class TestOrdering:
 
         assert (await guard.status())[0].spent.requests == 2
 
+    async def test_a_failed_request_outranks_an_accrual_error(self):
+        """A retryable rejection keeps propagating; a reporting error must not turn it into a dead run."""
+
+        def reject_snapshot(snapshot: SpendSnapshot) -> None:
+            raise RuntimeError('reporting failed')
+
+        guard = SpendLimits(
+            budgets=[Budget(window='total')],
+            price=lambda response: Decimal('1'),
+            on_spend=reject_snapshot,
+        )
+        billed = _response(provider_response_id='billed')
+        request_context: Any = _UsageRequestContext()
+
+        async def handler(request_context: ModelRequestContext) -> ModelResponse:
+            setattr(request_context, 'usage_responses', (billed,))
+            raise ModelRetry('rejected after billing')
+
+        with pytest.raises(ModelRetry, match='rejected after billing'):
+            await guard.wrap_model_request(_run_ctx(), request_context=request_context, handler=handler)
+
+        assert (await guard.status())[0].spent.requests == 1
+
     async def test_each_wrapper_invocation_accrues_only_new_provider_responses(self):
         snapshots: list[SpendSnapshot] = []
         guard = SpendLimits(
