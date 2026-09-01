@@ -208,6 +208,7 @@ class EagerState:
             return
         if len(code) > MAX_SCAN_CHARS:
             watch.halted = True
+            watch.queue.clear()
             return
         source_prefix = code[: code.rfind('\n') + 1]
         if source_prefix == watch.scanned_source:
