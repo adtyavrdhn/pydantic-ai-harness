@@ -1461,5 +1461,10 @@ class TestToolsetIdentity:
             'memory-team',
         ]
 
+        # The capability carries the scope too. A fixed `id` keeps durable-operation recovery stable
+        # across restarts, but one shared between two composed memories is what the run rejects.
+        assert [capability.id for capability in (you, team)] == ['memory-you', 'memory-team']
+        assert Memory(store=store).id == 'memory', 'the default scope keeps the id already journaled'
+
         # Registering both is the part that would be rejected if the ids still matched.
         Agent(TestModel(), capabilities=[you, team.prefix_tools('team')])

@@ -22,6 +22,7 @@ from pydantic_ai_harness.memory._toolset import (
     MemoryToolset,
     injection_listing_limit,
     list_subfiles,
+    memory_toolset_id,
     render_memory_prompt,
 )
 
@@ -103,8 +104,10 @@ class Memory(AbstractCapability[AgentDepsT]):
     """Whether store failures during automatic injection are ignored or raised."""
 
     # Override the inherited default ID because durable-operation recovery needs a stable identity.
+    # Derived per scope rather than fixed, in `__post_init__`: composed memories are separate
+    # capabilities on one agent, and one shared id makes the run reject them outright.
     _: KW_ONLY
-    id: str | None = 'memory'
+    id: str | None = None
 
     _resolved_scope: tuple[MemoryStore, str] | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -117,6 +120,13 @@ class Memory(AbstractCapability[AgentDepsT]):
         _validate_positive('max_search_files', self.max_search_files)
         if self.injection_errors not in ('ignore', 'raise'):
             raise ValueError("injection_errors must be 'ignore' or 'raise'")
+        if self.id is None:
+            # The scope is what tells two composed memories apart, and the toolset already keys on
+            # it, so the capability takes the same id. The default scope keeps the bare `memory` a
+            # durable deployment has already journaled operations under; a named scope moves to
+            # `memory-<agent_name>`, the same rename its workflow step name already takes and for
+            # the same reason.
+            self.id = memory_toolset_id(self.agent_name)
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> Memory[AgentDepsT]:
         """Return a clone with scope resolution isolated to this run."""
