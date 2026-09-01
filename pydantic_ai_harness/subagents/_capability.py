@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.agent import Agent, AgentRunResult, EventStreamHandler
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability, WrapRunHandler
+from pydantic_ai.capabilities.abstract import merge_capability_fields
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -162,6 +163,16 @@ class SubAgents(AbstractCapability[AgentDepsT]):
 
     tool_name: str = 'delegate_task'
     """Name of the delegate tool exposed to the model."""
+
+    _: KW_ONLY
+
+    id: str | None = 'sub_agents'
+    """One-off: an agent exposes a single delegate tool, so the id is fixed by default.
+
+    `tool_name` is one name, so two `SubAgents` capabilities register the same tool and collide.
+    Two of them resolve to one via
+    [`combine`][pydantic_ai.capabilities.AbstractCapability.combine], which unions their rosters.
+    """
 
     tool_retries: int | None = 2
     """Retries for the delegate tool -- how many extra attempts it gets after a
@@ -338,3 +349,15 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     def get_serialization_name(cls) -> str | None:
         """Not spec-serializable -- the capability holds live `Agent` instances."""
         return None
+
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """Rosters accumulate: an agent both sides can reach stays reachable.
+
+        A packaged harness that delegates carries its own `SubAgents`, so composing two of them --
+        `Coder()` beside `Researcher()` -- brings two. Keeping only one would silently drop a
+        harness's delegates; keeping both registers `delegate_task` twice and fails on the name.
+        The merge unions `agents` instead, so one delegate tool lists every sub-agent, and a name
+        defined on both sides resolves to the later.
+        """
+        return merge_capability_fields(capabilities)

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import copy
 from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import Literal
 
 from pydantic_ai.agent.abstract import AgentInstructions
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
+from pydantic_ai.capabilities.abstract import merge_capability_fields
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelRequestPart, TextContent, UserPromptPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -346,6 +347,17 @@ class Memory(AbstractCapability[AgentDepsT]):
     def get_serialization_name(cls) -> str | None:
         """Return the name used by custom capability specs."""
         return 'Memory'
+
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """One memory configuration per agent: the merged one is what the run uses.
+
+        Its toolset registers fixed tool names under a fixed toolset `id`, so two `Memory`
+        capabilities could never coexist anyway -- they collided on `write_memory` long before
+        ids entered the picture. Merging makes two bundles that each carry a default `Memory`
+        compose, and a `store` stated on both takes the later.
+        """
+        return merge_capability_fields(capabilities)
 
 
 def _validate_positive(name: str, value: int) -> None:

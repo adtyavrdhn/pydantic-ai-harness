@@ -386,11 +386,17 @@ class TestAdvisor:
         with pytest.raises(UserError, match=f'requires a {required_provider} executor'):
             await agent.run('Review this.')
 
-    async def test_rejects_duplicate_capability_or_tool_name(self) -> None:
+    async def test_combines_duplicates_and_rejects_a_conflicting_tool_name(self) -> None:
         model = FunctionModel(lambda _messages, _info: ModelResponse(parts=[TextPart('done')]))
 
-        with pytest.raises(UserError, match="Capability id 'advisor' is used by multiple capabilities"):
-            Agent(model, capabilities=[Advisor(model), Advisor(model)])
+        # An agent has one advisor, so two resolve to one rather than colliding -- which is what
+        # lets two packaged harnesses that each carry an `Advisor` compose.
+        agent = Agent(model, capabilities=[Advisor(model, max_tokens=2048), Advisor(model, max_tokens=4096)])
+        await agent.run('Review this.')
+
+        # Naming them apart is how you keep both, and that still conflicts on the tool name.
+        with pytest.raises(UserError, match='tool whose name conflicts'):
+            await Agent(model, capabilities=[Advisor(model), Advisor(model, id='second')]).run('Review this.')
 
         def advisor(prompt: str) -> str:  # pragma: no cover
             return prompt
