@@ -11,6 +11,8 @@ consume `ctx.sandbox` for the model-facing interface you want.
 
 [Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/daytona_sandbox/)
 
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
+
 ## Install and authenticate
 
 ```bash
@@ -47,11 +49,13 @@ retry first reconnects by that name. If creation races, a failed create is
 followed by one reconnect to the winner. The serialized `SandboxRef` contains the
 provider and sandbox ID; later workers reconnect by ID and never create from
 `get_sandbox`. Acquisition closes its SDK client after recording the ref, and
-release opens a fresh client, resolves the sandbox by ID without starting it, deletes it, and closes the client again.
+release opens a fresh client, resolves the sandbox by ID without starting it,
+deletes it, and closes the client again.
 
 An already missing sandbox counts as successfully released. Unexpected delete or
-client-close failures are surfaced. `auto_stop_minutes` is an idle backstop, not
-a substitute for release.
+client-close failures are surfaced. Owned sandboxes use `auto_stop_minutes`
+together with Daytona's immediate delete-after-stop setting as the server-side
+backstop for cancellation during creation and other abandoned lifecycles.
 
 Attach to a sandbox managed elsewhere by ID or name when the capability must not
 own its lifetime:
@@ -90,10 +94,12 @@ never provisions a replacement.
 
 Daytona process sessions provide separate stdout and stderr callbacks. The
 backend preserves that separation and joins each stream once when the complete
-result is requested. Command setup, log collection, and the final exit-status RPC
-share one absolute deadline. Timeout or caller cancellation attempts to delete
-the remote process session before returning. If deletion fails, the backend
-retains the session identity so `close(terminate=False)` can retry it.
+result is requested. Log collection and the final exit-status RPC use one deadline
+measured from `start()`. A command deadline raises
+`pydantic_ai.sandboxes.SandboxTimeoutError` with the stdout and stderr collected
+before expiry. Timeout or caller cancellation attempts to delete the remote
+process session before returning. A failed best-effort deletion does not replace
+the command's original outcome; the sandbox lifetime remains the cleanup backstop.
 
 Complete command output is buffered in memory. The backend does not add a second
 presentation policy or claim that transport is bounded. Model-facing tools should
@@ -103,10 +109,15 @@ output should bound it at the source.
 The public error surface is deliberately narrow:
 
 - `DaytonaSandboxError` for provider operations that fail.
-- `DaytonaSandboxTerminalError` as the catchable base for failures a retry cannot fix.
-- `DaytonaSandboxAuthError` when credentials are rejected.
-- `DaytonaSandboxUnavailableError` when the referenced sandbox is missing.
-- `DaytonaSandboxCommandTimeoutError` for command deadlines, also a built-in `TimeoutError`.
+- `DaytonaSandboxAuthError` when credentials are rejected, also a
+  `pydantic_ai.sandboxes.SandboxUnavailableError`.
+- `DaytonaSandboxUnavailableError` when the referenced sandbox is missing, also a
+  `pydantic_ai.sandboxes.SandboxUnavailableError`.
+- `pydantic_ai.sandboxes.SandboxTimeoutError` for command deadlines, with the partial
+  `stdout`, `stderr`, and enforced `timeout`.
+
+Sandbox creation, connection, and process-session setup timeouts are provider
+operation failures, not command deadlines, and raise `DaytonaSandboxError`.
 
 Filesystem misses use the built-in `FileNotFoundError` contract.
 
