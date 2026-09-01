@@ -34,6 +34,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, Instrumentation, WrapModelRequestHandler
 from pydantic_ai.exceptions import ModelRetry, SkipModelRequest, UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserPromptPart
@@ -301,7 +302,16 @@ class InputGuardrail(AbstractCapability[AgentDepsT]):
                 if not task.done():
                     task.cancel()
 
-            await asyncio.gather(guard_task, handler_task, return_exceptions=True)
+            # Run cancellation (`cancel_run()`, `anyio.fail_after`) can land here with an
+            # enclosing anyio scope already cancelled, and that scope re-cancels its tasks on
+            # every event-loop cycle -- each delivery either aborts the drain below outright
+            # (abandoning the guard and handler tasks mid-unwind) or is forwarded through the
+            # `gather` into both tasks, breaking any await their cleanup performs. Shield the
+            # drain so both tasks fully unwind before the cancellation propagates. The shield
+            # holds for anyio-scope cancellation; a raw second `Task.cancel()` can still
+            # pierce it.
+            with anyio.CancelScope(shield=True):
+                await asyncio.gather(guard_task, handler_task, return_exceptions=True)
 
 
 @dataclass
