@@ -1062,7 +1062,7 @@ class TestInjection:
             assert '- version two' in captured[0][0]
             _assert_history_memory_count(continued.all_messages(), released_core=1)
 
-    async def test_compaction_does_not_persist_request_only_memory_context(self) -> None:
+    async def test_compaction_does_not_persist_request_only_memory_context(self) -> None:  # pragma: lax no cover
         if not hasattr(ModelRequestContext, 'usage_responses'):
             pytest.skip('requires independent request history from pydantic-ai#7053')
         store = InMemoryStore()
@@ -1087,7 +1087,7 @@ class TestInjection:
         assert '- fresh fact' in captured[0][0]
         assert _memory_contexts(result.all_messages()) == []
 
-    async def test_compaction_can_drop_request_only_memory_with_all_messages(self) -> None:
+    async def test_compaction_can_drop_request_only_memory_with_all_messages(self) -> None:  # pragma: lax no cover
         if not hasattr(ModelRequestContext, 'usage_responses'):
             pytest.skip('requires independent request history from pydantic-ai#7053')
         store = InMemoryStore()
