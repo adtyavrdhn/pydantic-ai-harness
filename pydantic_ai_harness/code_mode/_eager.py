@@ -43,11 +43,20 @@ class _EagerPart:
     consumed: int = 0
     """Top-level statements handed to the feed pump so far."""
 
-    scanned_newlines: int = -1
-    """Newline count at the last scan; statements only close on line boundaries.
+    scanned_source: str | None = None
+    """The exact completed-lines prefix the last scan parsed.
 
-    Starts at -1 so the first scan runs even for zero-newline code: 0 completed lines is a
-    real observation, distinct from never having scanned.
+    Statements only close on line boundaries, so a delta that changes nothing before the
+    final newline cannot change the parse and is skipped. Comparing the parse input itself
+    (rather than a newline count) also covers dict-delta streams, where a provider can
+    replace the whole `code` value without growing it.
+    """
+
+    halted: bool = False
+    """No further statements will be fed (a `restart` request was seen in the arguments).
+
+    Statements already fed cannot be unfed; halting bounds the damage. The dispatch handles
+    a restarted part by resetting the session and running the full snippet.
     """
 
     fed_line_count: int = 0
@@ -84,6 +93,21 @@ class EagerState:
 
     _parts: dict[str, _EagerPart] = field(default_factory=dict[str, '_EagerPart'], init=False)
     _toolset: CodeModeToolset[Any] | None = field(default=None, init=False)
+    _pumps: set[asyncio.Task[None]] = field(default_factory=set['asyncio.Task[None]'], init=False)
+    """Every live pump task, including ones whose part was already popped for execution.
+
+    `close()` cancels these; tracking them separately from `_parts` matters because an
+    executing `run_code` removes its watch before the pump necessarily finishes.
+    """
+
+    feed_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    """Serializes fragment feeds run-wide, matching the dispatch path's scheduling.
+
+    One pump exists per streamed part, but a response can stream several `run_code` parts;
+    without the lock their fragments would interleave against the single live session even
+    when the run is configured for sequential tool execution. The eager dispatch's tail
+    feed holds it too, so a later part's pump cannot overlap an earlier part's completion.
+    """
 
     def bind(self, toolset: CodeModeToolset[Any]) -> None:
         """Attach the owning toolset; feeds go through its `run_code` pipeline."""
@@ -133,16 +157,32 @@ class EagerState:
             return code if isinstance(code, str) else None
         return decode_partial_code(watch.args_text)
 
+    def _restart_requested(self, watch: _EagerPart) -> bool:
+        """Whether the streamed arguments show a `restart` request so far.
+
+        The key can stream after the code, in which case the prefix has already run by the
+        time it appears; that residue is documented on the `eager` flag. Checking the raw
+        text means a snippet that merely mentions the key in a string also halts feeding,
+        which costs eagerness, never correctness.
+        """
+        if watch.args_dict is not None:
+            return bool(watch.args_dict.get('restart'))
+        return '"restart"' in watch.args_text
+
     def _scan(self, watch: _EagerPart, ctx: RunContext[Any]) -> None:
         """Re-parse the streamed code and enqueue any statements that newly closed."""
+        if watch.halted:
+            return
+        if self._restart_requested(watch):
+            watch.halted = True
+            return
         code = self._current_code(watch)
         if code is None:
             return
-        newlines = code.count('\n')
-        if newlines == watch.scanned_newlines:
-            # Statements only close on completed lines; skip re-parsing mid-line deltas.
+        source_prefix = code[: code.rfind('\n') + 1]
+        if source_prefix == watch.scanned_source:
             return
-        watch.scanned_newlines = newlines
+        watch.scanned_source = source_prefix
         fresh, watch.consumed = closed_statements(code, watch.consumed)
         # Each queued source is a contiguous line slice from the end of the previous
         # statement, so comments and blank lines between statements feed with them and the
@@ -158,6 +198,8 @@ class EagerState:
         # always means an empty queue, and a live one will drain what was just added.
         if watch.queue and (watch.pump is None or watch.pump.done()):
             watch.pump = asyncio.create_task(self._run_pump(watch, ctx))
+            self._pumps.add(watch.pump)
+            watch.pump.add_done_callback(self._pumps.discard)
 
     async def _run_pump(self, watch: _EagerPart, ctx: RunContext[Any]) -> None:
         """Feed queued statements one at a time; an error stops the part for good."""
@@ -169,7 +211,8 @@ class EagerState:
             watch.feed_count += 1
             feed_ctx = replace(ctx, tool_call_id=f'{watch.tool_call_id}~e{watch.feed_count}', tool_name='run_code')
             try:
-                await toolset.feed_eager_fragment(watch, source, feed_ctx)
+                async with self.feed_lock:
+                    await toolset.feed_eager_fragment(watch, source, feed_ctx)
             except Exception as e:  # cancellation propagates; everything else is held for the dispatch
                 watch.error = e
                 watch.queue.clear()
@@ -185,7 +228,9 @@ class EagerState:
         watch = self._parts.pop(tool_call_id, None)
         if watch is not None:
             return watch
-        rekeyed = next((pid for pid, c in self._parts.items() if code.startswith(c.fed_prefix)), None)
+        # An empty executed prefix matches any code; requiring one keeps an unrelated
+        # just-started part from being adopted (and then executed twice).
+        rekeyed = next((pid for pid, c in self._parts.items() if c.fed_prefix and code.startswith(c.fed_prefix)), None)
         return self._parts.pop(rekeyed) if rekeyed is not None else None
 
     async def drain(self, watch: _EagerPart) -> None:
@@ -199,12 +244,17 @@ class EagerState:
             await watch.pump
 
     async def close(self) -> None:
-        """Cancel pumps and drop all watches at run end."""
-        parts, self._parts = list(self._parts.values()), {}
-        for watch in parts:
-            pump = watch.pump
-            if pump is None or pump.done():
-                continue
+        """Cancel every live pump and drop all watches at run end.
+
+        Pumps are cancelled from the task set rather than the watches: a part that reached
+        execution was already popped from `_parts`, but its pump may still be feeding when
+        the run fails, and an abandoned fragment must not keep invoking tools.
+        """
+        self._parts.clear()
+        pumps, self._pumps = list(self._pumps), set()
+        for pump in pumps:
+            # The done-callback prunes finished pumps, so these are live; `cancel` on one
+            # that finished in the meantime is a no-op and the await returns immediately.
             pump.cancel()
             try:
                 await pump

@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import types
 from collections.abc import AsyncIterator, Sequence
+from itertools import zip_longest
 
 import pytest
 from pydantic_ai import Agent, RunContext, Tool
@@ -22,6 +24,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     PartDeltaEvent,
     PartStartEvent,
+    RetryPromptPart,
     ToolCallPart,
     ToolCallPartDelta,
     ToolReturnPart,
@@ -361,13 +364,15 @@ class TestEagerExecution:
 
         TemporalDurability.__module__ = 'pydantic_ai.durable_exec.temporal'
         calls: list[str] = []
+        stream_finished = asyncio.Event()
 
         def search(query: str) -> str:
-            """Return a canned result."""
+            """Return a canned result, refusing to run before the stream completes."""
+            assert stream_finished.is_set(), 'search executed before the model stream completed'
             calls.append(query)
             return f'result:{query}'
 
-        code = 'a = await search(query="alpha")\nprint(a)\n"ok"'
+        code = 'a = await search(query="alpha")\nb = 1\nprint(a)\n"ok"'
 
         async def stream_code(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
             if _prior_run_code_calls(messages):
@@ -377,6 +382,7 @@ class TestEagerExecution:
             for chunk in _stream_json_args(code):
                 yield {1: DeltaToolCall(json_args=chunk)}
                 await asyncio.sleep(0)
+            stream_finished.set()
 
         capability = CodeMode[None](eager=True)
         agent: Agent[None, str] = Agent(
@@ -441,3 +447,405 @@ class TestEagerExecution:
                 pass
             await asyncio.wait_for(started.wait(), timeout=5)
             await toolset.eager.close()
+
+
+class TestEagerHardening:
+    """Pins for the streaming pipeline's guard rails: budgets, ordering, lifecycle, scanner edges."""
+
+    async def test_call_budget_spans_fragments_and_tail(self):
+        """`max_tool_calls` bounds the whole `run_code` call, not each eager fragment."""
+        calls: list[str] = []
+
+        def search(query: str) -> str:
+            """Return a canned result."""
+            calls.append(query)
+            return f'result:{query}'
+
+        greedy = 'a = await search(query="alpha")\nb = await search(query="beta")\nprint(a)\n"x"'
+        frugal = '"recovered"'
+
+        async def stream_attempts(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            prior = _prior_run_code_calls(messages)
+            if prior >= 2:
+                yield 'done'
+                return
+            yield {1: DeltaToolCall(name='run_code')}
+            for chunk in _stream_json_args(greedy if prior == 0 else frugal):
+                yield {1: DeltaToolCall(json_args=chunk)}
+                await asyncio.sleep(0)
+
+        capability = CodeMode[None](eager=True, max_tool_calls=1)
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_attempts),
+            deps_type=type(None),
+            capabilities=[capability],
+        )
+        agent.tool_plain(search)
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert calls == ['alpha']
+
+    async def test_semicolon_line_keeps_the_final_expression(self):
+        """Statements sharing a line never feed early; the final expression survives."""
+        calls: list[str] = []
+
+        def charge(x: int) -> int:
+            """Return the charge."""
+            calls.append(str(x))
+            return x
+
+        # The semicolon line is followed by more lines, so the scanner sees its statements
+        # close; feeding any of them would drag the whole line (and the call) along.
+        code = 'q = 1; pre = await charge(x=1); mid = 3\nfinal = 2\nprint(final)\n"ok"'
+
+        async def stream_code(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _prior_run_code_calls(messages):
+                yield 'done'
+                return
+            yield {1: DeltaToolCall(name='run_code')}
+            for chunk in _stream_json_args(code):
+                yield {1: DeltaToolCall(json_args=chunk)}
+                await asyncio.sleep(0)
+
+        capability = CodeMode[None](eager=True)
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_code),
+            deps_type=type(None),
+            capabilities=[capability],
+        )
+        agent.tool_plain(charge)
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert calls == ['1']
+        content = _run_code_return_content(result.all_messages())
+        assert content == {'output': '2\n', 'result': 'ok'}
+
+    async def test_restart_streamed_before_code_feeds_nothing(self):
+        """A `restart` key seen in the arguments halts feeding before any statement runs."""
+        calls: list[str] = []
+
+        def search(query: str) -> str:
+            """Return a canned result."""
+            calls.append(query)
+            return f'result:{query}'
+
+        code = 'a = await search(query="alpha")\nprint(a)\n"ok"'
+
+        async def stream_restart(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _prior_run_code_calls(messages):
+                yield 'done'
+                return
+            args = json.dumps({'restart': True, 'code': code})
+            yield {1: DeltaToolCall(name='run_code')}
+            for offset in range(0, len(args), 16):
+                yield {1: DeltaToolCall(json_args=args[offset : offset + 16])}
+                await asyncio.sleep(0)
+
+        capability = CodeMode[None](eager=True)
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_restart),
+            deps_type=type(None),
+            capabilities=[capability],
+        )
+        agent.tool_plain(search)
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        # Only the dispatch ran the snippet; nothing fed during streaming.
+        assert calls == ['alpha']
+
+    async def test_two_streamed_parts_never_execute_concurrently(self):
+        """Fragments and tails from different `run_code` parts serialize against the session."""
+        depth = 0
+        max_depth = 0
+
+        async def probe(q: str) -> str:
+            """Track concurrent executions."""
+            nonlocal depth, max_depth
+            depth += 1
+            max_depth = max(max_depth, depth)
+            await asyncio.sleep(0.01)
+            depth -= 1
+            return q
+
+        def snippet(tag: str) -> str:
+            return f'a = await probe(q="{tag}")\nb = 1\nprint(b)\n"{tag}"'
+
+        async def stream_two(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _prior_run_code_calls(messages):
+                yield 'done'
+                return
+            one = _stream_json_args(snippet('one'))
+            two = _stream_json_args(snippet('two'))
+            yield {1: DeltaToolCall(name='run_code'), 2: DeltaToolCall(name='run_code')}
+            for chunk_one, chunk_two in zip_longest(one, two, fillvalue=''):
+                yield {1: DeltaToolCall(json_args=chunk_one), 2: DeltaToolCall(json_args=chunk_two)}
+                await asyncio.sleep(0)
+
+        capability = CodeMode[None](eager=True)
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_two),
+            deps_type=type(None),
+            capabilities=[capability],
+        )
+        agent.tool_plain(probe)
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert max_depth == 1
+
+    async def test_dict_replacement_rescans_and_null_bytes_are_inert(self):
+        """A dict delta that rewrites `code` re-scans; NUL bytes defer to the dispatch."""
+        calls: list[str] = []
+
+        async def probe(q: str) -> str:
+            """Record the call."""
+            calls.append(q)
+            return q
+
+        ctx = build_run_context(None)
+        ctx.tool_manager = None
+        capability = CodeMode[None](eager=True)
+        run_capability = await capability.for_run(ctx)
+        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[Tool(probe)]))
+        assert isinstance(toolset, CodeModeToolset)
+        eager = toolset.eager
+        assert eager is not None
+        await toolset.get_tools(ctx)
+
+        stream_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
+        stream_ctx.tool_manager = await ToolManager(toolset=toolset).for_run_step(stream_ctx)
+        async with toolset:
+            # v1 does not parse (open bracket); v2 replaces the code with the same newline
+            # count, which a newline-counting gate would skip.
+            await eager.observe(
+                PartStartEvent(
+                    index=0,
+                    part=ToolCallPart(tool_name='run_code', args={'code': 'a = (\nz = 1\n'}, tool_call_id='c1'),
+                ),
+                stream_ctx,
+            )
+            fixed = 'a = await probe(q="r")\nz = 1\n'
+            await eager.observe(
+                PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': fixed}, tool_call_id='c1')),
+                stream_ctx,
+            )
+            taken = eager.pop_watch('c1', fixed)
+            assert taken is not None
+            await eager.drain(taken)
+            assert calls == ['r']
+
+            # NUL bytes make `ast.parse` raise `ValueError`; the watcher must stay inert.
+            await eager.observe(
+                PartStartEvent(
+                    index=1,
+                    part=ToolCallPart(
+                        tool_name='run_code', args={'code': 'x = "a"\x00\nprint(x)\n'}, tool_call_id='c2'
+                    ),
+                ),
+                stream_ctx,
+            )
+            assert eager.pop_watch('c2', 'anything') is not None
+
+    async def test_rekey_fallback_ignores_unfed_parts(self):
+        """A part that fed nothing is never adopted by an unrelated execution."""
+        ctx = build_run_context(None)
+        capability = CodeMode[None](eager=True)
+        run_capability = await capability.for_run(ctx)
+        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[]))
+        assert isinstance(toolset, CodeModeToolset)
+        eager = toolset.eager
+        assert eager is not None
+
+        await eager.observe(
+            PartStartEvent(
+                index=0, part=ToolCallPart(tool_name='run_code', args={'code': 'solo = 1'}, tool_call_id='c1')
+            ),
+            ctx,
+        )
+        assert eager.pop_watch('rewritten-id', 'entirely different program') is None
+        assert eager.pop_watch('c1', 'solo = 1') is not None
+
+    async def test_run_error_cancels_an_executing_parts_pump(self):
+        """A pump whose part already reached execution is still cancelled on run failure."""
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def slow(query: str) -> str:
+            """Wait until released."""
+            started.set()
+            await release.wait()
+            return query  # pragma: no cover - cancelled before completion
+
+        ctx = build_run_context(None)
+        ctx.tool_manager = None
+        capability = CodeMode[None](eager=True)
+        run_capability = await capability.for_run(ctx)
+        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[Tool(slow)]))
+        assert isinstance(toolset, CodeModeToolset)
+        assert toolset.eager is not None
+        await toolset.get_tools(ctx)
+
+        code = 'a = await slow(query="x")\nb = 1\nprint(b)'
+        stream_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
+        stream_ctx.tool_manager = await ToolManager(toolset=toolset).for_run_step(stream_ctx)
+        async with toolset:
+            events = [
+                PartStartEvent(
+                    index=0,
+                    part=ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='c1'),
+                ),
+            ]
+            async for _ in run_capability.wrap_run_event_stream(stream_ctx, stream=_plain_stream(events)):
+                pass
+            await asyncio.wait_for(started.wait(), timeout=5)
+            # The dispatch popped the part; the run then fails while the pump is mid-feed.
+            taken = toolset.eager.pop_watch('c1', code)
+            assert taken is not None and taken.pump is not None
+            with pytest.raises(RuntimeError, match='boom'):
+                await run_capability.on_run_error(ctx, error=RuntimeError('boom'))
+            assert taken.pump.done()
+
+    async def test_non_asyncio_backend_leaves_watcher_inactive(self, monkeypatch: pytest.MonkeyPatch):
+        """Without an asyncio loop (Trio), the stream passes through unwatched."""
+
+        def no_loop() -> None:
+            raise RuntimeError('no running event loop')
+
+        monkeypatch.setattr(
+            'pydantic_ai_harness.code_mode._capability.asyncio', types.SimpleNamespace(get_running_loop=no_loop)
+        )
+        ctx = build_run_context(None)
+        capability = CodeMode[None](eager=True)
+        run_capability = await capability.for_run(ctx)
+        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[]))
+        assert isinstance(toolset, CodeModeToolset)
+        assert toolset.eager is not None
+
+        events = [
+            PartStartEvent(
+                index=0,
+                part=ToolCallPart(tool_name='run_code', args={'code': 'x = 1\ny = 2\nprint(x)'}, tool_call_id='c1'),
+            ),
+        ]
+        seen = [event async for event in run_capability.wrap_run_event_stream(ctx, stream=_plain_stream(events))]
+        assert len(seen) == 1
+        assert toolset.eager.pop_watch('c1', 'x = 1\ny = 2\nprint(x)') is None
+
+    async def test_fragment_output_is_capped(self, monkeypatch: pytest.MonkeyPatch):
+        """Accumulated fragment prints stop growing at the cap instead of filling host memory."""
+        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset._EAGER_OUTPUT_CAP', 8)
+        code = 'print("aaaaaaaaaa")\nprint("bbbbbbbbbb")\nprint("cc")\n"ok"'
+
+        async def stream_code(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _prior_run_code_calls(messages):
+                yield 'done'
+                return
+            yield {1: DeltaToolCall(name='run_code')}
+            for chunk in _stream_json_args(code):
+                yield {1: DeltaToolCall(json_args=chunk)}
+                await asyncio.sleep(0)
+
+        capability = CodeMode[None](eager=True)
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_code),
+            deps_type=type(None),
+            capabilities=[capability],
+        )
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        content = _run_code_return_content(result.all_messages())
+        assert isinstance(content, dict)
+        output: object = content.get('output')  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType]
+        assert isinstance(output, str) and '[eager output truncated]' in output
+
+    async def test_failed_fragment_retry_carries_prior_output(self):
+        """Prints from fragments that succeeded before the failure reach the retry message."""
+        attempts: list[str] = []
+
+        async def stream_attempts(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            prior = _prior_run_code_calls(messages)
+            if prior >= 2:
+                yield 'done'
+                return
+            code = 'print("diagnostic")\nboom = 1 // 0\nx = 1\n"x"' if prior == 0 else '"recovered"'
+            attempts.append(code)
+            yield {1: DeltaToolCall(name='run_code')}
+            for chunk in _stream_json_args(code):
+                yield {1: DeltaToolCall(json_args=chunk)}
+                await asyncio.sleep(0)
+
+        capability = CodeMode[None](eager=True)
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_attempts),
+            deps_type=type(None),
+            capabilities=[capability],
+        )
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert len(attempts) == 2
+        retry_texts = [
+            p.model_response()
+            for m in result.all_messages()
+            for p in getattr(m, 'parts', [])
+            if isinstance(p, RetryPromptPart)
+        ]
+        assert any('[stdout before error]' in t and 'diagnostic' in t for t in retry_texts)
+
+    async def test_step_rebind_feeds_through_the_new_wrapper(self):
+        """After `for_run_step` swaps the wrapped toolset, fragments see the new tools."""
+        calls: list[str] = []
+
+        async def probe(q: str) -> str:
+            """Record the call."""
+            calls.append(q)
+            return q
+
+        class _StepSwap(FunctionToolset[None]):
+            swap_to: FunctionToolset[None] | None = None
+
+            async def for_run_step(self, ctx: RunContext[None]) -> FunctionToolset[None]:
+                return self.swap_to if self.swap_to is not None else self
+
+        base = _StepSwap(tools=[])
+        base.swap_to = FunctionToolset[None](tools=[Tool(probe)])
+
+        ctx = build_run_context(None)
+        ctx.tool_manager = None
+        capability = CodeMode[None](eager=True)
+        run_capability = await capability.for_run(ctx)
+        toolset = run_capability.get_wrapper_toolset(base)
+        assert isinstance(toolset, CodeModeToolset)
+        assert toolset.eager is not None
+
+        stream_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
+        async with toolset:
+            stepped = await toolset.for_run_step(stream_ctx)
+            assert isinstance(stepped, CodeModeToolset)
+            stream_ctx.tool_manager = await ToolManager(toolset=stepped).for_run_step(stream_ctx)
+            await stepped.get_tools(stream_ctx)
+            code = 'a = await probe(q="s")\nz = 1\nprint(z)'
+            events = [
+                PartStartEvent(
+                    index=0,
+                    part=ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='c1'),
+                ),
+            ]
+            async for _ in run_capability.wrap_run_event_stream(stream_ctx, stream=_plain_stream(events)):
+                pass
+            assert stepped.eager is not None
+            taken = stepped.eager.pop_watch('c1', code)
+            assert taken is not None
+            await stepped.eager.drain(taken)
+            assert taken.error is None
+            assert calls == ['s']

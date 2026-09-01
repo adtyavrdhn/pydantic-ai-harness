@@ -237,13 +237,30 @@ agent = Agent(
 
 A statement that fails mid-stream leaves the session exactly as a failed snippet does
 today: assignments made before the failing line persist, and the error surfaces as the
-`run_code` result for the model to retry against. `restart: true` discards the executed
-prefix along with the rest of the session. If the code submitted at execution no longer
-matches the prefix that already ran (a provider rewriting the part mid-stream), the
-session resets and the model is asked to resend the snippet.
+`run_code` result for the model to retry against (prints from statements that succeeded
+earlier are included). `restart: true` discards the executed prefix along with the rest
+of the session. If the code submitted at execution no longer matches the prefix that
+already ran (a provider rewriting the part mid-stream), the session resets and the model
+is asked to resend the snippet.
 
-Enabling `eager` puts runs in streaming mode. Under Temporal durable execution the
-option is inactive: statements only run when the completed tool call executes.
+Budgets span the whole call: `max_tool_calls` counts nested calls across the streamed
+prefix and the dispatched remainder together, and fragments from concurrently streamed
+`run_code` parts execute one at a time against the session.
+
+Two consequences of running before the call completes:
+
+- Statements execute before the completed `run_code` call reaches `before_tool_execute`
+  hooks, so a guard capability that would block, rewrite, or defer `run_code` for
+  approval is applied only to the dispatch, after the streamed prefix already ran. Do not
+  enable `eager` on runs that gate `run_code` behind such a guard.
+- A `restart: true` call re-executes the full snippet on a fresh session. The watcher
+  stops feeding as soon as `restart` appears in the streamed arguments, but statements
+  fed before the key streams have already run once, so their side effects repeat.
+
+Enabling `eager` puts runs in streaming mode. It requires the asyncio event loop; on
+other async backends (Trio) the watcher stays inactive and `run_code` executes normally
+at dispatch. Under Temporal durable execution the option is likewise inactive:
+statements only run when the completed tool call executes.
 
 ## Temporal durability
 

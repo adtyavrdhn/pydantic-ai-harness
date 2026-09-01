@@ -501,6 +501,14 @@ class _RunCodeTool(ToolsetTool[AgentDepsT]):
     """The wrapped toolset's tools, keyed by original name."""
 
 
+_EAGER_OUTPUT_CAP = 1 << 20
+"""Total print output (bytes of text) retained across one part's eager fragment feeds.
+
+Each feed's capture is bounded inside the sandbox, but a snippet can close arbitrarily many
+statements; this bounds what the host accumulates for the final `run_code` return.
+"""
+
+
 @dataclass
 class CodeModeToolset(WrapperToolset[AgentDepsT]):
     """Implementation toolset for the `CodeMode` capability.
@@ -599,6 +607,10 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         new_self._run_state = self._run_state
         new_self._warned_deferred = self._warned_deferred
         new_self._last_catalog = self._last_catalog
+        if new_self.eager is not None:
+            # Rebind so fragments fed this step see the step's toolset: tools revealed by a
+            # discovery would otherwise be rejected by feeds while the dispatch accepts them.
+            new_self.eager.bind(new_self)
         return new_self
 
     async def __aenter__(self) -> Self:
@@ -765,9 +777,20 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             return await self._call_tool_impl(name, tool_args, ctx, tool)
         assert isinstance(code, str), '`pop_watch` only runs for string code'
         if restart:
-            # The model asked for a fresh REPL; the reset discards the pumped prefix too.
-            return await self._call_tool_impl(name, tool_args, ctx, tool)
+            # The model asked for a fresh REPL; the reset discards the pumped prefix too. Any
+            # side effects the fed prefix produced have already landed and run again with the
+            # full snippet -- the watcher halts feeding when it sees `restart` in the streamed
+            # arguments, but a key that streams after the code arrives too late to help.
+            async with self.eager.feed_lock:
+                return await self._call_tool_impl(name, tool_args, ctx, tool)
         if part.error is not None:
+            if part.output and isinstance(part.error, ModelRetry):
+                # Fragments that succeeded before the failure printed diagnostics the model
+                # asked for; the retry must carry them or the print was wasted.
+                raise ModelRetry(
+                    f'[stdout before error]\n{part.output.rstrip(chr(10))}\n[/stdout before error]\n'
+                    f'{part.error.message}'
+                ) from part.error
             raise part.error
         lines = code.split('\n')
         if '\n'.join(lines[: part.fed_line_count]) != part.fed_prefix:
@@ -779,14 +802,18 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 'so the session was restarted. Send the snippet again.'
             )
         tail = '\n'.join(lines[part.fed_line_count :])
-        return await self._call_tool_impl(
-            name,
-            {'code': tail},
-            ctx,
-            tool,
-            prior_output=part.output,
-            prior_nested=(part.nested_calls, part.nested_returns),
-        )
+        # The same lock the pump holds per fragment: a later part's pump must not interleave
+        # with this part's completion against the one live session.
+        async with self.eager.feed_lock:
+            return await self._call_tool_impl(
+                name,
+                {'code': tail},
+                ctx,
+                tool,
+                prior_output=part.output,
+                prior_nested=(part.nested_calls, part.nested_returns),
+                prior_calls=len(part.nested_calls),
+            )
 
     async def feed_eager_fragment(self, part: _EagerPart, source: str, ctx: RunContext[AgentDepsT]) -> None:
         """Feed one closed statement into the session, accumulating its observable effects.
@@ -799,13 +826,23 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         tools = await self.get_tools(ctx)
         run_code_tool = tools['run_code']
         assert isinstance(run_code_tool, _RunCodeTool)
-        result = await self._call_tool_impl('run_code', {'code': source + '\nNone'}, ctx, run_code_tool)
+        result = await self._call_tool_impl(
+            'run_code',
+            {'code': source + '\nNone'},
+            ctx,
+            run_code_tool,
+            prior_calls=len(part.nested_calls),
+        )
         assert isinstance(result, ToolReturn)
         value = result.return_value
         assert isinstance(value, dict), 'the pinned `None` result makes the fragment return a dict'
         output = value.get('output')  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType]
-        if isinstance(output, str):
+        if isinstance(output, str) and len(part.output) < _EAGER_OUTPUT_CAP:
+            # Each feed's capture is bounded by the sandbox, but the feeds accumulate here on
+            # the host; without a total cap a statement-per-print snippet grows without limit.
             part.output += output
+            if len(part.output) >= _EAGER_OUTPUT_CAP:
+                part.output = part.output[:_EAGER_OUTPUT_CAP] + '\n[eager output truncated]\n'
         metadata: Any = result.metadata
         assert metadata is not None, 'run_code always attaches code_mode metadata'
         fragment_calls: dict[str, ToolCallPart] = metadata['tool_calls']
@@ -821,6 +858,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         tool: ToolsetTool[AgentDepsT],
         prior_output: str = '',
         prior_nested: tuple[dict[str, ToolCallPart], dict[str, ToolReturnPart]] | None = None,
+        prior_calls: int = 0,
     ) -> Any:
         if not isinstance(tool, _RunCodeTool):
             # Native (non-sandboxed) tool -- pass through to the wrapped toolset.
@@ -867,7 +905,9 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         # execution the pumped prefix's records seed the maps.
         nested_calls: dict[str, ToolCallPart] = dict(prior_nested[0]) if prior_nested is not None else {}
         nested_returns: dict[str, ToolReturnPart] = dict(prior_nested[1]) if prior_nested is not None else {}
-        call_counter = 0
+        # Under eager execution the snippet runs as several feeds; `prior_calls` carries the
+        # running total so `max_tool_calls` bounds the whole `run_code` call, not each feed.
+        call_counter = prior_calls
         budget_exhausted = False
 
         def dispatch_tool_call(sandbox_name: str, kwargs: dict[str, Any]) -> Coroutine[Any, Any, Any]:
