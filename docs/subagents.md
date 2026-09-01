@@ -157,7 +157,7 @@ orchestrator = Agent(
 )
 ```
 
-`agent_folders` controls where definitions come from. Left unset, the conventional `'agents'` layout applies only when no explicit `agents` are passed: an explicit list means you are composing a known roster, so nothing is pulled from disk. To combine both sources, set the option explicitly:
+`agent_folders` controls where definitions come from. Left unset, the conventional `'agents'` layout applies only when `agents` is also unset: an explicit sequence, including an empty one, means you are composing a known roster, so nothing is pulled from disk. To combine both sources, set the option explicitly:
 
 - A folder-name `str` (`'agents'` is the conventional layout): for the project root (cwd) then the home root, load from `<root>/.agents/<name>/`, falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
 - A sequence of paths loads from exactly those folders, in order.
@@ -223,9 +223,9 @@ When the same name appears in more than one source, the higher-precedence one wi
 
 ```python
 SubAgents(
-    agents=(),             # Sequence[SubAgent[AgentDepsT]] -- each pairs an agent with its run controls
+    agents=...,            # unset (discover from disk) | Sequence[SubAgent[AgentDepsT]] (an empty sequence is an empty roster)
     models={},             # Mapping[str, Model | str | ModelOption] -- per-delegation model menu (off when empty)
-    agent_folders=...,     # unset (convention 'agents' when agents is empty) | folder-name str | Sequence[Path] | None (disable)
+    agent_folders=...,     # unset (convention 'agents' when agents is unset) | folder-name str | Sequence[Path] | None (disable)
     agent_overrides={},    # Mapping[str, AgentOverride] -- per-disk-agent model/effort override
     tool_resolver=None,    # Callable[[str], Sequence[AgentToolset[object]] | None] -- disk-agent tool mapping
     forward_usage=True,    # share the parent's usage with sub-agent runs

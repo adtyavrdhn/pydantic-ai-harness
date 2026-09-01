@@ -256,6 +256,14 @@ class TestExplicitAgentsDiskDefault:
         assert "agent_folders='agents'" in message
         assert 'agent_folders=None' in message
 
+    def test_explicit_empty_agents_skip_convention_and_warn(self) -> None:
+        # An explicitly empty roster is still composition, not discovery.
+        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        with pytest.warns(HarnessDeprecationWarning):
+            cap: SubAgents[object] = SubAgents(agents=[])
+        assert cap._by_name == {}
+        assert cap.get_toolset() is None
+
     def test_explicit_agents_with_no_disk_definitions_stay_silent(self) -> None:
         # An existing-but-empty convention folder means behavior did not change,
         # so the composing caller the fix is for gets no warning to silence.
@@ -263,6 +271,16 @@ class TestExplicitAgentsDiskDefault:
         explicit = Agent(TestModel(), name='worker')
         with warnings.catch_warnings():
             warnings.simplefilter('error')  # any warning at all fails this test
+            cap: SubAgents[object] = SubAgents(agents=[SubAgent(explicit)])
+        assert list(cap._by_name) == ['worker']
+
+    def test_unreadable_disk_definition_does_not_warn(self) -> None:
+        folder = Path.home() / '.agents' / 'agents'
+        folder.mkdir(parents=True)
+        (folder / 'broken.md').write_bytes(b'\xff\xfe not utf-8')
+        explicit = Agent(TestModel(), name='worker')
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
             cap: SubAgents[object] = SubAgents(agents=[SubAgent(explicit)])
         assert list(cap._by_name) == ['worker']
 

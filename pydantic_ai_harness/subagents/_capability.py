@@ -97,10 +97,12 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     ```
     """
 
-    agents: Sequence[SubAgent[AgentDepsT]] = ()
+    agents: Sequence[SubAgent[AgentDepsT]] | EllipsisType = ...
     """The sub-agents to expose, each a `SubAgent` pairing an agent with its
     per-delegate run controls. See `SubAgent`. These take precedence over any
-    disk-loaded agents of the same name."""
+    disk-loaded agents of the same name. Left unset, disk discovery uses the
+    conventional `agent_folders`; passing any sequence, including an empty one,
+    means the caller is composing an explicit roster."""
 
     models: Mapping[str, Model | KnownModelName | str | ModelOption] = field(
         default_factory=dict[str, 'Model | KnownModelName | str | ModelOption']
@@ -211,7 +213,8 @@ class SubAgents(AbstractCapability[AgentDepsT]):
 
     def __post_init__(self) -> None:
         by_name: dict[str, SubAgent[AgentDepsT]] = {}
-        for sub_agent in self.agents:
+        agents: Sequence[SubAgent[AgentDepsT]] = () if isinstance(self.agents, EllipsisType) else self.agents
+        for sub_agent in agents:
             name = sub_agent.resolved_name
             if name is None:
                 raise ValueError('Sub-agent has no name: give its `Agent` a `name`, or set `SubAgent(name=...)`.')
@@ -276,7 +279,7 @@ class SubAgents(AbstractCapability[AgentDepsT]):
         """
         if not isinstance(self.agent_folders, EllipsisType):
             return self.agent_folders
-        if not self.agents:
+        if isinstance(self.agents, EllipsisType):
             return _CONVENTION_FOLDER_NAME
         if self._convention_has_definitions():
             # stacklevel reaches the constructor's caller through `__init__` ->
@@ -293,9 +296,15 @@ class SubAgents(AbstractCapability[AgentDepsT]):
         return None
 
     def _convention_has_definitions(self) -> bool:
-        """Whether the conventional folders hold any definition the old unconditional default loaded."""
+        """Whether the conventional folders hold any readable definition the old default loaded."""
         for folder in resolve_folders(_CONVENTION_FOLDER_NAME, Path.cwd(), Path.home()):
-            if folder.is_dir() and any(folder.glob('*.md')):
+            if not folder.is_dir():
+                continue
+            for path in folder.glob('*.md'):
+                try:
+                    path.read_text(encoding='utf-8')
+                except (OSError, UnicodeDecodeError):
+                    continue
                 return True
         return False
 
