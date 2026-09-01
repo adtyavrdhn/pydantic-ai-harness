@@ -17,7 +17,7 @@
 
 The storage plumbing that [`StepPersistence`](../step_persistence/) uses to keep run snapshots small: content-addressed stores and walker helpers that move large binary and text payloads out of message history and put them back on demand.
 
-This is supporting infrastructure, not a capability. Nothing in this package mounts on `Agent(capabilities=[...])`. `StepPersistence` uses these stores to externalize large `BinaryContent` and text (e.g. a big tool-return string) in run snapshots; a forthcoming `MediaExternalizer` capability ([#254](https://github.com/pydantic/pydantic-ai-harness/issues/254)) will reuse the same stores to rewrite `BinaryContent` into URL parts before the model sees them.
+This package does not define an agent capability.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/media/)
 

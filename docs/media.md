@@ -26,7 +26,7 @@ Why it exists: a conversation that carries images, audio, or other `BinaryConten
 
 ## Consumers
 
-[`StepPersistence`](step-persistence.md) is the shipped consumer: its file, sqlite, and mongo backends externalize large `BinaryContent` and text parts in run snapshots through these stores (see [Persisting media](step-persistence.md#persisting-media)). A forthcoming `MediaExternalizer` capability ([#254](https://github.com/pydantic/pydantic-ai-harness/issues/254)) will reuse the same stores to rewrite `BinaryContent` into URL parts before the model sees them.
+[`StepPersistence`](step-persistence.md) uses these stores to externalize large `BinaryContent` and text parts in run snapshots through its file, sqlite, and mongo backends (see [Persisting media](step-persistence.md#persisting-media)).
 
 ## Why content-addressing
 
@@ -112,8 +112,6 @@ async def presign(uri: str, ctx: MediaContext) -> str:
 
 store = S3MediaStore(..., public_url=presign)
 ```
-
-This is what the forthcoming `MediaExternalizer` will use to swap `BinaryContent` parts for `ImageUrl` / `AudioUrl` / other URL parts before the model sees the message, letting providers fetch big media over the wire without re-encoding bytes into the request body. Emitting a URL is always safe: pydantic-ai providers transparently download the bytes when the target model does not natively accept that URL type, so you only ever lose wire savings, never correctness.
 
 ## `MediaContext`
 
