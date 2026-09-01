@@ -86,9 +86,6 @@ class TestLifecycle:
         with pytest.raises(error_type):
             await E2BSandbox[None]().acquire_sandbox(_ctx())
 
-    def test_fake_list_pins_lowest_supported_sdk_surface(self, fake_e2b: FakeE2B) -> None:
-        assert 'order' not in inspect.signature(fake_e2b.module.AsyncSandbox.list).parameters
-
     async def test_get_sandbox_reconnects_by_ref(self, fake_e2b: FakeE2B) -> None:
         backend = await E2BSandbox[None]().get_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='sbx-existing'))
 

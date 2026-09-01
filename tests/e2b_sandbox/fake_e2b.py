@@ -186,8 +186,6 @@ class FakeFilesystem:
         self.directories: set[str] = set()
         self.removed: list[str] = []
         self.listed: list[str] = []
-        # Lets a test report a large size for a path without allocating the bytes.
-        self.stat_sizes: dict[str, int] = {}
 
     async def read(
         self,
@@ -271,15 +269,14 @@ class FakeFilesystem:
             self.directories.discard(directory)
 
     async def _exists(self, path: str) -> bool:
-        return path in self.files or path in self.directories or path in self.stat_sizes
+        return path in self.files or path in self.directories
 
     def _entry(self, path: str) -> FakeEntryInfo:
         if path in self.directories:
             return FakeEntryInfo(name=posixpath.basename(path), path=path, type=FileType.DIR, size=0)
-        if path not in self.files and path not in self.stat_sizes:
+        if path not in self.files:
             raise FileNotFoundException(path)
-        size = self.stat_sizes.get(path, len(self.files.get(path, b'')))
-        return FakeEntryInfo(name=posixpath.basename(path), path=path, type=FileType.FILE, size=size)
+        return FakeEntryInfo(name=posixpath.basename(path), path=path, type=FileType.FILE, size=len(self.files[path]))
 
     def _add_parents(self, path: str) -> None:
         parent = posixpath.dirname(path)

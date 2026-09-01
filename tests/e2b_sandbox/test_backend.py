@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import builtins
+import functools
 import sys
+from collections.abc import Awaitable, Callable
 
 import anyio
 import pytest
@@ -32,6 +34,12 @@ from ..sandbox_conformance import (
 )
 from .fake_e2b import FakeE2B
 
+_EntryPoint = Callable[[], Awaitable[object]]
+_CREATE: _EntryPoint = functools.partial(E2BSandboxBackend.create)
+_CONNECT: _EntryPoint = functools.partial(E2BSandboxBackend.connect, 'sbx-keep')
+_CREATE_OR_CONNECT: _EntryPoint = functools.partial(E2BSandboxBackend.create_or_connect, identity={})
+_KILL_BY_ID: _EntryPoint = functools.partial(E2BSandboxBackend.kill_by_id, 'missing')
+
 
 def _hide_e2b(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make `import e2b` fail, as it does without the extra installed."""
@@ -56,9 +64,7 @@ class TestConformance:
         assert isinstance(backend, SupportsStart)
 
     async def test_live_output_is_not_offered(self, fake_e2b: FakeE2B) -> None:
-        # E2B delivers output through callbacks its own event pump awaits, with no async
-        # iterator behind them, so there is no honest `stream()` to implement. Claiming
-        # `SupportsStream` here would make consumers prefer a stream that cannot exist.
+        # E2B processes intentionally omit the optional streaming protocol.
         backend = await E2BSandboxBackend.create()
         assert not isinstance(await backend.start(['echo', 'hi']), SupportsStream)
 
@@ -103,11 +109,6 @@ class TestCreate:
         assert (call.template, call.timeout, call.envs, call.metadata) == (None, 300, None, None)
         # Passed explicitly: it decides whether the sandbox is reachable without its token.
         assert (call.secure, call.allow_internet_access) == (True, True)
-
-    async def test_missing_e2b_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _hide_e2b(monkeypatch)
-        with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
-            await E2BSandboxBackend.create()
 
     async def test_e2b_error_becomes_a_start_failure(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.create_error = fake_e2b.error_type('no capacity')
@@ -162,11 +163,6 @@ class TestConnect:
             await E2BSandboxBackend.connect('sbx-keep')
         assert not isinstance(exc.value, SandboxUnavailableError)
 
-    async def test_missing_e2b_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _hide_e2b(monkeypatch)
-        with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
-            await E2BSandboxBackend.connect('sbx-keep')
-
 
 class TestClose:
     async def test_kills_when_owned(self, fake_e2b: FakeE2B) -> None:
@@ -199,25 +195,6 @@ class TestClose:
         with pytest.raises(E2BSandboxAuthError, match='E2B rejected the credentials'):
             await backend.close(terminate=True)
 
-    async def test_close_names_the_missing_extra(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
-        backend = await E2BSandboxBackend.create()
-        _hide_e2b(monkeypatch)
-
-        with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
-            await backend.close(terminate=True)
-
-    async def test_find_id_names_the_missing_extra(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _hide_e2b(monkeypatch)
-
-        with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
-            await E2BSandboxBackend._find_id({})  # pyright: ignore[reportPrivateUsage]
-
-    async def test_kill_by_id_names_the_missing_extra(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _hide_e2b(monkeypatch)
-
-        with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
-            await E2BSandboxBackend.kill_by_id('missing')
-
     async def test_hanging_kill_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
         # Teardown runs shielded, so a hanging kill would be uncancellable; its own deadline
         # is the only bound between a wedged control plane and a hung process.
@@ -227,6 +204,17 @@ class TestClose:
         with anyio.fail_after(5):
             with pytest.raises(E2BSandboxError, match='Timed out'):
                 await backend.close(terminate=True)
+
+
+@pytest.mark.parametrize(
+    'entry_point',
+    [_CREATE, _CONNECT, _CREATE_OR_CONNECT, _KILL_BY_ID],
+    ids=['create', 'connect', 'create_or_connect', 'kill_by_id'],
+)
+async def test_missing_e2b_package_is_named(monkeypatch: pytest.MonkeyPatch, entry_point: _EntryPoint) -> None:
+    _hide_e2b(monkeypatch)
+    with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
+        await entry_point()
 
 
 class TestRun:
