@@ -51,7 +51,7 @@ Bounded so a tool whose cleanup hangs cannot wedge the handler, which is the fai
 bridge exists to avoid everywhere else. The value is a heuristic -- long enough for ordinary
 `__aexit__`/`finally` cleanup (closing an HTTP client, cancelling a task group), short enough to
 leave the handler room to return. Raise it for a workload with genuinely slow cleanup; the wait
-timing out is handled rather than ignored, so the ceiling is a latency knob, not a correctness one.
+timing out retires the loop so the next invocation does not reuse its loop-bound resources.
 """
 
 _LOOP_START_TIMEOUT_SECONDS = 5.0
@@ -470,8 +470,10 @@ def run_durable(
         context: The `DurableContext` the durable handler was invoked with.
         cancel_timeout: Seconds to wait for a run abandoned by a suspension or an error to finish
             unwinding before returning. Raise it for a workload whose cleanup is genuinely slow.
-            Exceeding it is safe: the background event loop is retired instead of reused, so the
-            leftover cleanup cannot overlap the next warm invocation.
+            When it expires, the background event loop is retired so the next invocation builds a
+            fresh loop and the cleanup cannot touch its loop-bound resources, such as a provider's
+            cached HTTP client. The cleanup can still run during that invocation for the retired
+            loop's grace period, so it can still affect module-global state or external systems.
 
     Example:
         ```python {test="skip"}

@@ -771,7 +771,7 @@ class TestBridgeFailureModes:
     ) -> None:
         """The loop is shared across warm invocations, so a run abandoned by a suspension is
         cancelled before the handler returns. When that unwind does not finish in time, the loop is
-        given up rather than reused, so the leftover cleanup cannot overlap the next invocation."""
+        given up rather than reused, so the next invocation cannot inherit its loop-bound state."""
         loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
         monkeypatch.setattr(_bridge, '_agent_loop', loops)
         monkeypatch.setattr(_bridge, '_RETIRED_LOOP_GRACE_SECONDS', 0.05)
@@ -790,8 +790,8 @@ class TestBridgeFailureModes:
                 return await agent.run('go')  # type: ignore[return-value]
             finally:
                 cleanup_reached.set()
-                # Refuse cancellation past the retirement deadline. The loop must still stop on
-                # schedule rather than letting this abandoned run outlive the invocation.
+                # Refuse cancellation past the retirement deadline. The loop must still stop at
+                # the grace deadline rather than letting this abandoned run continue indefinitely.
                 while True:
                     try:
                         await asyncio.sleep(10)

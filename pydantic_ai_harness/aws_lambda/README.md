@@ -112,9 +112,13 @@ Three consequences are worth knowing:
 The loop is reused across invocations of a warm execution environment, so loop-bound resources like
 a provider's cached HTTP client stay valid between them. A run abandoned by a suspension or an error
 is therefore cancelled before the handler returns, and `run_durable` waits `cancel_timeout` seconds
-(5 by default) for it to unwind. Raise that for a workload whose cleanup is genuinely slow;
-exceeding it is safe either way, because the loop is then retired rather than reused, and the next
-invocation starts on a fresh one instead of sharing with work that outlived its execution.
+(5 by default) for it to unwind. Raise that for a workload whose cleanup is genuinely slow. If the
+timeout expires, the abandoned cleanup keeps running on a retired loop for at most the retired
+loop's grace period and can overlap the next warm invocation. Do not share mutable module-global
+state between the agent run and the handler. An external side effect from cleanup, such as writing
+to a store, releasing a shared lock, or emitting a metric, can also land during a later invocation.
+Loop-bound resources are isolated: the next invocation gets a fresh loop, so the abandoned cleanup
+cannot touch resources such as that invocation's provider HTTP client.
 
 ## What gets checkpointed
 
