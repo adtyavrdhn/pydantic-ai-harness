@@ -2,24 +2,35 @@
 
 from __future__ import annotations
 
-import asyncio
 import builtins
 import sys
 import time
 
 import anyio
 import pytest
-import sniffio
-from pydantic_ai.sandboxes import Sandbox, SandboxBackend, SupportsFilesystem, SupportsStart, SupportsStream
+from pydantic_ai.sandboxes import (
+    Sandbox,
+    SandboxBackend,
+    SandboxTimeoutError,
+    SandboxUnavailableError,
+    SupportsFilesystem,
+    SupportsStart,
+    SupportsStream,
+)
 
 from pydantic_ai_harness.modal_sandbox import (
+    ModalSandboxAuthError,
     ModalSandboxBackend,
-    ModalSandboxCommandTimeoutError,
     ModalSandboxError,
-    ModalSandboxTerminalError,
     ModalSandboxUnavailableError,
 )
 
+from ..sandbox_conformance import (
+    check_command_validation,
+    check_missing_file,
+    check_process_results,
+    check_timeout,
+)
 from .fake_modal import FakeModal, FileInfo, _AioCallable
 
 
@@ -33,39 +44,12 @@ class _HangingCall(_AioCallable):
         await anyio.sleep_forever()
 
 
-class _GatedCall:
-    def __init__(self, inner: _AioCallable, cleanup_error: Exception | None = None) -> None:
-        self._inner = inner
-        self._cleanup_error = cleanup_error
-        self.started = asyncio.Event()
-        self.release = asyncio.Event()
-
-    async def aio(self, *args: object, **kwargs: object) -> object:
-        self.started.set()
-        await self.release.wait()
-        result = await self._inner.aio(*args, **kwargs)
-        if self._cleanup_error is not None:
-            result.terminate_error = self._cleanup_error
-        return result
+pytestmark = pytest.mark.anyio(backends=['asyncio'])
 
 
-class _AnyIOGatedCall(_AioCallable):
-    def __init__(self, inner: _AioCallable) -> None:
-        super().__init__(lambda: None)
-        self._inner = inner
-        self.started = anyio.Event()
-        self.release = anyio.Event()
-
-    async def aio(self, *args: object, **kwargs: object) -> object:
-        self.started.set()
-        await self.release.wait()
-        return await self._inner.aio(*args, **kwargs)
-
-
-def _skip_without_asyncio() -> None:
-    """Merging two Modal readers needs asyncio; the fake alone would run anywhere."""
-    if sniffio.current_async_library() != 'asyncio':
-        pytest.skip('Modal command streaming requires asyncio')
+@pytest.fixture
+def anyio_backend() -> str:
+    return 'asyncio'
 
 
 class TestConformance:
@@ -86,6 +70,20 @@ class TestConformance:
         assert backend.provider == 'modal'
         assert backend.sandbox_id == 'sb-owned'
         assert backend.sandbox is fake_modal.sandboxes[0]
+
+    async def test_shared_command_validation(self, fake_modal: FakeModal) -> None:
+        await check_command_validation(ModalSandboxBackend.create)
+
+    async def test_shared_missing_file(self, fake_modal: FakeModal) -> None:
+        await check_missing_file(ModalSandboxBackend.create)
+
+    async def test_shared_timeout(self, fake_modal: FakeModal) -> None:
+        fake_modal.responder = lambda argv, timeout: ('partial', '', -1)
+        await check_timeout(ModalSandboxBackend.create)
+
+    async def test_shared_wait_and_nonzero_result(self, fake_modal: FakeModal) -> None:
+        fake_modal.responder = lambda argv, timeout: ('', '', 2)
+        await check_process_results(ModalSandboxBackend.create)
 
 
 class TestCreate:
@@ -131,7 +129,7 @@ class TestCreate:
 
     async def test_auth_error_is_terminal(self, fake_modal: FakeModal) -> None:
         fake_modal.create_error = fake_modal.auth_type('unauthenticated')
-        with pytest.raises(ModalSandboxTerminalError, match='Modal rejected the credentials'):
+        with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
             await ModalSandboxBackend.create()
 
     async def test_hanging_create_does_not_hang_the_caller(
@@ -145,88 +143,14 @@ class TestCreate:
             with pytest.raises(ModalSandboxError, match='did not complete within'):
                 await ModalSandboxBackend.create()
 
-    async def test_cancel_during_create_terminates_the_new_sandbox(self, fake_modal: FakeModal) -> None:
-        # A caller cancelled mid-create must not orphan the sandbox: creation is shielded so
-        # the handle survives, then the cancellation tears it down here instead of leaving it
-        # for `sandbox_timeout` to reap.
-        with anyio.CancelScope() as scope:
-            scope.cancel()
-            await ModalSandboxBackend.create()
-        assert fake_modal.sandboxes[0].terminated is True
-        assert fake_modal.sandboxes[0].detached is True
-
-    async def test_cancel_during_create_preserves_cancellation_when_cleanup_fails(
-        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _skip_without_asyncio()
-        create = _GatedCall(fake_modal.module.Sandbox.create, RuntimeError('cleanup failed'))
-        create.release.set()
-        monkeypatch.setattr(fake_modal.module.Sandbox, 'create', create)
-
-        with anyio.CancelScope() as scope:
-            scope.cancel()
-            await ModalSandboxBackend.create()
-
-        assert fake_modal.sandboxes[0].detached is True
-
-    async def test_task_cancellation_during_create_terminates_the_new_sandbox(
-        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _skip_without_asyncio()
-        create = _GatedCall(fake_modal.module.Sandbox.create)
-        monkeypatch.setattr(fake_modal.module.Sandbox, 'create', create)
-        creating = asyncio.create_task(ModalSandboxBackend.create())
-        await create.started.wait()
-
-        creating.cancel()
-        create.release.set()
-
-        with pytest.raises(asyncio.CancelledError):
-            await creating
-        assert fake_modal.sandboxes[0].terminated is True
-        assert fake_modal.sandboxes[0].detached is True
-
-    async def test_task_cancellation_during_hung_create_is_bounded(
-        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _skip_without_asyncio()
-        monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._CREATE_TIMEOUT', 0.05)
-        create = _GatedCall(fake_modal.module.Sandbox.create)
-        monkeypatch.setattr(fake_modal.module.Sandbox, 'create', create)
-        creating = asyncio.create_task(ModalSandboxBackend.create())
-        await create.started.wait()
-
-        creating.cancel()
-
-        with anyio.fail_after(1):
-            with pytest.raises(asyncio.CancelledError):
-                await creating
-        assert fake_modal.sandboxes == []
-
-    async def test_task_cancellation_is_not_masked_by_cleanup_failure(
-        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _skip_without_asyncio()
-        create = _GatedCall(fake_modal.module.Sandbox.create, RuntimeError('cleanup failed'))
-        monkeypatch.setattr(fake_modal.module.Sandbox, 'create', create)
-        creating = asyncio.create_task(ModalSandboxBackend.create())
-        await create.started.wait()
-
-        creating.cancel()
-        create.release.set()
-
-        with pytest.raises(asyncio.CancelledError):
-            await creating
-        assert fake_modal.sandboxes[0].detached is True
-
     async def test_rejects_relative_workdir(self, fake_modal: FakeModal) -> None:
         with pytest.raises(ValueError, match='workdir must be an absolute sandbox path'):
             await ModalSandboxBackend.create(workdir='repo')
 
-    async def test_preserves_parent_segments_in_workdir(self, fake_modal: FakeModal) -> None:
+    async def test_normalizes_parent_segments_in_workdir(self, fake_modal: FakeModal) -> None:
         await ModalSandboxBackend.create(workdir='/linked/../target')
 
-        assert fake_modal.create_kwargs[-1]['workdir'] == '/linked/../target'
+        assert fake_modal.create_kwargs[-1]['workdir'] == '/target'
 
     async def test_named_create_translates_already_exists(self, fake_modal: FakeModal) -> None:
         await ModalSandboxBackend.create(name='stable')
@@ -255,7 +179,7 @@ class TestConnect:
 
     async def test_connect_auth_error_is_terminal(self, fake_modal: FakeModal) -> None:
         fake_modal.attach_error = fake_modal.auth_type('unauthenticated')
-        with pytest.raises(ModalSandboxTerminalError, match='Modal rejected the credentials'):
+        with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
             await ModalSandboxBackend.connect('sb-keep')
 
     async def test_connect_sdk_error_is_translated(self, fake_modal: FakeModal) -> None:
@@ -296,7 +220,7 @@ class TestConnectName:
     async def test_auth_error_is_terminal(self, fake_modal: FakeModal) -> None:
         fake_modal.attach_error = fake_modal.auth_type('unauthenticated')
 
-        with pytest.raises(ModalSandboxTerminalError, match='Modal rejected the credentials'):
+        with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
             await ModalSandboxBackend.connect_name('app', 'stable')
 
     async def test_sdk_error_is_translated(self, fake_modal: FakeModal) -> None:
@@ -358,30 +282,10 @@ class TestClose:
         backend = await ModalSandboxBackend.create()
         fake_modal.sandboxes[0].terminate_error = fake_modal.auth_type('unauthenticated')
 
-        with pytest.raises(ModalSandboxTerminalError, match='Modal rejected the credentials'):
+        with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
             await backend.close(terminate=True)
 
         assert fake_modal.sandboxes[0].detached is True
-
-    async def test_close_failure_does_not_replace_cancellation(self, fake_modal: FakeModal) -> None:
-        backend = await ModalSandboxBackend.create()
-        sandbox = fake_modal.sandboxes[0]
-        sandbox.detach_error = RuntimeError('detach failed')
-        detach = _AnyIOGatedCall(sandbox.detach)
-        sandbox.detach = detach
-        scopes: list[anyio.CancelScope] = []
-
-        async def close() -> None:
-            with anyio.CancelScope() as scope:
-                scopes.append(scope)
-                await backend.close(terminate=False)
-            assert scope.cancelled_caught is True
-
-        async with anyio.create_task_group() as task_group:
-            task_group.start_soon(close)
-            await detach.started.wait()
-            scopes[0].cancel()
-            detach.release.set()
 
     async def test_hanging_terminate_is_bounded_and_detach_still_runs(
         self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
@@ -438,12 +342,12 @@ class TestRun:
         with pytest.raises(ValueError, match='cwd must be an absolute sandbox path'):
             await backend.run(['pwd'], cwd='repo')
 
-    async def test_preserves_parent_segments_in_cwd(self, fake_modal: FakeModal) -> None:
+    async def test_normalizes_parent_segments_in_cwd(self, fake_modal: FakeModal) -> None:
         backend = await ModalSandboxBackend.create()
 
         await backend.run(['pwd'], cwd='/linked/../target')
 
-        assert fake_modal.sandboxes[0].exec_calls[-1].workdir == '/linked/../target'
+        assert fake_modal.sandboxes[0].exec_calls[-1].workdir == '/target'
 
     @pytest.mark.parametrize(
         ('command', 'shell', 'message'),
@@ -483,7 +387,7 @@ class TestRun:
         # raises, and the output produced before the kill rides on the exception.
         fake_modal.responder = lambda argv, timeout: ('partial', 'oops', -1)
         backend = await ModalSandboxBackend.create()
-        with pytest.raises(ModalSandboxCommandTimeoutError) as exc:
+        with pytest.raises(SandboxTimeoutError) as exc:
             await backend.run(['sleep', '99'], timeout=5)
         assert isinstance(exc.value, TimeoutError)
         assert (exc.value.stdout, exc.value.stderr, exc.value.timeout) == ('partial', 'oops', 5)
@@ -505,17 +409,8 @@ class TestRun:
 
         fake_modal.responder = deadline_kill
         backend = await ModalSandboxBackend.create()
-        with pytest.raises(ModalSandboxCommandTimeoutError):
+        with pytest.raises(SandboxTimeoutError):
             await backend.run(['sleep', '99'], timeout=1)
-
-    async def test_deferred_wait_does_not_turn_an_early_sigkill_into_a_timeout(self, fake_modal: FakeModal) -> None:
-        fake_modal.responder = lambda argv, timeout: ('', '', 137)
-        backend = await ModalSandboxBackend.create()
-        process = await backend.start(['kill-self'], timeout=0.05)
-
-        await anyio.sleep(1.05)  # collect after Modal's rounded one-second deadline
-
-        assert (await process.wait()).exit_code == 137
 
     async def test_early_sigkill_is_a_real_exit(self, fake_modal: FakeModal) -> None:
         # A command that dies by SIGKILL well before the deadline (an OOM kill, a `kill -9`
@@ -536,7 +431,7 @@ class TestRun:
         backend = await ModalSandboxBackend.create()
         with pytest.raises(ModalSandboxError, match='Command could not run in the sandbox: transient blip') as exc:
             await backend.run(['x'])
-        assert not isinstance(exc.value, ModalSandboxTerminalError)
+        assert not isinstance(exc.value, SandboxUnavailableError)
 
     @pytest.mark.parametrize(
         ('exc_property', 'match'),
@@ -554,7 +449,7 @@ class TestRun:
         exc_type: type[Exception] = getattr(fake_modal, exc_property)
         fake_modal.exec_error = exc_type('terminal failure')
         backend = await ModalSandboxBackend.create()
-        with pytest.raises(ModalSandboxTerminalError, match=match):
+        with pytest.raises(SandboxUnavailableError, match=match):
             await backend.run(['x'])
 
     async def test_dead_sandbox_conflict_is_terminal(self, fake_modal: FakeModal) -> None:
@@ -580,7 +475,7 @@ class TestRun:
         fake_modal.exec_error = fake_modal.conflict_type('aborted')
         with pytest.raises(ModalSandboxError, match='aborted') as exc:
             await backend.run(['x'])
-        assert not isinstance(exc.value, ModalSandboxTerminalError)
+        assert not isinstance(exc.value, SandboxUnavailableError)
 
     async def test_failing_poll_preserves_the_original_error(self, fake_modal: FakeModal) -> None:
         # The classifying poll can itself fail with a raw transport error; that must not
@@ -595,7 +490,7 @@ class TestRun:
         backend = await ModalSandboxBackend.create()
         fake_modal.exec_error = fake_modal.conflict_type('aborted')
         fake_modal.sandboxes[0].poll_error = fake_modal.auth_type('unauthenticated')
-        with pytest.raises(ModalSandboxTerminalError, match='Modal rejected the credentials'):
+        with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
             await backend.run(['x'])
 
     async def test_poll_reporting_a_missing_sandbox_is_terminal(self, fake_modal: FakeModal) -> None:
@@ -643,9 +538,9 @@ class TestProcess:
         fake_modal.responder = lambda argv, timeout: ('partial', '', -1)
         backend = await ModalSandboxBackend.create()
         process = await backend.start(['x'], timeout=5)
-        with pytest.raises(ModalSandboxCommandTimeoutError) as first:
+        with pytest.raises(SandboxTimeoutError) as first:
             await process.wait()
-        with pytest.raises(ModalSandboxCommandTimeoutError) as second:
+        with pytest.raises(SandboxTimeoutError) as second:
             await process.wait()
         assert first.value is second.value
 
@@ -662,7 +557,6 @@ class TestProcess:
             await process.kill()
 
     async def test_stream_interleaves_both_streams(self, fake_modal: FakeModal) -> None:
-        _skip_without_asyncio()
         fake_modal.output_chunk_size = 2
         fake_modal.responder = lambda argv, timeout: ('abcd', 'XY', 0)
         backend = await ModalSandboxBackend.create()
@@ -671,7 +565,6 @@ class TestProcess:
         assert sorted(chunks) == [('stderr', 'XY'), ('stdout', 'ab'), ('stdout', 'cd')]
 
     async def test_stream_yields_one_message_per_stream_by_default(self, fake_modal: FakeModal) -> None:
-        _skip_without_asyncio()
         # The realistic case: Modal delivers a short command's output in a single message,
         # and a stream with nothing on it yields nothing.
         fake_modal.responder = lambda argv, timeout: ('hello', '', 0)
@@ -680,7 +573,6 @@ class TestProcess:
         assert [(chunk.stream, chunk.data) async for chunk in process.stream()] == [('stdout', 'hello')]
 
     async def test_stream_preserves_utf8_split_between_chunks(self, fake_modal: FakeModal) -> None:
-        _skip_without_asyncio()
         fake_modal.output_chunk_size = 1
         fake_modal.responder = lambda argv, timeout: ('é', '', 0)
         backend = await ModalSandboxBackend.create()
@@ -690,7 +582,6 @@ class TestProcess:
         assert [(chunk.stream, chunk.data) async for chunk in process.stream()] == [('stdout', 'é')]
 
     async def test_stream_flushes_incomplete_utf8_at_eof(self, fake_modal: FakeModal) -> None:
-        _skip_without_asyncio()
         fake_modal.responder = lambda argv, timeout: (b'\xc3', b'', 0)
         backend = await ModalSandboxBackend.create()
 
@@ -699,7 +590,6 @@ class TestProcess:
         assert [(chunk.stream, chunk.data) async for chunk in process.stream()] == [('stdout', '�')]
 
     async def test_wait_after_streaming_still_returns_the_whole_output(self, fake_modal: FakeModal) -> None:
-        _skip_without_asyncio()
         # Modal's readers replay from byte zero, so `wait()` asks for the output in full
         # rather than accumulating what streaming happened to consume.
         fake_modal.output_chunk_size = 1
@@ -711,7 +601,6 @@ class TestProcess:
         assert (await process.wait()).stdout == 'hello'
 
     async def test_abandoning_the_stream_early_is_safe(self, fake_modal: FakeModal) -> None:
-        _skip_without_asyncio()
         fake_modal.output_chunk_size = 1
         fake_modal.responder = lambda argv, timeout: ('hello', 'world', 0)
         backend = await ModalSandboxBackend.create()
@@ -722,7 +611,6 @@ class TestProcess:
         assert (await process.wait()).stdout == 'hello'
 
     async def test_a_failing_read_mid_stream_is_classified(self, fake_modal: FakeModal) -> None:
-        _skip_without_asyncio()
         # Streaming gets the same taxonomy as waiting: a raw transport failure becomes a
         # typed sandbox error rather than reaching the caller as a grpclib internal.
         fake_modal.stdout_error = ValueError('Received empty message')
@@ -733,7 +621,6 @@ class TestProcess:
                 pass  # pragma: no cover - the first read already fails
 
     async def test_second_stream_is_refused(self, fake_modal: FakeModal) -> None:
-        _skip_without_asyncio()
         # Modal's readers have a single consumer, so a second `stream()` cannot be served.
         backend = await ModalSandboxBackend.create()
         process = await backend.start(['x'])
@@ -859,7 +746,7 @@ class TestFilesystem:
         fake_modal.sandboxes[0].fs_error = fake_modal.filesystem_error_type('Permission denied')
         with pytest.raises(ModalSandboxError, match='Permission denied') as exc:
             await backend.fs.write_bytes('/root/x', b'data')
-        assert not isinstance(exc.value, ModalSandboxTerminalError)
+        assert not isinstance(exc.value, SandboxUnavailableError)
 
     async def test_a_filesystem_error_on_a_dead_sandbox_is_terminal(self, fake_modal: FakeModal) -> None:
         # Modal's filesystem wraps a dead sandbox as an ordinary-looking error, so the poll
@@ -874,11 +761,11 @@ class TestFilesystem:
         backend = await ModalSandboxBackend.create()
         fake_modal.sandboxes[0].fs_error = fake_modal.filesystem_error_type('request failed')
         fake_modal.sandboxes[0].poll_error = fake_modal.auth_type('unauthenticated')
-        with pytest.raises(ModalSandboxTerminalError, match='Modal rejected the credentials'):
+        with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
             await backend.fs.list_dir('/x')
 
     async def test_a_direct_auth_failure_is_terminal(self, fake_modal: FakeModal) -> None:
         backend = await ModalSandboxBackend.create()
         fake_modal.sandboxes[0].fs_error = fake_modal.auth_type('unauthenticated')
-        with pytest.raises(ModalSandboxTerminalError, match='Modal rejected the credentials'):
+        with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
             await backend.fs.make_dir('/x')

@@ -49,7 +49,7 @@ class ExecCall:
 class _AioCallable:
     """Mimics a synchronicity-wrapped Modal method: callable, plus an `.aio` async twin.
 
-    The session only ever calls `.aio`, but exposing both mirrors the real SDK shape.
+    The backend only calls `.aio`, but exposing both mirrors the real SDK shape.
     """
 
     def __init__(self, fn: Callable[..., Any]) -> None:
@@ -366,8 +366,8 @@ class FakeModal:
         self.wait_error: Exception | None = None
         self.wait_delay = 0.0
         self.output_chunks: list[bytes] | None = None
-        # How the fake splits exec output when the bounded reader iterates it; None yields the
-        # whole output as one chunk. A test bounding output sets a small size to force drops.
+        # How the fake splits exec output when the stream reader iterates it; None yields the
+        # whole output as one chunk.
         self.output_chunk_size: int | None = None
         self.module = self._build_module()
 
@@ -418,7 +418,7 @@ class FakeModal:
 
         def image_from_registry(tag: str) -> object:
             # Closed signature on purpose, like `sandbox_create` below: signature drift in
-            # the session should fail here, not only in production.
+            # the backend should fail here, not only in production.
             control.image_tags.append(tag)
             return object()
 
