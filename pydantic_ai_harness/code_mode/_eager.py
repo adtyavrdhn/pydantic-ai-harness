@@ -188,7 +188,7 @@ class EagerState:
             return False
         try:
             decoded = from_json(watch.args_text, allow_partial='trailing-strings')
-        except ValueError:
+        except ValueError:  # pragma: no cover - malformed JSON fragments that models don't emit
             return False
         if isinstance(decoded, dict):
             return bool(decoded.get('restart'))
