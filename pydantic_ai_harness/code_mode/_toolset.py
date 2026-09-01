@@ -92,20 +92,34 @@ _SANDBOX_LIMIT_MARKERS = {
 
 
 @runtime_checkable
-class _TemporalDurability(Protocol):
-    """The part of Temporal's public durability capability CodeMode needs."""
+class _Durability(Protocol):
+    """The part of a durable-execution capability CodeMode needs."""
 
     in_durable_context: bool
 
 
-def _in_temporal_workflow(ctx: RunContext[object]) -> bool:
-    """Whether this tool call runs in a Temporal workflow without importing its optional extra."""
+def _durability_active(ctx: RunContext[object], module_prefix: str) -> bool:
+    """Whether a durable-execution capability under `module_prefix` is in its durable context.
+
+    Structural rather than imported: the durability extras are optional, so the check walks
+    the capability's MRO for the module family instead of importing its classes.
+    """
     return any(
-        any(base.__module__.startswith('pydantic_ai.durable_exec.temporal') for base in type(capability).__mro__)
-        and isinstance(capability, _TemporalDurability)
+        any(base.__module__.startswith(module_prefix) for base in type(capability).__mro__)
+        and isinstance(capability, _Durability)
         and capability.in_durable_context
         for capability in ctx.capabilities.values()
     )
+
+
+def _in_temporal_workflow(ctx: RunContext[object]) -> bool:
+    """Whether this tool call runs in a Temporal workflow (drives Temporal-specific limits)."""
+    return _durability_active(ctx, 'pydantic_ai.durable_exec.temporal')
+
+
+def _in_durable_execution(ctx: RunContext[object]) -> bool:
+    """Whether any durable executor is replay-sensitive here; streaming tiers stay inactive."""
+    return _durability_active(ctx, 'pydantic_ai.durable_exec')
 
 
 def _exhausted_sandbox_limit(error: MontyRuntimeError) -> str | None:
@@ -509,11 +523,13 @@ class _RunCodeTool(ToolsetTool[AgentDepsT]):
 
 
 _EAGER_OUTPUT_CAP = 1 << 20
-"""Total print output (bytes of text) retained across one part's eager fragment feeds.
+"""Total print output (UTF-8 bytes, truncation marker included) retained across one part's feeds.
 
 Each feed's capture is bounded inside the sandbox, but a snippet can close arbitrarily many
 statements; this bounds what the host accumulates for the final `run_code` return.
 """
+
+_EAGER_TRUNCATION_MARKER = '\n[eager output truncated]\n'
 
 
 @dataclass
@@ -836,7 +852,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         code = tool_args.get('code')
         restart = tool_args.get('restart', False)
         part = None
-        if isinstance(code, str) and not _in_temporal_workflow(ctx):
+        if isinstance(code, str) and not _in_durable_execution(ctx):
             part = self.eager.pop_watch(ctx.tool_call_id or 'pyd_ai_code_mode', code)
         waited_seconds = 0.0
         if part is not None:
@@ -934,12 +950,17 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         value = result.return_value
         assert isinstance(value, dict), 'the pinned `None` result makes the fragment return a dict'
         output = value.get('output')  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType]
-        if isinstance(output, str) and len(part.output) < _EAGER_OUTPUT_CAP:
+        if isinstance(output, str) and not part.output_capped:
             # Each feed's capture is bounded by the sandbox, but the feeds accumulate here on
             # the host; without a total cap a statement-per-print snippet grows without limit.
-            part.output += output
-            if len(part.output) >= _EAGER_OUTPUT_CAP:
-                part.output = part.output[:_EAGER_OUTPUT_CAP] + '\n[eager output truncated]\n'
+            # Counted in encoded bytes, marker included, so the cap is what it says.
+            room = _EAGER_OUTPUT_CAP - len(part.output.encode()) - len(_EAGER_TRUNCATION_MARKER.encode())
+            encoded = output.encode()
+            if len(encoded) <= room:
+                part.output += output
+            else:
+                part.output += encoded[: max(room, 0)].decode('utf-8', 'ignore') + _EAGER_TRUNCATION_MARKER
+                part.output_capped = True
         metadata: Any = result.metadata
         assert metadata is not None, 'run_code always attaches code_mode metadata'
         fragment_calls: dict[str, ToolCallPart] = metadata['tool_calls']

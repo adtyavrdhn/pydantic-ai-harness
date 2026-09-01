@@ -880,3 +880,81 @@ class TestEagerHardening:
             await stepped.eager.drain(taken)
             assert taken.error is None
             assert calls == ['s']
+
+
+class TestEagerRewriteAndDurability:
+    """Pins for the second-round bot findings: rewritten prefixes and non-Temporal durability."""
+
+    async def test_rewritten_executed_prefix_halts_and_resets(self):
+        """A dict delta that rewrites already-executed code cannot forge the divergence check."""
+        ctx = build_run_context(None)
+        ctx.tool_manager = None
+        capability = CodeMode[None](eager=True)
+        run_capability = await capability.for_run(ctx)
+        toolset = run_capability.get_wrapper_toolset(FunctionToolset[None](tools=[]))
+        assert isinstance(toolset, CodeModeToolset)
+        assert toolset.eager is not None
+        tools = await toolset.get_tools(ctx)
+
+        exec_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
+        exec_ctx.tool_manager = await ToolManager(toolset=toolset).for_run_step(exec_ctx)
+        stream_ctx = dataclasses.replace(ctx)
+        stream_ctx.tool_manager = exec_ctx.tool_manager
+        async with toolset:
+            original = 'a = 1\nb = 2\nc'
+            rewritten = 'a = 9\nb = 2\nc'
+            await toolset.eager.observe(
+                PartStartEvent(
+                    index=0,
+                    part=ToolCallPart(tool_name='run_code', args={'code': original}, tool_call_id='c1'),
+                ),
+                stream_ctx,
+            )
+            await toolset.eager.observe(
+                PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': rewritten}, tool_call_id='c1')),
+                stream_ctx,
+            )
+            # The executed prefix is `a = 1`; the rewritten code no longer starts with it.
+            with pytest.raises(ModelRetry, match='no longer matches'):
+                await toolset.call_tool('run_code', {'code': rewritten}, exec_ctx, tools['run_code'])
+
+    async def test_inactive_under_dbos_durability(self):
+        """Any durable executor deactivates eager, not only Temporal."""
+
+        class DbosDurability(AbstractCapability[None]):
+            in_durable_context = True
+
+        DbosDurability.__module__ = 'pydantic_ai.durable_exec.dbos'
+        calls: list[str] = []
+        stream_finished = asyncio.Event()
+
+        def search(query: str) -> str:
+            """Return a canned result, refusing to run before the stream completes."""
+            assert stream_finished.is_set(), 'search executed before the model stream completed'
+            calls.append(query)
+            return f'result:{query}'
+
+        code = 'a = await search(query="alpha")\nb = 1\nprint(a)\n"ok"'
+
+        async def stream_code(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _prior_run_code_calls(messages):
+                yield 'done'
+                return
+            yield {1: DeltaToolCall(name='run_code')}
+            for chunk in _stream_json_args(code):
+                yield {1: DeltaToolCall(json_args=chunk)}
+                await asyncio.sleep(0)
+            stream_finished.set()
+
+        capability = CodeMode[None](eager=True)
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_code),
+            deps_type=type(None),
+            capabilities=[capability, DbosDurability()],
+        )
+        agent.tool_plain(search)
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert calls == ['alpha']

@@ -23,7 +23,7 @@ from pydantic_ai_harness.code_mode._toolset import (
     CodeModeOS,
     CodeModeResourceLimits,
     CodeModeToolset,
-    _in_temporal_workflow,  # pyright: ignore[reportPrivateUsage]
+    _in_durable_execution,  # pyright: ignore[reportPrivateUsage]
 )
 
 if TYPE_CHECKING:
@@ -154,7 +154,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     eager execution advances the program frontier while speculation launches eligible
     calls beyond it (branch arms, calls behind a blocking statement), and the eager
     feeds' dispatches claim those launches. Enabling this puts runs in streaming mode,
-    and has no effect under Temporal durable execution.
+    and has no effect under durable execution.
 
     Two consequences of running before the call completes:
 
@@ -281,12 +281,12 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         stream right behind the event that produced them; yielding (rather than
         `ctx.emit_event`) is what makes them live, at the cost of bypassing `@on_event`
         listener dispatch, which happens upstream of capability wrappers. Inactive under
-        Temporal, where overlapping non-deterministic work with the stream has no place in
-        a replayed workflow.
+        durable execution, where overlapping non-deterministic work with the stream has no
+        place in a replayed workflow.
         """
         eager = self._eager_state
         speculation = self._speculation_state
-        if _in_temporal_workflow(ctx):
+        if _in_durable_execution(ctx):
             eager = None
             speculation = None
         if eager is not None or speculation is not None:

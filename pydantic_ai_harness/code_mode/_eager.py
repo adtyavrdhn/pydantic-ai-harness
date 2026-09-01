@@ -80,6 +80,9 @@ class _EagerPart:
     output: str = ''
     """Concatenated print output from completed fragment feeds."""
 
+    output_capped: bool = False
+    """Accumulation hit the host-side byte cap; later fragment prints are dropped."""
+
     nested_calls: dict[str, ToolCallPart] = field(default_factory=dict[str, ToolCallPart])
     """Tool calls the pumped statements dispatched, keyed by nested tool call id."""
 
@@ -198,11 +201,17 @@ class EagerState:
         if source_prefix == watch.scanned_source:
             return
         watch.scanned_source = source_prefix
+        lines = code.split('\n')
+        if watch.fed_line_count and '\n'.join(lines[: watch.fed_line_count]) != watch.fed_prefix:
+            # A dict delta rewrote code that already executed. Keep `fed_prefix` as the text
+            # that actually ran and stop feeding; the dispatch's divergence check resets the
+            # session and asks the model to resend.
+            watch.halted = True
+            return
         fresh, watch.consumed = closed_statements(code, watch.consumed)
         # Each queued source is a contiguous line slice from the end of the previous
         # statement, so comments and blank lines between statements feed with them and the
         # concatenation of all slices reproduces the prefix exactly.
-        lines = code.split('\n')
         for statement in fresh:
             end = statement.end_lineno or statement.lineno
             source = '\n'.join(lines[watch.fed_line_count : end])

@@ -248,6 +248,9 @@ ask for -- and nothing is rolled back: side effects land before the tool call is
 committed, which is why the tier is opt-in.
 
 ```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.code_mode import CodeMode
+
 agent = Agent(
     'openai:gpt-5',
     capabilities=[CodeMode(eager=True)],
@@ -278,7 +281,7 @@ Two consequences of running before the call completes:
 
 Enabling `eager` puts runs in streaming mode. It requires the asyncio event loop; on
 other async backends (Trio) the watcher stays inactive and `run_code` executes normally
-at dispatch. Under Temporal durable execution the option is likewise inactive:
+at dispatch. Under durable execution (Temporal, DBOS) the option is likewise inactive:
 statements only run when the completed tool call executes.
 
 ## Speculative execution (experimental)
@@ -383,7 +386,7 @@ from pydantic_ai.durable_exec.temporal import TemporalDurability
 from pydantic_ai_harness import CodeMode
 
 agent = Agent(
-    'openai:gpt-5.6-sol',
+    'openai:gpt-5',
     name='coding-agent',
     capabilities=[CodeMode(), TemporalDurability()],
 )
