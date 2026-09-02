@@ -34,7 +34,7 @@ result = agent.run_sync('Summarize the coding-assistant setup in this repo.')
 print(result.output)
 ```
 
-All configured paths and discovered files refer to the run sandbox. Relative paths use its working directory, and `~` is not expanded -- use an absolute sandbox path or one relative to the sandbox working directory. When the run has no sandbox attached, the capability reads the agent process's filesystem directly, as before (POSIX only; on Windows, attach a sandbox). An explicitly configured `UnavailableSandbox` does not fall back.
+All configured paths and discovered files refer to the run sandbox. Relative paths use its working directory, and `~` is not expanded -- use an absolute sandbox path or one relative to the sandbox working directory. The capability needs a sandbox attached to the run; without one it raises an error that says how to attach one (`sandbox=LocalSandbox(root=...)` for the agent process's own filesystem).
 
 ### 1. Walk-up instruction autoload (on by default)
 
