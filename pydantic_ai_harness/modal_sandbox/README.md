@@ -100,9 +100,10 @@ command; it can continue until its command deadline or the sandbox lifetime ends
 Command output is returned in full. Tools that put output into model context should
 apply their own byte or line limits.
 
-- `ModalSandboxError` reports recoverable provider failures.
-- `ModalSandboxAuthError` and `ModalSandboxUnavailableError` are also core
-  `SandboxUnavailableError` instances, so the run does not retry them.
+- `ModalSandboxError` reports transient Modal operation failures and is a core
+  `SandboxError`.
+- `ModalSandboxAuthError` and `ModalSandboxUnavailableError` report dead or unauthorized
+  Modal environments and are core `SandboxUnavailableError` instances, so the run does not retry them.
 - Command deadlines raise core `SandboxTimeoutError`, including partial `stdout` and
   `stderr`.
 - Missing filesystem paths raise `FileNotFoundError`.

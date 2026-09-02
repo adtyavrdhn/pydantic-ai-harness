@@ -24,21 +24,19 @@ stream, or filesystem handling.
 from __future__ import annotations
 
 import asyncio
-import codecs
-import itertools
 import math
 import posixpath
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import anyio
 from pydantic_ai.sandboxes import (
     CommandResult,
     FileEntry,
     SandboxBackend,
+    SandboxError,
     SandboxTimeoutError,
     SandboxUnavailableError,
 )
@@ -53,10 +51,7 @@ if TYPE_CHECKING:
     from pydantic_ai.sandboxes import (
         SandboxCommand,
         SandboxFilesystem,
-        SandboxProcess,
         SupportsFilesystem,
-        SupportsStart,
-        SupportsStream,
     )
 
 __all__ = (
@@ -73,8 +68,6 @@ DEFAULT_IMAGE = 'python:3.12-slim'
 DEFAULT_APP_NAME = 'pydantic-ai-harness'
 DEFAULT_SANDBOX_TIMEOUT = 300
 
-
-_Stream = Literal['stdout', 'stderr']
 
 _MISSING_MODAL = (
     'The \'modal\' package is required for ModalSandbox. Install it with `uv add "pydantic-ai-harness[modal]"`.'
@@ -106,7 +99,7 @@ _SIGKILL_EXIT = 137
 _RESULT_GRACE = 30
 
 
-class ModalSandboxError(RuntimeError):
+class ModalSandboxError(SandboxError):
     """A recoverable Modal provider operation failed."""
 
 
@@ -120,12 +113,6 @@ class ModalSandboxAuthError(ModalSandboxError, SandboxUnavailableError):
 
 class _ModalSandboxAlreadyExists(ModalSandboxError):
     """A named create lost a race to an existing sandbox."""
-
-
-@dataclass(frozen=True)
-class _ModalOutputChunk:
-    stream: _Stream
-    data: str
 
 
 def _unavailable_sandbox_exc_types() -> tuple[type[BaseException], ...]:
@@ -158,7 +145,7 @@ def _command_argv(command: SandboxCommand, shell: bool) -> Sequence[str]:
 
 
 class _ModalProcess:
-    """A command running inside a Modal sandbox, as returned by `ModalSandboxBackend.start`."""
+    """Private command result helper used by `ModalSandboxBackend.run`."""
 
     def __init__(
         self,
@@ -172,77 +159,8 @@ class _ModalProcess:
         self._backend = backend
         self._deadline = deadline
         self._started_at = started_at
-        self._streaming = False
         self._lock = anyio.Lock()
         self._outcome: CommandResult | Exception | None = None
-
-    @property
-    def pid(self) -> int | None:
-        # Modal identifies a command by an exec id of its own and never reports the container's
-        # OS process id, so there is no honest number to give here.
-        return None
-
-    def stream(self) -> AsyncGenerator[_ModalOutputChunk]:
-        """Iterate over the command's output as Modal produces it.
-
-        Chunks from the two streams are interleaved in arrival order. Each stream has an
-        incremental UTF-8 decoder, so a character split across transport chunks stays intact.
-        Modal's readers have a single consumer, so a second `stream()` call raises. Nothing
-        here is load-bearing for `wait()`, which asks Modal for the output in full.
-
-        Merging two readers needs concurrency inside an async generator, which asyncio
-        primitives express safely and anyio's task groups do not, so this is the one part of
-        the backend that requires asyncio specifically. Modal's SDK requires it anyway.
-        """
-        if self._streaming:
-            raise ModalSandboxError(
-                "Modal's output streams have a single consumer: `stream()` can only be iterated "
-                'once per started command.'
-            )
-        self._streaming = True
-        return self._stream()
-
-    async def _stream(self) -> AsyncGenerator[_ModalOutputChunk]:
-        iterators: dict[_Stream, AsyncIterator[bytes]] = {
-            'stdout': aiter(self._process.stdout),
-            'stderr': aiter(self._process.stderr),
-        }
-        decoders = {name: codecs.getincrementaldecoder('utf-8')(errors='replace') for name in iterators}
-        arrival = itertools.count()
-
-        async def read_one(name: _Stream) -> tuple[int, _Stream, bytes | None]:
-            chunk = await anext(iterators[name], None)
-            # Stamped where the chunk lands rather than where it is collected: a wake-up that
-            # finds both streams ready hands them back as an unordered set, and this is what
-            # keeps the merge in the order Modal produced the output.
-            return next(arrival), name, chunk
-
-        pending = {asyncio.create_task(read_one(name)) for name in iterators}
-        try:
-            while pending:
-                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                try:
-                    chunks = sorted(task.result() for task in done)
-                except Exception as error:
-                    # Same taxonomy as `wait()`: a read that fails mid-stream may be a dead
-                    # sandbox rather than the transport blip it looks like.
-                    raise await self._backend.operation_error(error, 'Could not read the command output') from error
-                for _, name, chunk in chunks:
-                    if chunk is None:  # that stream reached EOF and is not re-armed
-                        final = decoders[name].decode(b'', final=True)
-                        if final:
-                            yield _ModalOutputChunk(stream=name, data=final)
-                        continue
-                    pending.add(asyncio.create_task(read_one(name)))
-                    text = decoders[name].decode(chunk)
-                    if text:
-                        yield _ModalOutputChunk(stream=name, data=text)
-        finally:
-            # Reaped, not just cancelled: an abandoned read would otherwise keep retrying
-            # against the worker long after the consumer walked away.
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
 
     async def wait(self) -> CommandResult:
         """Wait for the command and return its result, the same one on every call."""
@@ -411,13 +329,11 @@ class ModalSandboxBackend(SandboxBackend):
     [`connect`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.connect]; the
     `ModalSandbox` capability does both for you.
 
-    Both process opt-ins are implemented: background commands (`SupportsStart`) and live output
-    (`SupportsStream`, for one consumer per command, which is all Modal's readers hand out).
-    What Modal has no API for is killing a single command, so `kill()` raises
-    `NotImplementedError` and `timeout=` -- which Modal enforces itself -- is how a command is
-    bounded. For the same reason, cancelling a `run()` stops the wait but not the command: it
-    runs on until its deadline, or until the sandbox is terminated. Modal takes whole seconds,
-    so a fractional `timeout=` rounds up to the deadline actually applied.
+    Commands run as one-shot operations, with complete output returned after they finish.
+    Modal enforces `timeout=` itself, so a command is bounded by the deadline applied to its
+    execution. Cancelling a `run()` stops the wait but not the command: it runs on until its
+    deadline, or until the sandbox is terminated. Modal takes whole seconds, so a fractional
+    `timeout=` rounds up to the deadline actually applied.
 
     The protocol is structural, but subclassing it here makes a signature drift fail the type
     check on this class instead of at a distant `Sandbox.wrap` call.
@@ -658,10 +574,10 @@ class ModalSandboxBackend(SandboxBackend):
         command running until its `timeout` deadline. Pass a finite `timeout` so an abandoned
         command cannot run on indefinitely.
         """
-        process = await self.start(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
+        process = await self._start(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
         return await process.wait()
 
-    async def start(
+    async def _start(
         self,
         command: SandboxCommand,
         *,
@@ -670,7 +586,7 @@ class ModalSandboxBackend(SandboxBackend):
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
     ) -> _ModalProcess:
-        """Start a command without waiting, returning a handle to the running process."""
+        """Start the private command helper used by `run`."""
         import modal
 
         argv = _command_argv(command, shell)
@@ -756,14 +672,7 @@ if TYPE_CHECKING:
     # check. `__new__` rather than a call, because neither SDK object can be constructed
     # without a live sandbox behind it; this block never runs.
     _sandbox = modal.Sandbox.__new__(modal.Sandbox)
-    _container_process = modal.container_process.ContainerProcess[bytes].__new__(
-        modal.container_process.ContainerProcess[bytes]
-    )
     _backend = ModalSandboxBackend(_sandbox)
-    _process = _ModalProcess(_container_process, backend=_backend, deadline=None, started_at=time.monotonic())
     _backend_conforms: SandboxBackend = _backend
     _filesystem_backend_conforms: SupportsFilesystem = _backend
-    _start_conforms: SupportsStart = _backend
     _filesystem_conforms: SandboxFilesystem = _backend.fs
-    _process_conforms: SandboxProcess = _process
-    _stream_conforms: SupportsStream = _process

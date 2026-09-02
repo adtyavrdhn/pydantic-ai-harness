@@ -139,20 +139,6 @@ class TestRealExecution:
         assert stderr_lines[-1] == '300000'
         assert len(stderr_lines) == 300000
 
-    async def test_streaming_does_not_consume_the_result(self, sandbox: ModalSandboxBackend) -> None:
-        """Validates the fake-encoded assumption that Modal's readers replay from byte zero.
-
-        `wait()` reads the output in full rather than accumulating what streaming consumed, so
-        a streamed command still reports its whole output.
-        """
-        process = await sandbox.start('echo one; echo two 1>&2', shell=True, timeout=30)
-        streamed = [chunk.data async for chunk in process.stream()]
-        result = await process.wait()
-
-        assert ''.join(streamed) != ''
-        assert result.stdout == 'one\n'
-        assert result.stderr == 'two\n'
-
     async def test_concurrent_commands_share_one_container(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the fake-encoded assumption that one Modal sandbox can multiplex concurrent commands."""
         results: dict[int, str] = {}
@@ -178,12 +164,6 @@ class TestRealExecution:
         """Pins Modal's current return code for an executable lookup failure."""
         result = await sandbox.run([_unique('definitely-not-a-real-binary')], timeout=15)
         assert result.exit_code == 128
-
-    async def test_kill_is_not_available(self, sandbox: ModalSandboxBackend) -> None:
-        """Pins that Modal still exposes no per-command kill, which the deadline design rests on."""
-        process = await sandbox.start('sleep 1', shell=True, timeout=15)
-        with pytest.raises(NotImplementedError):
-            await process.kill()
 
 
 class TestCreateConfiguration:
