@@ -87,8 +87,9 @@ def run_code_return_content(messages: list[ModelMessage]) -> object:
 @asynccontextmanager
 async def prepared_eager_toolset(
     tools: Sequence[Tool[None]],
+    capability: CodeMode[None] | None = None,
 ) -> AsyncGenerator[tuple[CodeMode[None], CodeModeToolset[None], RunContext[None], ToolsetTool[None]]]:
-    capability = CodeMode[None](eager=True)
+    capability = capability or CodeMode[None](eager=True)
     root = capability.get_wrapper_toolset(FunctionToolset[None](tools=tools))
     assert isinstance(root, CodeModeToolset)
     ctx = build_run_context()
@@ -273,6 +274,25 @@ class TestEagerCodeMode:
 
         assert result.output == 'done'
         assert calls == ['alpha']
+
+    async def test_monty_limits_apply_to_eager_fragments(self):
+        capability = CodeMode[None](eager=True, resource_limits={'max_duration_secs': 0.3})
+        code = 'y = 0\nfor i in range(100_000_000):\n    y += i\nz = 1\nz'
+
+        async with prepared_eager_toolset([], capability) as (capability, toolset, ctx, run_code):
+            await observe(
+                capability,
+                ctx,
+                [
+                    PartStartEvent(
+                        index=0, part=ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='c1')
+                    )
+                ],
+            )
+            exec_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
+
+            with pytest.raises(ModelRetry, match='time limit exceeded'):
+                await toolset.call_tool('run_code', {'code': code}, exec_ctx, run_code)
 
     @pytest.mark.parametrize('escaped_key', [False, True])
     async def test_restart_seen_before_code_does_not_execute_a_prefix(self, escaped_key: bool):

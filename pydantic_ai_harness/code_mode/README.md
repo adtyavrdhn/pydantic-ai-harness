@@ -270,6 +270,9 @@ and one combined result. Hooks on `fetch_item` and other tools called by the cod
 Hooks around `run_code` itself run only after the model has finished writing the call, so
 they cannot approve or change lines that eager mode has already run.
 
+Configured Monty resource limits still apply. Eager fragments and the remaining code share
+the same session duration and memory allowances.
+
 Keep these limitations in mind:
 
 - Eager mode cannot undo side effects from code that has already run.
