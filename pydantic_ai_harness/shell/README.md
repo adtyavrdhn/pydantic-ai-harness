@@ -54,10 +54,16 @@ VM-backed sandbox instead.
 | `stop_command` | Terminate a background command and return its final output. |
 
 Output is labelled with `[stdout]` / `[stderr]` markers and an `[exit code: N]`
-line on non-zero exit. When it exceeds `max_output_chars` the **tail** is kept
-(the head is dropped), so errors, stack traces, and the `[stderr]` section --
-which all land at the end -- survive truncation. Background command status and
-exit metadata follow the captured output so they remain in the retained tail.
+line on non-zero exit. `max_output_chars` limits the text sent to the model after
+execution; the **tail** is kept (the head is dropped), so errors, stack traces,
+and the `[stderr]` section -- which all land at the end -- survive truncation.
+Background command status and exit metadata follow the captured output so they
+remain in the retained tail. `LocalSandbox` also has a separate 10 MiB safety
+ceiling on command output.
+
+Each command starts in the configured `cwd`; `cd` affects only that command. The
+omitted foreground timeout uses the configured default, and an override must be
+positive and at most `max_timeout`. For longer work, use `start_command`.
 
 ## Command controls
 
@@ -83,7 +89,8 @@ can retry with an allowed command) rather than aborting the run. So does every
 other failure the model can act on: a working directory an earlier command
 deleted or replaced with a file, and a command holding a NUL byte or a character
 that cannot be encoded for the operating system. A sandbox that has gone away
-aborts the run instead, since the model cannot recover from it.
+aborts the run instead, since the model cannot recover from it. Bare backend
+programming failures also abort the run.
 
 > **These checks are best-effort, not a security boundary.** `allowed_commands`
 > is a guardrail against accidents, not a security boundary. Validation checks
@@ -147,16 +154,6 @@ process and deletes its temp files. The agent runtime enters toolsets via an
 `AsyncExitStack`, so this cleanup runs whether the run succeeds or raises -- an
 agent that forgets to call `stop_command` won't leak processes.
 
-## Working directory
-
-By default each command runs in `cwd` and `cd` has no lasting effect. Set
-`persist_cwd=True` to make `cd` sticky across calls: each command is wrapped so
-that after it runs, its final working directory is recorded to a private temp
-file in the sandbox, and that directory is carried into subsequent calls. The
-path is only
-updated when the command exits `0`, and the record is written out-of-band (not
-to stdout) so command output can never spoof the tracked directory.
-
 ## Configuration
 
 ```python
@@ -166,8 +163,8 @@ Shell(
     denied_commands=[...],         # denylist (defaults to destructive commands)
     denied_operators=[],           # blocked shell operators
     default_timeout=30.0,          # seconds, per run_command
+    max_timeout=600.0,              # maximum seconds, per run_command
     max_output_chars=50_000,       # output cap returned to the model
-    persist_cwd=False,             # make cd sticky across calls
     allow_interactive=False,       # allow TTY-style commands
     env=None,                      # explicit env (None = the sandbox's own)
     denied_env_patterns=[],        # glob patterns removed from `env`

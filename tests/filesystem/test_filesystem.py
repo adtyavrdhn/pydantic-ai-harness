@@ -19,8 +19,10 @@ from pydantic_ai.sandboxes import (
     LocalSandbox,
     Sandbox,
     SandboxCommand,
+    SandboxError,
     SandboxFileEntry,
     SandboxResult,
+    SandboxTimeoutError,
     SandboxUnavailableError,
 )
 from pydantic_ai.usage import RunUsage
@@ -122,6 +124,32 @@ class _ErrorBackend:
 
     async def working_dir(self) -> str:
         return '/work'
+
+    async def run(
+        self,
+        command: SandboxCommand,
+        *,
+        shell: bool = False,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> SandboxResult:
+        raise self.error
+
+
+class _TimeoutBackend:
+    """A real local filesystem whose command execution times out."""
+
+    provider = 'timeout'
+
+    def __init__(self, backend: LocalSandbox, error: SandboxTimeoutError) -> None:
+        self.backend = backend
+        self.fs = backend.fs
+        self.error = error
+        self.sandbox_id = backend.sandbox_id
+
+    async def working_dir(self) -> str:
+        return await self.backend.working_dir()
 
     async def run(
         self,
@@ -892,11 +920,11 @@ async def test_tools_report_an_unattached_sandbox_to_the_user(tmp_path: Path) ->
 @pytest.mark.parametrize(
     ('error', 'expected'),
     [
+        (SandboxError('temporary failure'), ModelRetry),
         (SandboxUnavailableError('gone'), SandboxUnavailableError),
-        (UserError('misconfigured'), UserError),
-        (RuntimeError('temporary failure'), ModelRetry),
+        (RuntimeError('backend bug'), RuntimeError),
     ],
-    ids=['unavailable', 'user-error', 'runtime-error'],
+    ids=['sandbox-error', 'unavailable', 'runtime-error'],
 )
 @pytest.mark.parametrize(
     ('name', 'args'),
@@ -943,6 +971,21 @@ async def test_a_failing_command_is_reported_to_the_model(
         sandbox = Sandbox.wrap(_ResultBackend(local, CommandResult(exit_code=exit_code, stdout='', stderr=stderr)))
         with pytest.raises(ModelRetry, match=re.escape(message)):
             await _call(_toolset(Path('.')), _ctx(sandbox), name, args)
+
+
+@pytest.mark.parametrize(
+    ('name', 'args'),
+    [('search_files', {'pattern': 'x'}), ('find_files', {'pattern': '*'})],
+)
+async def test_command_backed_search_timeout_is_recoverable(name: str, args: dict[str, object]) -> None:
+    error = SandboxTimeoutError('command timed out at /outside/root')
+
+    async with LocalSandbox() as local:
+        sandbox = Sandbox.wrap(_TimeoutBackend(local, error))
+        with pytest.raises(ModelRetry, match=f'{name} timed out') as exc_info:
+            await _call(_toolset(Path('.')), _ctx(sandbox), name, args)
+
+    assert '/outside/root' not in str(exc_info.value)
 
 
 async def test_a_path_name_that_is_too_long_is_recoverable(tmp_path: Path, sandbox: Sandbox) -> None:

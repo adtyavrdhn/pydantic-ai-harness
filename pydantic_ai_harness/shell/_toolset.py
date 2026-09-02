@@ -5,18 +5,19 @@ from __future__ import annotations
 import errno
 import fnmatch
 import functools
+import math
 import os
 import re
 import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Concatenate, ParamSpec
 
 import anyio
 from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ModelRetry, UserError
-from pydantic_ai.sandboxes import Sandbox, SandboxTimeoutError, SandboxUnavailableError
+from pydantic_ai.sandboxes import Sandbox, SandboxError, SandboxTimeoutError, SandboxUnavailableError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset, ToolsetTool
 
@@ -63,18 +64,19 @@ def _recoverable(
             return await fn(self, *args, **kwargs)
         except PermissionError as e:
             raise ModelRetry(str(e)) from e
+        # A dead sandbox and a misconfigured one (`UserError`, e.g. no sandbox attached) are the
+        # application's to fix; deliberate backend failures are recoverable, but programming
+        # errors still propagate.
+        except (SandboxUnavailableError, UserError):
+            raise
+        except SandboxError as e:
+            raise ModelRetry(str(e)) from e
         except OSError as e:
             reason = _RECOVERABLE_ERRNOS.get(e.errno)
             if reason is None:
                 raise
             # `str(e)` embeds the absolute path; the reason alone doesn't.
             raise ModelRetry(reason) from e
-        # A dead sandbox and a misconfigured one (`UserError`, e.g. no sandbox attached) are the
-        # application's to fix; other backend runtime failures are recoverable.
-        except (SandboxUnavailableError, UserError):
-            raise
-        except RuntimeError as e:
-            raise ModelRetry(str(e)) from e
 
     return wrapper
 
@@ -120,8 +122,6 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
     Supports synchronous execution (run_command) and background processes
     (start_command / check_command / stop_command). Output is truncated to fit
     model context and labelled with stdout/stderr/exit code.
-
-    Optionally tracks the working directory across calls so ``cd`` persists.
     """
 
     def __init__(
@@ -132,34 +132,37 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         denied_commands: Sequence[str],
         denied_operators: Sequence[str],
         default_timeout: float,
+        max_timeout: float,
         max_output_chars: int,
-        persist_cwd: bool,
         allow_interactive: bool,
         env: Mapping[str, str] | None = None,
         denied_env_patterns: Sequence[str] = (),
     ) -> None:
         super().__init__()
         # The configured starting directory: a sandbox path, absolute or relative to the
-        # sandbox working directory. Never mutated by persist_cwd, so `for_run` can hand
-        # each run a fresh instance rooted back here.
+        # sandbox working directory.
         self._initial_cwd = cwd
         self._cwd = sandbox_path(cwd)
         self._allowed_commands = list(allowed_commands)
         self._denied_commands = list(denied_commands)
         self._denied_operators = list(denied_operators)
         self._default_timeout = default_timeout
+        self._max_timeout = max_timeout
         self._max_output_chars = max_output_chars
-        self._persist_cwd = persist_cwd
         self._allow_interactive = allow_interactive
         self._env = dict(env) if env is not None else None
         self._denied_env_patterns = list(denied_env_patterns)
-        self._current_cwd: str | None = None
         self._background: dict[str, _BackgroundProcess] = {}
 
         if self._allowed_commands and self._denied_commands:
             raise ValueError('Specify allowed_commands or denied_commands, not both.')
         if max_output_chars <= 0:
             raise ValueError('max_output_chars must be a positive integer.')
+        for name, value in (('default_timeout', default_timeout), ('max_timeout', max_timeout)):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f'{name} must be a positive finite number.')
+        if default_timeout > max_timeout:
+            raise ValueError('default_timeout must not exceed max_timeout.')
 
         self.add_function(
             self.run_command,
@@ -179,9 +182,8 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
 
         `get_toolset` builds one shared instance at agent construction (see
         `AbstractToolset.for_run`, which defaults to returning `self`). This
-        toolset holds mutable per-run state (`_current_cwd`, `_background`), so
-        without an override two concurrent runs would corrupt each other's cwd
-        and kill each other's background processes.
+        toolset holds mutable per-run background state, so without an override
+        two concurrent runs could kill each other's background processes.
         """
         return ShellToolset(
             cwd=self._initial_cwd,
@@ -189,8 +191,8 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             denied_commands=self._denied_commands,
             denied_operators=self._denied_operators,
             default_timeout=self._default_timeout,
+            max_timeout=self._max_timeout,
             max_output_chars=self._max_output_chars,
-            persist_cwd=self._persist_cwd,
             allow_interactive=self._allow_interactive,
             env=self._env,
             denied_env_patterns=self._denied_env_patterns,
@@ -235,10 +237,8 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         return None if self._env is None else self._filter_env(self._env)
 
     async def _cwd_for(self, ctx: RunContext[AgentDepsT]) -> str:
-        """The absolute sandbox path commands run in, tracking `cd` when `persist_cwd` is set."""
-        if self._current_cwd is None:
-            self._current_cwd = await ctx.sandbox.resolve(self._cwd)
-        return self._current_cwd
+        """Resolve the configured working directory for this command."""
+        return await ctx.sandbox.resolve(self._cwd)
 
     async def __aexit__(self, *args: Any) -> None:
         """Terminate all remaining background processes and clean up their output files."""
@@ -309,24 +309,6 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         if self._allowed_commands and executable not in self._allowed_commands:
             raise PermissionError(f'Command {executable!r} is not in the allowed list.')
 
-    async def _apply_captured_cwd(self, sandbox: Sandbox, cwd_path: str) -> None:
-        """Update the persistent cwd from the capture file, ignoring junk.
-
-        `pwd` is written to a private file whose random path the agent's command
-        can't address, so command output can never spoof the tracked cwd. The
-        command it belongs to already succeeded, so a failed or junk capture is
-        bookkeeping the toolset can drop, not a tool failure to report -- except
-        a dead sandbox, which the caller must see.
-        """
-        try:
-            recorded = (await sandbox.fs.read_bytes(cwd_path)).decode('utf-8').strip()
-            if recorded and PurePosixPath(recorded).is_absolute():
-                self._current_cwd = recorded
-        except SandboxUnavailableError:
-            raise
-        except Exception:
-            pass
-
     @_recoverable
     async def run_command(
         self,
@@ -337,58 +319,53 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
     ) -> str:
         """Execute a shell command and return its output.
 
+        Each command starts in the configured working directory; `cd` affects only that command.
+
         Args:
             ctx: The current agent run context.
             command: The shell command to run.
-            timeout_seconds: Maximum seconds to wait (default: 30).
+            timeout_seconds: Maximum seconds to wait (default: configured default).
 
         Returns:
             Labeled stdout/stderr output with exit code on non-zero exit.
         """
         self._check_command(command)
+        if timeout_seconds is not None and (
+            not math.isfinite(timeout_seconds) or timeout_seconds <= 0 or timeout_seconds > self._max_timeout
+        ):
+            raise ModelRetry(
+                f'timeout_seconds must be greater than 0 and at most {self._max_timeout}; '
+                'use start_command for longer work.'
+            )
         timeout = timeout_seconds if timeout_seconds is not None else self._default_timeout
-        cwd_path = f'/tmp/harness_cwd_{uuid.uuid4().hex}' if self._persist_cwd else None
-        actual_command = (
-            f'{command}\n__harness_ec=$?\npwd > {cwd_path}\nexit $__harness_ec' if cwd_path is not None else command
-        )
 
         try:
-            try:
-                result = await ctx.sandbox.run(
-                    actual_command,
-                    shell=True,
-                    timeout=timeout,
-                    cwd=await self._cwd_for(ctx),
-                    env=self._run_env(),
-                )
-            except SandboxTimeoutError as e:
-                parts: list[str] = []
-                if e.stdout:
-                    parts.append(f'[stdout]\n{e.stdout}')
-                if e.stderr:
-                    parts.append(f'[stderr]\n{e.stderr}')
-                parts.append(f'[Command timed out after {timeout}s]')
-                return '\n'.join(parts)
+            result = await ctx.sandbox.run(
+                command,
+                shell=True,
+                timeout=timeout,
+                cwd=await self._cwd_for(ctx),
+                env=self._run_env(),
+            )
+        except SandboxTimeoutError as e:
+            parts: list[str] = []
+            if e.stdout:
+                parts.append(f'[stdout]\n{e.stdout}')
+            if e.stderr:
+                parts.append(f'[stderr]\n{e.stderr}')
+            parts.append(f'[Command timed out after {timeout}s]')
+            return '\n'.join(parts)
 
-            parts = []
-            if result.stdout:
-                parts.append(f'[stdout]\n{result.stdout}')
-            if result.stderr:
-                parts.append(f'[stderr]\n{result.stderr}')
-            output = '\n'.join(parts) if parts else '(no output)'
+        parts = []
+        if result.stdout:
+            parts.append(f'[stdout]\n{result.stdout}')
+        if result.stderr:
+            parts.append(f'[stderr]\n{result.stderr}')
+        output = '\n'.join(parts) if parts else '(no output)'
 
-            if cwd_path is not None and result.exit_code == 0:
-                await self._apply_captured_cwd(ctx.sandbox, cwd_path)
-
-            if result.exit_code != 0:
-                output = f'{output}\n[exit code: {result.exit_code}]'
-            return output
-        finally:
-            if cwd_path is not None:
-                try:
-                    await ctx.sandbox.fs.remove(cwd_path)
-                except Exception:
-                    pass
+        if result.exit_code != 0:
+            output = f'{output}\n[exit code: {result.exit_code}]'
+        return output
 
     @_recoverable
     async def start_command(self, ctx: RunContext[AgentDepsT], command: str) -> str:

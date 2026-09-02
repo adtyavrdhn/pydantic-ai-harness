@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Concatenate, ParamSpec
 
 from pydantic_ai.exceptions import ModelRetry, UserError
-from pydantic_ai.sandboxes import SandboxUnavailableError
+from pydantic_ai.sandboxes import SandboxError, SandboxUnavailableError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -101,18 +101,21 @@ def _recoverable(
             return await fn(self, ctx, *args, **kwargs)
         except _RECOVERABLE_ERRORS as e:
             raise ModelRetry(_sanitize_recoverable_error(e, await self._root_for(ctx))) from e  # pyright: ignore[reportPrivateUsage]
+        # A dead sandbox and a misconfigured one (`UserError`, e.g. no sandbox attached) are the
+        # user's to fix; deliberate backend failures are recoverable, but programming errors
+        # still propagate.
+        except (SandboxUnavailableError, UserError):
+            raise
+        except SandboxError as e:
+            if isinstance(e, TimeoutError):
+                raise ModelRetry(f'{fn.__name__} timed out.') from e
+            raise ModelRetry(str(e)) from e
         except OSError as e:
             reason = _RECOVERABLE_ERRNOS.get(e.errno)
             if reason is None:
                 raise
             # The full error may embed the absolute path; the reason is path-free.
             raise ModelRetry(reason) from e
-        # A dead sandbox and a misconfigured one (`UserError`, e.g. no sandbox attached) are the
-        # user's to fix; other backend runtime failures are recoverable.
-        except (SandboxUnavailableError, UserError):
-            raise
-        except RuntimeError as e:
-            raise ModelRetry(str(e)) from e
 
     return wrapper
 
@@ -292,7 +295,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to the root directory.
+            path: Relative paths always resolve from the configured root.
             offset: Zero-based line offset to start reading from.
             limit: Maximum number of lines to return (default: 2000).
 
@@ -344,7 +347,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to the root directory.
+            path: Relative paths always resolve from the configured root.
             content: The text content to write.
             expected_hash: If provided, the write is rejected when the file exists
                 and its current hash doesn't match (optimistic concurrency).
@@ -403,7 +406,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to the root directory.
+            path: Relative paths always resolve from the configured root.
             old_text: The exact text to find (must appear exactly once).
             new_text: The replacement text.
             expected_hash: If provided, rejects the edit when the file's
@@ -443,7 +446,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: Directory path relative to the root directory.
+            path: Relative paths always resolve from the configured root.
 
         Returns:
             A newline-separated listing with type indicators and sizes.
@@ -482,7 +485,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Args:
             ctx: The current agent run context.
             pattern: Regex pattern to search for.
-            path: Directory to search in, relative to the root directory.
+            path: Relative paths always resolve from the configured root.
             include_glob: If provided, only search files matching this glob (e.g. '*.py').
 
         Returns:
@@ -524,7 +527,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             ctx: The current agent run context.
             pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
                 '**/*.json'). Absolute patterns are rejected.
-            path: Directory to search in, relative to the root directory.
+            path: Relative paths always resolve from the configured root.
 
         Returns:
             Newline-separated list of matching file paths relative to root.
@@ -573,7 +576,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: Directory path relative to the root directory.
+            path: Relative paths always resolve from the configured root.
 
         Returns:
             Confirmation message.
@@ -588,7 +591,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File or directory path relative to the root directory.
+            path: Relative paths always resolve from the configured root.
 
         Returns:
             Formatted metadata including size, type, and permissions.

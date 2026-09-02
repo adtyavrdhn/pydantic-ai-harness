@@ -17,6 +17,8 @@ subtly wrong.
 `root_dir` inside the run's sandbox. Access is filtered through allow / deny /
 protected glob patterns. Every run needs a sandbox attached; without one the
 first tool call raises an error that says how to attach one.
+Relative paths always resolve from the configured root, regardless of which
+other tools ran before them.
 
 ```python
 from pathlib import Path

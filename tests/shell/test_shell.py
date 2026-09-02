@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import errno
+import math
 import os
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Literal
 
 import anyio
 import pytest
@@ -21,6 +23,7 @@ from pydantic_ai.sandboxes import (
     LocalSandbox,
     Sandbox,
     SandboxCommand,
+    SandboxError,
     SandboxFilesystem,
     SandboxResult,
     SandboxTimeoutError,
@@ -28,6 +31,7 @@ from pydantic_ai.sandboxes import (
 )
 
 from pydantic_ai_harness.code_mode import CodeMode
+from pydantic_ai_harness.filesystem import FileSystemToolset
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 from pydantic_ai_harness.shell._toolset import ShellToolset
 from tests.shell.conftest import (  # pyright: ignore[reportMissingTypeStubs]
@@ -187,43 +191,79 @@ class TestTimeouts:
         result = await call_tool(toolset, run_context(sandbox), 'run_command', command='sleep 10')
         assert result == '[Command timed out after 0.05s]'
 
+    @pytest.mark.parametrize('field', ['default_timeout', 'max_timeout'])
+    @pytest.mark.parametrize('value', [0.0, -1.0, math.inf, math.nan], ids=['zero', 'negative', 'infinity', 'nan'])
+    def test_timeout_configuration_must_be_positive_and_finite(
+        self, field: Literal['default_timeout', 'max_timeout'], value: float
+    ) -> None:
+        with pytest.raises(ValueError, match=f'{field} must be a positive finite number'):
+            if field == 'default_timeout':
+                shell_toolset(default_timeout=value)
+            else:
+                shell_toolset(max_timeout=value)
 
-class TestPersistCwd:
-    async def test_cwd_does_not_move_when_persistence_is_off(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    def test_default_timeout_cannot_exceed_max_timeout(self) -> None:
+        with pytest.raises(ValueError, match='default_timeout must not exceed max_timeout'):
+            shell_toolset(default_timeout=2.0, max_timeout=1.0)
+
+    async def test_model_timeout_above_maximum_recommends_start_command(self, tmp_path: Path) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = shell_toolset(default_timeout=1.0, max_timeout=1.0)
+            with pytest.raises(ModelRetry, match='at most 1.0.*start_command'):
+                await call_tool(
+                    toolset, run_context(Sandbox.wrap(backend)), 'run_command', command='true', timeout_seconds=2
+                )
+            assert backend.timeouts == []
+
+    async def test_model_timeout_at_maximum_is_forwarded(self, tmp_path: Path) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = shell_toolset(default_timeout=1.0, max_timeout=1.0)
+            await call_tool(
+                toolset, run_context(Sandbox.wrap(backend)), 'run_command', command='true', timeout_seconds=1.0
+            )
+            assert backend.timeouts == [1.0]
+
+    async def test_tool_description_uses_the_configured_default(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(default_timeout=12.5)
+        tools = await toolset.get_tools(run_context(sandbox))
+        description = str(tools['run_command'].tool_def.parameters_json_schema)
+        assert 'configured default' in description
+        assert 'default: 30' not in description
+        assert 'Each command starts in the configured working directory' in str(
+            tools['run_command'].tool_def.description
+        )
+
+
+class TestWorkingDirectory:
+    async def test_each_command_starts_in_the_configured_directory(self, tmp_path: Path, sandbox: Sandbox) -> None:
         (tmp_path / 'sub').mkdir()
+        (tmp_path / 'root.txt').write_text('root\n')
         toolset = shell_toolset()
         ctx = run_context(sandbox)
         await call_tool(toolset, ctx, 'run_command', command='cd sub')
         assert await call_tool(toolset, ctx, 'run_command', command='pwd') == f'[stdout]\n{tmp_path}\n'
 
-    async def test_command_output_cannot_spoof_the_tracked_cwd(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        # `pwd` is captured to a private file, so a command that merely prints a directory
-        # cannot redirect where the next one runs.
-        (tmp_path / 'sub').mkdir()
-        toolset = shell_toolset(persist_cwd=True)
-        ctx = run_context(sandbox)
-        await call_tool(toolset, ctx, 'run_command', command=f'printf {tmp_path / "sub"}')
-        assert await call_tool(toolset, ctx, 'run_command', command='pwd') == f'[stdout]\n{tmp_path}\n'
+        filesystem = FileSystemToolset(
+            root_dir=tmp_path,
+            allowed_patterns=(),
+            denied_patterns=(),
+            protected_patterns=(),
+            max_read_lines=100,
+            max_list_results=100,
+            max_search_results=100,
+            max_find_results=100,
+        )
+        tools = await filesystem.get_tools(ctx)
+        result: object = await filesystem.call_tool('read_file', {'path': 'root.txt'}, ctx, tools['read_file'])
+        assert isinstance(result, str)
+        assert result.startswith('[root.txt | 1 lines | hash:')
+        assert result.endswith('\n     1\troot\n')
 
 
 class TestForRunIsolation:
-    """`get_toolset` builds one shared instance at agent construction, so `for_run` must hand each
-    run a fresh copy -- otherwise concurrent runs corrupt each other's cwd and background processes.
-    """
-
-    async def test_each_run_starts_from_the_configured_directory(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        (tmp_path / 'sub').mkdir()
-        shared = shell_toolset(persist_cwd=True)
-        ctx = run_context(sandbox)
-
-        first = await shared.for_run(ctx)
-        assert isinstance(first, ShellToolset)
-        await call_tool(first, ctx, 'run_command', command='cd sub')
-        assert await call_tool(first, ctx, 'run_command', command='pwd') == f'[stdout]\n{tmp_path / "sub"}\n'
-
-        second = await shared.for_run(ctx)
-        assert isinstance(second, ShellToolset)
-        assert await call_tool(second, ctx, 'run_command', command='pwd') == f'[stdout]\n{tmp_path}\n'
+    """`for_run` gives each run independent background-process state."""
 
     async def test_each_run_keeps_the_configured_environment(self, sandbox: Sandbox) -> None:
         shared = shell_toolset(
@@ -297,8 +337,13 @@ class TestShellCapability:
 
     def test_defaults(self) -> None:
         shell = Shell[None]()
-        assert (shell.cwd, shell.default_timeout, shell.max_output_chars) == ('.', 30.0, 50_000)
-        assert (shell.persist_cwd, shell.allow_interactive) == (False, False)
+        assert (shell.cwd, shell.default_timeout, shell.max_timeout, shell.max_output_chars) == (
+            '.',
+            30.0,
+            600.0,
+            50_000,
+        )
+        assert shell.allow_interactive is False
         assert (shell.env, list(shell.denied_env_patterns)) == (None, [])
 
     @pytest.mark.parametrize(
@@ -423,6 +468,7 @@ class _RecordingLocalBackend:
         self.backend = backend
         self.fs = _ControllableFilesystem(backend.fs)
         self.environments: list[Mapping[str, str] | None] = []
+        self.timeouts: list[float | None] = []
         self.run_error: Exception | None = None
         self.raise_after_kill = False
         self.kill_failure: str | None = None
@@ -443,6 +489,7 @@ class _RecordingLocalBackend:
         timeout: float | None = None,
     ) -> SandboxResult:
         self.environments.append(env)
+        self.timeouts.append(timeout)
         if self.run_error is not None:
             raise self.run_error
         if self.kill_failure is not None and not isinstance(command, str) and command[0] == 'kill':
@@ -553,66 +600,6 @@ class TestRunCommand:
         )
         assert result == '[stdout]\nyes:absent'
 
-    async def test_persist_cwd_tracks_only_successful_absolute_capture(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        (tmp_path / 'sub').mkdir()
-        toolset = shell_toolset(persist_cwd=True)
-        ctx = run_context(sandbox)
-
-        await call_tool(toolset, ctx, 'run_command', command='cd sub')
-        moved = f'[stdout]\n{tmp_path / "sub"}\n'
-        assert await call_tool(toolset, ctx, 'run_command', command='pwd') == moved
-
-        await call_tool(toolset, ctx, 'run_command', command='cd ..; false')
-        assert await call_tool(toolset, ctx, 'run_command', command='pwd') == moved
-
-        # A relative capture is junk: applying it would leave the next command with no valid cwd.
-        await call_tool(toolset, ctx, 'run_command', command='pwd() { printf relative; }')
-        assert await call_tool(toolset, ctx, 'run_command', command='pwd') == moved
-
-    async def test_invalid_utf8_cwd_capture_is_ignored(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        toolset = shell_toolset(persist_cwd=True)
-        ctx = run_context(sandbox)
-        await call_tool(toolset, ctx, 'run_command', command=r"pwd() { printf '\377'; }")
-        assert await call_tool(toolset, ctx, 'run_command', command='pwd') == f'[stdout]\n{tmp_path}\n'
-
-    async def test_cwd_capture_cleanup_is_best_effort(self, tmp_path: Path) -> None:
-        async with LocalSandbox(root=tmp_path) as local:
-            backend = _RecordingLocalBackend(local)
-            backend.fs.remove_error = RuntimeError('remove failed')
-            result = await call_tool(
-                shell_toolset(persist_cwd=True),
-                run_context(Sandbox.wrap(backend)),
-                'run_command',
-                command='pwd',
-            )
-        assert result == f'[stdout]\n{tmp_path}\n'
-
-    @pytest.mark.parametrize(
-        ('error', 'expected'),
-        [
-            (SandboxUnavailableError('gone'), SandboxUnavailableError),
-            (RuntimeError('temporary failure'), None),
-        ],
-    )
-    async def test_cwd_capture_read_error_mapping(
-        self,
-        tmp_path: Path,
-        error: RuntimeError,
-        expected: type[RuntimeError] | None,
-    ) -> None:
-        # A dead sandbox propagates; any other capture-read failure is dropped bookkeeping,
-        # because the command itself already succeeded and a retry would re-run it.
-        async with LocalSandbox(root=tmp_path) as local:
-            backend = _RecordingLocalBackend(local)
-            backend.fs.read_error = error
-            toolset = shell_toolset(persist_cwd=True)
-            ctx = run_context(Sandbox.wrap(backend))
-            if expected is None:
-                assert await call_tool(toolset, ctx, 'run_command', command='pwd') == f'[stdout]\n{tmp_path}\n'
-            else:
-                with pytest.raises(expected, match=str(error)):
-                    await call_tool(toolset, ctx, 'run_command', command='pwd')
-
     async def test_timeout_is_returned(self, sandbox: Sandbox) -> None:
         result = await call_tool(
             shell_toolset(), run_context(sandbox), 'run_command', command='sleep 10', timeout_seconds=0.05
@@ -628,8 +615,9 @@ class TestRunCommand:
     @pytest.mark.parametrize(
         ('error', 'expected'),
         [
+            (SandboxError('temporary failure'), ModelRetry),
             (SandboxUnavailableError('gone'), SandboxUnavailableError),
-            (RuntimeError('temporary failure'), ModelRetry),
+            (RuntimeError('backend bug'), RuntimeError),
         ],
     )
     async def test_error_mapping(self, error: RuntimeError, expected: type[RuntimeError]) -> None:
@@ -782,7 +770,7 @@ class TestBackgroundCommands:
             started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
             backend.tail_failure = True
 
-            with pytest.raises(ModelRetry, match='tail failed'):
+            with pytest.raises(RuntimeError, match='tail failed'):
                 await call_tool(toolset, ctx, 'check_command', command_id=started_id)
             backend.tail_failure = False
             await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
@@ -795,7 +783,7 @@ class TestBackgroundCommands:
             started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
             backend.raise_after_kill = True
 
-            with pytest.raises(ModelRetry, match='cleanup failed'):
+            with pytest.raises(RuntimeError, match='cleanup failed'):
                 await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
             assert '[status: running]' in await call_tool(toolset, ctx, 'check_command', command_id=started_id)
             backend.raise_after_kill = False
@@ -825,7 +813,7 @@ class TestBackgroundCommands:
             backend.kill_failure = signal
             backend.hold_on_term = signal == '-KILL'
 
-            with pytest.raises(ModelRetry, match='kill failed'):
+            with pytest.raises(RuntimeError, match='kill failed'):
                 await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
             assert '[status: running]' in await call_tool(toolset, ctx, 'check_command', command_id=started_id)
             backend.kill_failure = None
@@ -852,24 +840,27 @@ class TestBackgroundCommands:
         )
 
     @pytest.mark.parametrize(
-        ('backend', 'message'),
+        ('backend', 'message', 'expected'),
         [
-            (_ResultBackend('not-a-pid', 'setsid failed'), 'setsid failed'),
-            (_ResultBackend(''), 'Sandbox did not return a background process ID.'),
-            (_FailingBackend(SandboxUnavailableError('gone')), 'gone'),
-            (_FailingBackend(RuntimeError('temporary failure')), 'temporary failure'),
+            (_ResultBackend('not-a-pid', 'setsid failed'), 'setsid failed', ModelRetry),
+            (_ResultBackend('', ''), 'Sandbox did not return a background process ID.', ModelRetry),
+            (_FailingBackend(SandboxError('temporary failure')), 'temporary failure', ModelRetry),
+            (_FailingBackend(SandboxUnavailableError('gone')), 'gone', SandboxUnavailableError),
+            (_FailingBackend(RuntimeError('backend bug')), 'backend bug', RuntimeError),
         ],
     )
-    async def test_start_error_mapping(self, backend: _FailingBackend, message: str) -> None:
-        expected = SandboxUnavailableError if isinstance(backend.error, SandboxUnavailableError) else ModelRetry
+    async def test_start_error_mapping(
+        self, backend: _FailingBackend, message: str, expected: type[BaseException]
+    ) -> None:
         with pytest.raises(expected, match=message):
             await call_tool(shell_toolset(), run_context(Sandbox.wrap(backend)), 'start_command', command='echo hello')
 
     @pytest.mark.parametrize(
         ('error', 'expected'),
         [
+            (SandboxError('temporary failure'), ModelRetry),
             (SandboxUnavailableError('gone'), SandboxUnavailableError),
-            (RuntimeError('temporary failure'), ModelRetry),
+            (RuntimeError('backend bug'), RuntimeError),
         ],
     )
     async def test_check_error_mapping(
@@ -892,8 +883,9 @@ class TestBackgroundCommands:
     @pytest.mark.parametrize(
         ('error', 'expected'),
         [
+            (SandboxError('temporary failure'), ModelRetry),
             (SandboxUnavailableError('gone'), SandboxUnavailableError),
-            (RuntimeError('temporary failure'), ModelRetry),
+            (RuntimeError('backend bug'), RuntimeError),
         ],
     )
     async def test_stop_error_mapping(

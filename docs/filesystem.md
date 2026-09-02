@@ -23,6 +23,8 @@ subtly wrong.
 
 `FileSystem` centralizes those guards. It exposes one bounded, sandboxed
 toolset so you configure the boundary once and reuse it across agents.
+Relative paths always resolve from the configured root, regardless of which
+other tools ran before them.
 
 ## Usage
 

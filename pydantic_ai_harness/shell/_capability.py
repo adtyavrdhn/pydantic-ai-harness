@@ -70,11 +70,11 @@ class Shell(AbstractCapability[AgentDepsT]):
     default_timeout: float = 30.0
     """Default timeout in seconds for command execution."""
 
+    max_timeout: float = 600.0
+    """Longest a single foreground command may run, in seconds."""
+
     max_output_chars: int = 50_000
     """Maximum characters of output returned to the model. Must be positive."""
-
-    persist_cwd: bool = False
-    """If True, track cd commands and adjust the working directory for subsequent calls."""
 
     allow_interactive: bool = False
     """If True, allow interactive commands (vi, nano, ssh, etc.). Blocked by default."""
@@ -114,8 +114,8 @@ class Shell(AbstractCapability[AgentDepsT]):
             denied_commands=self.denied_commands,
             denied_operators=self.denied_operators,
             default_timeout=self.default_timeout,
+            max_timeout=self.max_timeout,
             max_output_chars=self.max_output_chars,
-            persist_cwd=self.persist_cwd,
             allow_interactive=self.allow_interactive,
             env=self.env,
             denied_env_patterns=self.denied_env_patterns,
