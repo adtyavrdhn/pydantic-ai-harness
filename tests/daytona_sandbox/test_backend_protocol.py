@@ -100,6 +100,12 @@ class TestCommands:
         with pytest.raises(DaytonaSandboxError, match='before reporting an exit status'):
             await backend.run(['true'])
 
+    async def test_log_read_failure_is_provider_error(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        fake_daytona.sandboxes[0].process_logs_error = RuntimeError('logs failed')
+        with pytest.raises(DaytonaSandboxError, match='logs failed'):
+            await backend.run(['true'])
+
     async def test_deadline_carries_partial_output_and_kills(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
         sandbox = fake_daytona.sandboxes[0]

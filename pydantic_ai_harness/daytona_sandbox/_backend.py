@@ -138,24 +138,10 @@ class _DaytonaProcess:
         self._logs = logs
         self._deadline = deadline
         self._started = started
-        self._lock = anyio.Lock()
-        self._outcome: CommandResult | Exception | None = None
 
     async def wait(self) -> CommandResult:
-        """Wait for the command and return the same outcome on every call."""
-        # `_settle` is effectful (its timeout path kills the session and cancels the shared
-        # logs task), so the protocol's promise that repeated and concurrent waits agree is
-        # kept by settling once under the lock and handing every later caller the cached
-        # outcome.
-        async with self._lock:
-            if self._outcome is None:
-                try:
-                    self._outcome = await self._settle()
-                except Exception as error:
-                    self._outcome = error
-        if isinstance(self._outcome, Exception):
-            raise self._outcome
-        return self._outcome
+        """Wait for the command and return its result."""
+        return await self._settle()
 
     async def _settle(self) -> CommandResult:
         completed = False
@@ -212,8 +198,7 @@ class _DaytonaProcess:
             timeout=_TEARDOWN_TIMEOUT,
         )
         if error is None or isinstance(error, DaytonaNotFoundError):
-            if not self._logs.done():
-                self._logs.cancel()
+            self._logs.cancel()
             return
         await raise_after_cleanup(
             self._backend.operation_error(
