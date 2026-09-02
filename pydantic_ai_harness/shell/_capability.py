@@ -36,14 +36,10 @@ LLM_API_KEY_ENV_PATTERNS: tuple[str, ...] = (
 )
 """Glob patterns for common LLM provider credentials, for `denied_env_patterns`.
 
-Pass these to keep provider credentials out of the subprocess's own environment.
-This is not a security boundary: a command running under the same OS identity
-may still read the parent process's environment through system interfaces such
-as Linux procfs. Use OS-level isolation for untrusted commands. Covers provider
-prefixes only -- not other host secrets, and the prefixes are coarse (`GOOGLE_*`
-also strips `GOOGLE_APPLICATION_CREDENTIALS`), so treat it as a starting point.
-Not a default: stripping env silently would break agents that rely on inherited
-credentials, so opt in explicitly.
+Pass these to keep provider credentials in an explicit `env` out of commands.
+Covers provider prefixes only -- not other secrets, and the prefixes are coarse
+(`GOOGLE_*` also strips `GOOGLE_APPLICATION_CREDENTIALS`), so treat it as a
+starting point.
 """
 
 
@@ -51,12 +47,12 @@ credentials, so opt in explicitly.
 class Shell(AbstractCapability[AgentDepsT]):
     """Shell command execution for agents.
 
-    Commands execute in a subprocess rooted at `cwd`. Use `allowed_commands`
-    or `denied_commands` to control what the agent can invoke.
+    Commands execute inside the run's sandbox, starting in `cwd`. Use
+    `allowed_commands` or `denied_commands` to control what the agent can invoke.
     """
 
     cwd: str | Path = '.'
-    """Working directory for command execution."""
+    """Working directory for command execution: a sandbox path, absolute or relative to the sandbox working directory."""
 
     allowed_commands: Sequence[str] = field(default_factory=list[str])
     """If non-empty, only these command names may be executed (allowlist)."""
@@ -84,28 +80,29 @@ class Shell(AbstractCapability[AgentDepsT]):
     """If True, allow interactive commands (vi, nano, ssh, etc.). Blocked by default."""
 
     env: Mapping[str, str] | None = None
-    """Explicit environment for spawned subprocesses, replacing inheritance.
+    """Explicit environment for commands.
 
-    When `None` (default) the subprocess inherits the parent environment. Set
-    this to a fixed mapping to start subprocesses with exactly these variables
-    in its own environment. This is not a security boundary: a command running
-    as the same OS user may read secrets from the parent process through system
-    interfaces such as Linux procfs. Use OS-level isolation for untrusted commands.
+    When `None` (default) commands see the sandbox's own environment. Set this
+    to a fixed mapping to start commands with exactly these variables. The agent
+    process's environment is not selected by this capability; the sandbox backend
+    decides what environment commands receive.
     """
 
     denied_env_patterns: Sequence[str] = field(default_factory=list[str])
-    """Glob patterns for environment variable names to strip before spawning.
+    """Glob patterns for environment variable names to strip from `env`.
 
     Follows the `denied_*` naming convention but matches by glob (`fnmatch`,
     e.g. `OPENAI_*`), since env secrets cluster by prefix -- unlike
-    `denied_commands`, which matches executable names exactly. Names matching
-    any pattern are removed from the base environment; applied on top of `env`
-    when both are set, so patterns filter an explicit `env` too. See
-    `LLM_API_KEY_ENV_PATTERNS` for a ready-made provider-credential denylist.
+    `denied_commands`, which matches executable names exactly. Only an explicit
+    `env` is filtered; the sandbox's own environment is not visible to the
+    toolset. If `env` is `None`, the sandbox backend decides what environment commands receive.
+    See `LLM_API_KEY_ENV_PATTERNS` for a ready-made provider-credential denylist.
     """
 
     def __post_init__(self) -> None:
         """Resolve the built-in denylist according to the selected policy."""
+        if self.denied_env_patterns and self.env is None:
+            raise ValueError('denied_env_patterns requires an explicit env mapping.')
         if self.denied_commands is _DEFAULT_DENIED_COMMANDS:
             self.denied_commands = [] if self.allowed_commands else list(_DEFAULT_DENIED_COMMANDS)
 

@@ -8,26 +8,21 @@ import functools
 import os
 import re
 import shlex
-import signal
-import subprocess
-import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Concatenate, ParamSpec
 
 import anyio
-import anyio.abc
 from pydantic_ai import RunContext
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.sandboxes import Sandbox, SandboxTimeoutError, SandboxUnavailableError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset, ToolsetTool
 
 from pydantic_ai_harness._output import truncate_tail
-from pydantic_ai_harness._sandbox import is_framework_unavailable
+from pydantic_ai_harness._sandbox import sandbox_path
 
-_IO_DRAIN_TIMEOUT: float = 2.0
 _KILL_GRACE_PERIOD: float = 2.0
 
 _P = ParamSpec('_P')
@@ -35,8 +30,8 @@ _P = ParamSpec('_P')
 # Spawning a command fails with a bare `OSError` for causes that have no
 # dedicated subclass, and with `FileNotFoundError`/`NotADirectoryError` for
 # causes that do. The errno says whose fault it is: these are the model's, and
-# it can act on them. Every other errno (EMFILE, ENOMEM) is the host's, and must
-# keep aborting the run rather than sending the model into a retry loop it
+# it can act on them. Every other errno (EMFILE, ENOMEM) is the sandbox's, and
+# must keep aborting the run rather than sending the model into a retry loop it
 # can't win.
 #
 # ENOENT and ENOTDIR reach here only from the working directory, since the
@@ -57,7 +52,7 @@ def _recoverable(
 
     pyai only feeds `ModelRetry` back to the model as a retry prompt; any other
     exception propagates and aborts the whole run. A denied command, a command
-    the OS refuses to spawn, and a working directory the model's own earlier
+    the sandbox refuses to spawn, and a working directory the model's own earlier
     command destroyed are all things the model can recover from, so surface them
     as a retry instead of crashing the agent.
     """
@@ -72,8 +67,14 @@ def _recoverable(
             reason = _RECOVERABLE_ERRNOS.get(e.errno)
             if reason is None:
                 raise
-            # `str(e)` embeds the absolute host path; the reason alone doesn't.
+            # `str(e)` embeds the absolute path; the reason alone doesn't.
             raise ModelRetry(reason) from e
+        # A dead sandbox and a misconfigured one (`UserError`, e.g. no sandbox attached) are the
+        # application's to fix; other backend runtime failures are recoverable.
+        except (SandboxUnavailableError, UserError):
+            raise
+        except RuntimeError as e:
+            raise ModelRetry(str(e)) from e
 
     return wrapper
 
@@ -92,25 +93,7 @@ def _is_interactive_command(command: str) -> bool:
 
 
 class _BackgroundProcess:
-    """State for a background command using temp files for output."""
-
-    __slots__ = ('proc', 'stdout_path', 'stderr_path', 'finished', 'exit_code')
-
-    def __init__(
-        self,
-        proc: anyio.abc.Process,
-        stdout_path: str,
-        stderr_path: str,
-    ) -> None:
-        self.proc = proc
-        self.stdout_path = stdout_path
-        self.stderr_path = stderr_path
-        self.finished = False
-        self.exit_code: int | None = None
-
-
-class _SandboxBackgroundProcess:
-    """State for a background command running inside a sandbox."""
+    """State for a background command running inside the sandbox."""
 
     __slots__ = ('sandbox', 'pid', 'stdout_path', 'stderr_path', 'exit_code_path', 'finished', 'exit_code')
 
@@ -132,11 +115,11 @@ class _SandboxBackgroundProcess:
 
 
 class ShellToolset(FunctionToolset[AgentDepsT]):
-    """Gives an agent the ability to execute shell commands.
+    """Gives an agent the ability to execute shell commands inside the run's sandbox.
 
     Supports synchronous execution (run_command) and background processes
-    (start_command / check_command / stop_command). Output is streamed,
-    truncated to fit model context, and labelled with stdout/stderr/exit code.
+    (start_command / check_command / stop_command). Output is truncated to fit
+    model context and labelled with stdout/stderr/exit code.
 
     Optionally tracks the working directory across calls so ``cd`` persists.
     """
@@ -156,11 +139,11 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         denied_env_patterns: Sequence[str] = (),
     ) -> None:
         super().__init__()
-        # The constructor `cwd` applies only to host-mode commands.
-        self._cwd = cwd.resolve()
-        # The configured starting directory, never mutated by persist_cwd, so
-        # `for_run` can hand each run a fresh instance rooted back here.
-        self._initial_cwd = self._cwd
+        # The configured starting directory: a sandbox path, absolute or relative to the
+        # sandbox working directory. Never mutated by persist_cwd, so `for_run` can hand
+        # each run a fresh instance rooted back here.
+        self._initial_cwd = cwd
+        self._cwd = sandbox_path(cwd)
         self._allowed_commands = list(allowed_commands)
         self._denied_commands = list(denied_commands)
         self._denied_operators = list(denied_operators)
@@ -170,9 +153,8 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         self._allow_interactive = allow_interactive
         self._env = dict(env) if env is not None else None
         self._denied_env_patterns = list(denied_env_patterns)
+        self._current_cwd: str | None = None
         self._background: dict[str, _BackgroundProcess] = {}
-        self._sandbox_cwd: str | None = None
-        self._sandbox_background: dict[str, _SandboxBackgroundProcess] = {}
 
         if self._allowed_commands and self._denied_commands:
             raise ValueError('Specify allowed_commands or denied_commands, not both.')
@@ -180,26 +162,26 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             raise ValueError('max_output_chars must be a positive integer.')
 
         self.add_function(
-            self._run_command_tool,
+            self.run_command,
             name='run_command',
             metadata={'code_arg_name': 'command', 'code_arg_language': 'shell'},
         )
         self.add_function(
-            self._start_command_tool,
+            self.start_command,
             name='start_command',
             metadata={'code_arg_name': 'command', 'code_arg_language': 'shell'},
         )
-        self.add_function(self._check_command_tool, name='check_command')
-        self.add_function(self._stop_command_tool, name='stop_command')
+        self.add_function(self.check_command, name='check_command')
+        self.add_function(self.stop_command, name='stop_command')
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
         """Return a fresh instance per run so cwd and background processes are isolated.
 
         `get_toolset` builds one shared instance at agent construction (see
         `AbstractToolset.for_run`, which defaults to returning `self`). This
-        toolset holds mutable per-run state (`_cwd`, `_background`), so without
-        an override two concurrent runs would corrupt each other's cwd and kill
-        each other's background processes.
+        toolset holds mutable per-run state (`_current_cwd`, `_background`), so
+        without an override two concurrent runs would corrupt each other's cwd
+        and kill each other's background processes.
         """
         return ShellToolset(
             cwd=self._initial_cwd,
@@ -234,21 +216,6 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             return result
         return truncate_tail(result, self._max_output_chars)
 
-    def _resolve_env(self) -> dict[str, str] | None:
-        """Compute the environment passed to spawned subprocesses.
-
-        Returns `None` -- meaning the subprocess inherits the parent env -- only
-        when neither `env` nor `denied_env_patterns` is configured, so the
-        default behavior is unchanged. An explicit `env` replaces inheritance
-        entirely; `denied_env_patterns` then strips matching names (glob, via
-        `fnmatch`) from whichever base applies, so the two compose: patterns
-        filter an explicit `env` just as they filter the inherited environment.
-        """
-        if self._env is None and not self._denied_env_patterns:
-            return None
-        base = dict(self._env) if self._env is not None else dict(os.environ)
-        return self._filter_env(base)
-
     def _filter_env(self, env: Mapping[str, str]) -> dict[str, str]:
         """Remove environment names denied by the configured glob patterns."""
         if not self._denied_env_patterns:
@@ -259,29 +226,40 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             if not any(fnmatch.fnmatchcase(name, pattern) for pattern in self._denied_env_patterns)
         }
 
-    def _sandbox_env(self) -> dict[str, str] | None:
-        # In sandbox mode denied patterns filter only explicit env; ambient env belongs to the sandbox.
+    def _run_env(self) -> dict[str, str] | None:
+        """The environment handed to the sandbox: the explicit `env`, deny-filtered.
+
+        `None` leaves environment selection to the sandbox backend; denied patterns
+        only filter an explicit `env` mapping.
+        """
         return None if self._env is None else self._filter_env(self._env)
 
-    async def __aexit__(self, *args: Any) -> None:
-        """Terminate all remaining background processes and clean up temp files."""
-        for bg in self._background.values():
-            if not bg.finished:
-                await self._kill_process_group(bg.proc)
-                with anyio.CancelScope(shield=True):
-                    await bg.proc.wait()
-                await bg.proc.aclose()
-            self._cleanup_bg_files(bg)
-        self._background.clear()
+    async def _cwd_for(self, ctx: RunContext[AgentDepsT]) -> str:
+        """The absolute sandbox path commands run in, tracking `cd` when `persist_cwd` is set."""
+        if self._current_cwd is None:
+            self._current_cwd = await ctx.sandbox.resolve(self._cwd)
+        return self._current_cwd
 
-        for bg in self._sandbox_background.values():
+    async def __aexit__(self, *args: Any) -> None:
+        """Terminate all remaining background processes and clean up their output files."""
+        errors: list[Exception] = []
+        for command_id, bg in list(self._background.items()):
+            process_errors: list[Exception] = []
             try:
                 if not bg.finished:
-                    await self._terminate_sandbox_process(bg)
-            except Exception:
-                pass
-            await self._cleanup_sandbox_bg_files(bg)
-        self._sandbox_background.clear()
+                    await self._terminate(bg)
+            except Exception as e:
+                process_errors.append(e)
+            try:
+                await self._cleanup_bg_files(bg)
+            except Exception as e:
+                process_errors.append(e)
+            if process_errors:
+                errors.extend(process_errors)
+            else:
+                del self._background[command_id]
+        if errors:
+            raise errors[0]
 
     def _first_denied_operator(self, command: str) -> str | None:
         """Return the first denied operator found in command, or None."""
@@ -291,14 +269,14 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         """Validate command against allow/deny lists.
 
         These checks are best-effort and are not a security boundary -- a
-        sufficiently motivated agent can bypass them. Use OS-level isolation
-        (containers, sandboxes) for hard enforcement.
+        sufficiently motivated agent can bypass them. The sandbox is the
+        isolation boundary.
 
         Rejecting a command the OS could not accept belongs here rather than in
-        `_recoverable`: `anyio.open_process` reports a NUL byte or an
-        unencodable character as the same `ValueError` whether it came from
-        `command`, the working directory, or a configured `env`, and only the
-        first of those is the model's to fix.
+        `_recoverable`: a spawn reports a NUL byte or an unencodable character
+        as the same `ValueError` whether it came from `command`, the working
+        directory, or a configured `env`, and only the first of those is the
+        model's to fix.
         """
         if '\x00' in command:
             raise ModelRetry('The command contains a NUL byte, which cannot be passed to a process.')
@@ -331,106 +309,26 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         if self._allowed_commands and executable not in self._allowed_commands:
             raise PermissionError(f'Command {executable!r} is not in the allowed list.')
 
-    def _build_cwd_capture(self, command: str) -> tuple[str, Path | None]:
-        """Wrap a command to record its final working directory out-of-band.
-
-        `pwd` is written to a private temp file whose random path the agent's
-        command can't address, so command output can never spoof the tracked
-        cwd -- unlike parsing a sentinel out of stdout, where any command that
-        prints the sentinel string (or one using `;` to skip success-gating)
-        could redirect the cwd. Returns the wrapped command plus the temp-file
-        path, or the command unchanged and `None` when cwd tracking is off.
-        """
-        if not self._persist_cwd:
-            return command, None
-        fd, name = tempfile.mkstemp(prefix='harness_cwd_')
-        os.close(fd)
-        wrapped = f'{command}\n__harness_ec=$?\npwd > {shlex.quote(name)}\nexit $__harness_ec'
-        return wrapped, Path(name)
-
-    def _apply_captured_cwd(self, cwd_file: Path) -> None:
+    async def _apply_captured_cwd(self, sandbox: Sandbox, cwd_path: str) -> None:
         """Update the persistent cwd from the capture file, ignoring junk.
 
-        The whole read-and-check is guarded, not just the read: the command it
-        belongs to already succeeded, so a capture that isn't UTF-8 (a
-        `UnicodeDecodeError`, which is a `ValueError` rather than an `OSError`)
-        or a recorded path the OS refuses to stat (`ENAMETOOLONG`, which
-        `Path.is_dir` propagates before 3.14 and swallows from 3.14 on) is
-        bookkeeping the toolset can drop, not a tool failure to report.
+        `pwd` is written to a private file whose random path the agent's command
+        can't address, so command output can never spoof the tracked cwd. The
+        command it belongs to already succeeded, so a failed or junk capture is
+        bookkeeping the toolset can drop, not a tool failure to report -- except
+        a dead sandbox, which the caller must see.
         """
-        try:
-            recorded = cwd_file.read_text(encoding='utf-8').strip()
-            if not recorded:
-                return
-            candidate = Path(recorded)
-            if candidate.is_dir():
-                self._cwd = candidate
-        except (OSError, ValueError):
-            return
-
-    async def _apply_sandbox_captured_cwd(self, sandbox: Sandbox, cwd_path: str) -> None:
-        # The command already succeeded, so a failed or junk capture is dropped bookkeeping,
-        # like `_apply_captured_cwd` -- except a dead sandbox, which the caller must see.
         try:
             recorded = (await sandbox.fs.read_bytes(cwd_path)).decode('utf-8').strip()
             if recorded and PurePosixPath(recorded).is_absolute():
-                self._sandbox_cwd = recorded
+                self._current_cwd = recorded
         except SandboxUnavailableError:
             raise
         except Exception:
             pass
 
-    async def _kill_process_group(self, proc: anyio.abc.Process) -> None:
-        """SIGTERM the process group, escalating to SIGKILL after the grace period."""
-        pid = proc.pid
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            return
-
-        with anyio.move_on_after(_KILL_GRACE_PERIOD):
-            await proc.wait()
-            return
-
-        # Still alive after grace period -- hard kill
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-
-    async def _drain_with_timeout(
-        self,
-        stdout_chunks: list[bytes],
-        stderr_chunks: list[bytes],
-        proc: anyio.abc.Process,
-    ) -> None:
-        """Drain remaining pipe data after kill (grandchildren may still hold the pipe)."""
-
-        async def _drain_stdout() -> None:
-            if proc.stdout is None:
-                return
-            try:
-                async for chunk in proc.stdout:
-                    stdout_chunks.append(chunk)
-            except (anyio.ClosedResourceError, anyio.BrokenResourceError):
-                pass
-
-        async def _drain_stderr() -> None:
-            if proc.stderr is None:
-                return
-            try:
-                async for chunk in proc.stderr:
-                    stderr_chunks.append(chunk)
-            except (anyio.ClosedResourceError, anyio.BrokenResourceError):
-                pass
-
-        with anyio.move_on_after(_IO_DRAIN_TIMEOUT):
-            async with anyio.create_task_group() as tg:
-                tg.start_soon(_drain_stdout)
-                tg.start_soon(_drain_stderr)
-
     @_recoverable
-    async def _run_command_tool(
+    async def run_command(
         self,
         ctx: RunContext[AgentDepsT],
         command: str,
@@ -447,17 +345,6 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         Returns:
             Labeled stdout/stderr output with exit code on non-zero exit.
         """
-        if is_framework_unavailable(ctx.sandbox):
-            return await self.run_command(command, timeout_seconds=timeout_seconds)
-        return await self._run_sandbox_command(ctx, command, timeout_seconds=timeout_seconds)
-
-    async def _run_sandbox_command(
-        self,
-        ctx: RunContext[AgentDepsT],
-        command: str,
-        *,
-        timeout_seconds: float | None,
-    ) -> str:
         self._check_command(command)
         timeout = timeout_seconds if timeout_seconds is not None else self._default_timeout
         cwd_path = f'/tmp/harness_cwd_{uuid.uuid4().hex}' if self._persist_cwd else None
@@ -471,11 +358,10 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                     actual_command,
                     shell=True,
                     timeout=timeout,
-                    cwd=self._sandbox_cwd,
-                    env=self._sandbox_env(),
+                    cwd=await self._cwd_for(ctx),
+                    env=self._run_env(),
                 )
             except SandboxTimeoutError as e:
-                # Sandbox timeouts include partial output, unlike the host process path.
                 parts: list[str] = []
                 if e.stdout:
                     parts.append(f'[stdout]\n{e.stdout}')
@@ -483,11 +369,6 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                     parts.append(f'[stderr]\n{e.stderr}')
                 parts.append(f'[Command timed out after {timeout}s]')
                 return '\n'.join(parts)
-            # Unavailability is terminal; other backend runtime failures are recoverable.
-            except SandboxUnavailableError:
-                raise
-            except RuntimeError as e:
-                raise ModelRetry(str(e)) from e
 
             parts = []
             if result.stdout:
@@ -497,7 +378,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             output = '\n'.join(parts) if parts else '(no output)'
 
             if cwd_path is not None and result.exit_code == 0:
-                await self._apply_sandbox_captured_cwd(ctx.sandbox, cwd_path)
+                await self._apply_captured_cwd(ctx.sandbox, cwd_path)
 
             if result.exit_code != 0:
                 output = f'{output}\n[exit code: {result.exit_code}]'
@@ -510,130 +391,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                     pass
 
     @_recoverable
-    async def run_command(self, command: str, *, timeout_seconds: float | None = None) -> str:
-        """Execute a shell command and return its output.
-
-        Args:
-            command: The shell command to run.
-            timeout_seconds: Maximum seconds to wait (default: 30).
-
-        Returns:
-            Labeled stdout/stderr output with exit code on non-zero exit.
-        """
-        self._check_command(command)
-        timeout = timeout_seconds if timeout_seconds is not None else self._default_timeout
-
-        actual_command, cwd_file = self._build_cwd_capture(command)
-        try:
-            proc = await anyio.open_process(
-                actual_command,
-                cwd=self._cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-                env=self._resolve_env(),
-            )
-            stdout_chunks: list[bytes] = []
-            stderr_chunks: list[bytes] = []
-            try:
-                assert proc.stdout is not None
-                assert proc.stderr is not None
-
-                async def _read_stdout() -> None:
-                    assert proc.stdout is not None
-                    async for chunk in proc.stdout:
-                        stdout_chunks.append(chunk)
-
-                async def _read_stderr() -> None:
-                    assert proc.stderr is not None
-                    async for chunk in proc.stderr:
-                        stderr_chunks.append(chunk)
-
-                with anyio.fail_after(timeout):
-                    async with anyio.create_task_group() as tg:
-                        tg.start_soon(_read_stdout)
-                        tg.start_soon(_read_stderr)
-                    await proc.wait()
-            except TimeoutError:
-                await self._kill_process_group(proc)
-                with anyio.CancelScope(shield=True):
-                    await proc.wait()
-                    await self._drain_with_timeout(stdout_chunks, stderr_chunks, proc)
-                return f'[Command timed out after {timeout}s]'
-            finally:
-                await proc.aclose()
-
-            stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
-            stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
-
-            parts: list[str] = []
-            if stdout:
-                parts.append(f'[stdout]\n{stdout}')
-            if stderr:
-                parts.append(f'[stderr]\n{stderr}')
-            output = '\n'.join(parts) if parts else '(no output)'
-
-            exit_code = proc.returncode if proc.returncode is not None else 0
-
-            if cwd_file is not None and exit_code == 0:
-                self._apply_captured_cwd(cwd_file)
-
-            if exit_code != 0:
-                output = f'{output}\n[exit code: {exit_code}]'
-            return output
-        finally:
-            if cwd_file is not None:
-                cwd_file.unlink(missing_ok=True)
-
-    @_recoverable
-    async def start_command(self, command: str) -> str:
-        """Start a long-running command in the background (e.g. a server or watcher).
-
-        Callers MUST call `stop_command(command_id)` when done to terminate the
-        process and clean up temporary output files.
-
-        Args:
-            command: The shell command to run in the background.
-
-        Returns:
-            A message containing the unique command ID for later check/stop calls.
-        """
-        self._check_command(command)
-        command_id = uuid.uuid4().hex[:12]
-
-        stdout_file = tempfile.NamedTemporaryFile(mode='w+b', prefix=f'harness_{command_id}_out_', delete=False)
-        stderr_file = tempfile.NamedTemporaryFile(mode='w+b', prefix=f'harness_{command_id}_err_', delete=False)
-
-        try:
-            proc = await anyio.open_process(
-                command,
-                cwd=self._cwd,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                start_new_session=True,
-                env=self._resolve_env(),
-            )
-        except BaseException:
-            stdout_file.close()
-            stderr_file.close()
-            os.unlink(stdout_file.name)
-            os.unlink(stderr_file.name)
-            raise
-
-        stdout_file.close()
-        stderr_file.close()
-
-        bg = _BackgroundProcess(
-            proc=proc,
-            stdout_path=stdout_file.name,
-            stderr_path=stderr_file.name,
-        )
-        self._background[command_id] = bg
-
-        return f'Started background command: {command!r}\nID: {command_id}'
-
-    @_recoverable
-    async def _start_command_tool(self, ctx: RunContext[AgentDepsT], command: str) -> str:
+    async def start_command(self, ctx: RunContext[AgentDepsT], command: str) -> str:
         """Start a long-running command in the background (e.g. a server or watcher).
 
         Callers MUST call `stop_command(command_id)` when done to terminate the
@@ -646,34 +404,29 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         Returns:
             A message containing the unique command ID for later check/stop calls.
         """
-        if is_framework_unavailable(ctx.sandbox):
-            return await self.start_command(command)
-
         self._check_command(command)
         command_id = uuid.uuid4().hex[:12]
         stdout_path = f'/tmp/harness_{command_id}_out'
         stderr_path = f'/tmp/harness_{command_id}_err'
         exit_code_path = f'/tmp/harness_{command_id}_ec'
-        inner = f'{command}; echo $? > {exit_code_path}'
+        inner = f'sh -c {shlex.quote(command)}; __harness_ec=$?; echo $__harness_ec > {exit_code_path}'
+        # `setsid` + output files + `kill` through `run()` is the one background path that
+        # works on every provider: `SandboxProcess.kill()` is unavailable on some, and the
+        # protocol handle cannot report output-so-far.
         wrapped = f'setsid sh -c {shlex.quote(inner)} < /dev/null > {stdout_path} 2> {stderr_path} & echo $!'
+        result = await ctx.sandbox.run(
+            wrapped,
+            shell=True,
+            cwd=await self._cwd_for(ctx),
+            env=self._run_env(),
+        )
         try:
-            result = await ctx.sandbox.run(
-                wrapped,
-                shell=True,
-                cwd=self._sandbox_cwd,
-                env=self._sandbox_env(),
-            )
-            try:
-                pid = int(result.stdout.strip())
-            except ValueError as e:
-                message = result.stderr.strip() or 'Sandbox did not return a background process ID.'
-                raise ModelRetry(message) from e
-        except SandboxUnavailableError:
-            raise
-        except RuntimeError as e:
-            raise ModelRetry(str(e)) from e
+            pid = int(result.stdout.strip())
+        except ValueError as e:
+            message = result.stderr.strip() or 'Sandbox did not return a background process ID.'
+            raise ModelRetry(message) from e
 
-        self._sandbox_background[command_id] = _SandboxBackgroundProcess(
+        self._background[command_id] = _BackgroundProcess(
             sandbox=ctx.sandbox,
             pid=pid,
             stdout_path=stdout_path,
@@ -682,60 +435,8 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         )
         return f'Started background command: {command!r}\nID: {command_id}'
 
-    def _read_bg_output(self, bg: _BackgroundProcess) -> tuple[str, str]:
-        """Read current output from background process temp files."""
-        try:
-            stdout = Path(bg.stdout_path).read_text(encoding='utf-8', errors='replace')
-        except OSError:
-            stdout = ''
-        try:
-            stderr = Path(bg.stderr_path).read_text(encoding='utf-8', errors='replace')
-        except OSError:
-            stderr = ''
-        return stdout, stderr
-
-    def _cleanup_bg_files(self, bg: _BackgroundProcess) -> None:
-        """Remove temp files for a background process."""
-        try:
-            os.unlink(bg.stdout_path)
-        except OSError:
-            pass
-        try:
-            os.unlink(bg.stderr_path)
-        except OSError:
-            pass
-
-    async def check_command(self, command_id: str) -> str:
-        """Check the status and recent output of a background command.
-
-        Args:
-            command_id: The ID returned by start_command.
-
-        Returns:
-            Status and recent output of the background command.
-        """
-        bg = self._background.get(command_id)
-        if bg is None:
-            return f'[Error: unknown command ID {command_id!r}]'
-
-        if not bg.finished and bg.proc.returncode is not None:
-            bg.exit_code = bg.proc.returncode
-            bg.finished = True
-
-        stdout, stderr = self._read_bg_output(bg)
-
-        status = 'finished' if bg.finished else 'running'
-        output_sections: list[str] = []
-        if stdout:
-            output_sections.append(f'[stdout]\n{stdout}')
-        if stderr:
-            output_sections.append(f'[stderr]\n{stderr}')
-        parts = ['\n'.join(output_sections) if output_sections else '(no output yet)', f'[status: {status}]']
-        if bg.finished and bg.exit_code is not None:
-            parts.append(f'[exit code: {bg.exit_code}]')
-        return '\n'.join(parts)
-
-    async def _check_command_tool(self, ctx: RunContext[AgentDepsT], command_id: str) -> str:
+    @_recoverable
+    async def check_command(self, ctx: RunContext[AgentDepsT], command_id: str) -> str:
         """Check the status and recent output of a background command.
 
         Args:
@@ -745,17 +446,12 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         Returns:
             Status and recent output of the background command.
         """
-        bg = self._sandbox_background.get(command_id)
+        bg = self._background.get(command_id)
         if bg is None:
-            return await self.check_command(command_id)
-        try:
-            await self._refresh_sandbox_background(bg)
-            stdout = await self._read_sandbox_bg_file(bg, bg.stdout_path)
-            stderr = await self._read_sandbox_bg_file(bg, bg.stderr_path)
-        except SandboxUnavailableError:
-            raise
-        except RuntimeError as e:
-            raise ModelRetry(str(e)) from e
+            return f'[Error: unknown command ID {command_id!r}]'
+        await self._refresh(bg)
+        stdout = await self._read_bg_file(bg, bg.stdout_path)
+        stderr = await self._read_bg_file(bg, bg.stderr_path)
 
         status = 'finished' if bg.finished else 'running'
         output_sections: list[str] = []
@@ -768,7 +464,42 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             parts.append(f'[exit code: {bg.exit_code}]')
         return '\n'.join(parts)
 
-    async def _refresh_sandbox_background(self, bg: _SandboxBackgroundProcess) -> None:
+    @_recoverable
+    async def stop_command(self, ctx: RunContext[AgentDepsT], command_id: str) -> str:
+        """Stop a background command and return its final output.
+
+        Args:
+            ctx: The current agent run context.
+            command_id: The ID returned by start_command.
+
+        Returns:
+            Final output and exit status of the stopped command.
+        """
+        bg = self._background.get(command_id)
+        if bg is None:
+            return f'[Error: unknown command ID {command_id!r}]'
+
+        await self._refresh(bg)
+        if not bg.finished:
+            await self._terminate(bg)
+        await self._refresh(bg)
+        stdout = await self._read_bg_file(bg, bg.stdout_path)
+        stderr = await self._read_bg_file(bg, bg.stderr_path)
+
+        await self._cleanup_bg_files(bg)
+        del self._background[command_id]
+
+        output_sections: list[str] = []
+        if stdout:
+            output_sections.append(f'[stdout]\n{stdout}')
+        if stderr:
+            output_sections.append(f'[stderr]\n{stderr}')
+        parts = ['\n'.join(output_sections) if output_sections else '(no output)', '[stopped]']
+        if bg.exit_code is not None:
+            parts.append(f'[exit code: {bg.exit_code}]')
+        return '\n'.join(parts)
+
+    async def _refresh(self, bg: _BackgroundProcess) -> None:
         if bg.finished:
             return
         try:
@@ -781,94 +512,43 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             return
         bg.finished = True
 
-    async def _read_sandbox_bg_file(self, bg: _SandboxBackgroundProcess, path: str) -> str:
+    async def _read_bg_file(self, bg: _BackgroundProcess, path: str) -> str:
         try:
-            return (await bg.sandbox.fs.read_bytes(path)).decode('utf-8', errors='replace')
+            result = await bg.sandbox.run(
+                ['tail', '-c', str(self._max_output_chars * 4), path], timeout=self._default_timeout
+            )
+            if result.exit_code != 0:
+                if 'No such file' in result.stderr:
+                    return ''
+                raise RuntimeError(result.stderr.strip() or f'Unable to read background output file {path!r}.')
+            return result.stdout
         except FileNotFoundError:
             return ''
 
-    async def _terminate_sandbox_process(self, bg: _SandboxBackgroundProcess) -> None:
-        await bg.sandbox.run(['kill', '-TERM', f'-{bg.pid}'])
+    async def _terminate(self, bg: _BackgroundProcess) -> None:
+        """SIGTERM the process group, escalating to SIGKILL after the grace period."""
+        result = await bg.sandbox.run(['kill', '-TERM', f'-{bg.pid}'])
+        if result.exit_code != 0:
+            await self._refresh(bg)
+            if bg.finished or 'No such process' in result.stderr:
+                return
+            raise RuntimeError(result.stderr.strip() or f'Failed to terminate background process {bg.pid}.')
         await anyio.sleep(_KILL_GRACE_PERIOD)
-        await bg.sandbox.run(['kill', '-KILL', f'-{bg.pid}'])
+        result = await bg.sandbox.run(['kill', '-KILL', f'-{bg.pid}'])
+        if result.exit_code != 0:  # pragma: no branch - macOS may reap the group after SIGTERM
+            await self._refresh(bg)
+            if bg.finished or 'No such process' in result.stderr:
+                return
+            raise RuntimeError(result.stderr.strip() or f'Failed to kill background process {bg.pid}.')
 
-    async def _cleanup_sandbox_bg_files(self, bg: _SandboxBackgroundProcess) -> None:
+    async def _cleanup_bg_files(self, bg: _BackgroundProcess) -> None:
+        errors: list[Exception] = []
         for path in (bg.stdout_path, bg.stderr_path, bg.exit_code_path):
             try:
                 await bg.sandbox.fs.remove(path)
-            except Exception:
+            except FileNotFoundError:
                 pass
-
-    async def stop_command(self, command_id: str) -> str:
-        """Stop a background command and return its final output.
-
-        Args:
-            command_id: The ID returned by start_command.
-
-        Returns:
-            Final output and exit status of the stopped command.
-        """
-        bg = self._background.get(command_id)
-        if bg is None:
-            return f'[Error: unknown command ID {command_id!r}]'
-
-        if not bg.finished:
-            await self._kill_process_group(bg.proc)
-            with anyio.CancelScope(shield=True):
-                await bg.proc.wait()
-            bg.exit_code = bg.proc.returncode
-            bg.finished = True
-
-        stdout, stderr = self._read_bg_output(bg)
-
-        self._cleanup_bg_files(bg)
-        del self._background[command_id]
-        await bg.proc.aclose()
-
-        output_sections: list[str] = []
-        if stdout:
-            output_sections.append(f'[stdout]\n{stdout}')
-        if stderr:
-            output_sections.append(f'[stderr]\n{stderr}')
-        parts = ['\n'.join(output_sections) if output_sections else '(no output)', '[stopped]']
-        if bg.exit_code is not None:
-            parts.append(f'[exit code: {bg.exit_code}]')
-        return '\n'.join(parts)
-
-    async def _stop_command_tool(self, ctx: RunContext[AgentDepsT], command_id: str) -> str:
-        """Stop a background command and return its final output.
-
-        Args:
-            ctx: The current agent run context.
-            command_id: The ID returned by start_command.
-
-        Returns:
-            Final output and exit status of the stopped command.
-        """
-        bg = self._sandbox_background.get(command_id)
-        if bg is None:
-            return await self.stop_command(command_id)
-
-        try:
-            if not bg.finished:
-                await self._terminate_sandbox_process(bg)
-            await self._refresh_sandbox_background(bg)
-            stdout = await self._read_sandbox_bg_file(bg, bg.stdout_path)
-            stderr = await self._read_sandbox_bg_file(bg, bg.stderr_path)
-        except SandboxUnavailableError:
-            raise
-        except RuntimeError as e:
-            raise ModelRetry(str(e)) from e
-
-        await self._cleanup_sandbox_bg_files(bg)
-        del self._sandbox_background[command_id]
-
-        output_sections: list[str] = []
-        if stdout:
-            output_sections.append(f'[stdout]\n{stdout}')
-        if stderr:
-            output_sections.append(f'[stderr]\n{stderr}')
-        parts = ['\n'.join(output_sections) if output_sections else '(no output)', '[stopped]']
-        if bg.exit_code is not None:
-            parts.append(f'[exit code: {bg.exit_code}]')
-        return '\n'.join(parts)
+            except Exception as e:
+                errors.append(e)
+        if errors:
+            raise errors[0]
