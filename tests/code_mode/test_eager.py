@@ -897,133 +897,66 @@ class TestEagerCodeMode:
         assert isinstance(normal_result, ToolReturn)
         assert eager_result.return_value == normal_result.return_value
 
-    async def test_cumulative_scan_limit_falls_back_to_normal_execution(self):
-        calls: list[str] = []
-
-        def probe() -> str:
-            calls.append('probe')
-            return 'done'
-
-        partial = 'answer = (\n' + '# padding\n' * 10_000
-        complete = 'answer = await probe()\nx = 1\nanswer'
-        async with prepared_eager_toolset([Tool(probe)]) as (capability, toolset, ctx, run_code):
-            events: list[AgentStreamEvent] = [
-                PartStartEvent(
-                    index=0,
-                    part=ToolCallPart(tool_name='run_code', args={'code': partial}, tool_call_id='c1'),
-                )
-            ]
-            events.extend(
-                PartDeltaEvent(
-                    index=0,
-                    delta=ToolCallPartDelta(args_delta={'code': partial + '# more\n' * step}, tool_call_id='c1'),
-                )
-                for step in range(1, 11)
-            )
-            events.append(
-                PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': complete}, tool_call_id='c1'))
-            )
-            await observe(capability, ctx, events)
-            await asyncio.sleep(0)
-            assert calls == []
-
-            exec_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
-            result = await toolset.call_tool('run_code', {'code': complete}, exec_ctx, run_code)
-
-        assert calls == ['probe']
-        assert result.return_value == 'done'
-
-    async def test_string_stream_decode_work_is_cumulative(self):
-        calls: list[str] = []
-
-        def probe() -> str:
-            calls.append('probe')
-            return 'done'
-
-        line = 'x = 0\n'
-        encoded_line = json.dumps(line)[1:-1]
-        prefix = line * 600
-        tail = 'answer = await probe()\ny = 1\nanswer'
-        async with prepared_eager_toolset([Tool(probe)]) as (capability, toolset, ctx, run_code):
-            events: list[AgentStreamEvent] = [
-                PartStartEvent(index=0, part=ToolCallPart(tool_name='run_code', args='{"code":"', tool_call_id='c1'))
-            ]
-            events.extend(
-                PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=encoded_line, tool_call_id='c1'))
-                for _ in range(600)
-            )
-            events.append(
-                PartDeltaEvent(
-                    index=0,
-                    delta=ToolCallPartDelta(args_delta=json.dumps(tail)[1:-1] + '"}', tool_call_id='c1'),
-                )
-            )
-            await observe(capability, ctx, events)
-            await asyncio.sleep(0)
-            assert calls == []
-
-            code = prefix + tail
-            exec_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
-            result = await toolset.call_tool('run_code', {'code': code}, exec_ctx, run_code)
-
-        assert calls == ['probe']
-        assert result.return_value == 'done'
-
-    @pytest.mark.parametrize('restart', [False, True])
-    async def test_halted_string_stream_reconciles_queued_work(self, restart: bool):
+    @pytest.mark.parametrize(
+        ('args_format', 'restart'),
+        [('dict', False), ('string', False), ('string', True)],
+    )
+    async def test_scan_work_limit_returns_queued_statements_to_dispatch(self, args_format: str, restart: bool):
         started = asyncio.Event()
         release = asyncio.Event()
-        cancelled = asyncio.Event()
+        slow_calls = 0
         stale_calls: list[str] = []
 
         async def slow() -> None:
+            nonlocal slow_calls
+            slow_calls += 1
             started.set()
-            try:
-                await release.wait()
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
+            await release.wait()
 
         def stale() -> None:
             stale_calls.append('stale')  # pragma: no cover - reaching this line fails the assertion below
 
-        code = 'await slow()\nawait stale()\n"done"'
-        args_text = '{"code":"' + json.dumps(code)[1:-1]
-        padding = '\\n#' * 10_000
+        code = 'await slow()\n\nif True:\n    await stale()\nvalue = 1\n"done"'
         async with prepared_eager_toolset([Tool(slow), Tool(stale)]) as (capability, toolset, ctx, run_code):
+            if args_format == 'string':
+                start_args: str | dict[str, object] = '{"code":"' + json.dumps(code)[1:-1]
+                padding = '\\n#' * 10_000
+                deltas = [
+                    PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=padding, tool_call_id='c1'))
+                    for _ in range(10)
+                ]
+                deltas.append(
+                    PartDeltaEvent(
+                        index=0,
+                        delta=ToolCallPartDelta(args_delta='","restart":true}' if restart else '"}', tool_call_id='c1'),
+                    )
+                )
+            else:
+                start_args = {'code': code}
+                padded_code = code + '\n' + '# padding\n' * 10_000
+                deltas = [
+                    PartDeltaEvent(
+                        index=0,
+                        delta=ToolCallPartDelta(
+                            args_delta={'code': padded_code + '# more\n' * step}, tool_call_id='c1'
+                        ),
+                    )
+                    for step in range(1, 12)
+                ]
             await observe(
                 capability,
                 ctx,
-                [PartStartEvent(index=0, part=ToolCallPart(tool_name='run_code', args=args_text, tool_call_id='c1'))],
+                [PartStartEvent(index=0, part=ToolCallPart(tool_name='run_code', args=start_args, tool_call_id='c1'))],
             )
             await asyncio.wait_for(started.wait(), timeout=5)
-            await observe(
-                capability,
-                ctx,
-                [PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=padding, tool_call_id='c1'))] * 8,
-            )
-            ending = '","restart":true}' if restart else '"}'
-            await observe(
-                capability,
-                ctx,
-                [PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=ending, tool_call_id='c1'))],
-            )
-            if restart:
-                assert cancelled.is_set()
-                release.set()
-                await asyncio.sleep(0)
-                assert stale_calls == []
-            else:
-                await observe(
-                    capability,
-                    ctx,
-                    [PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=' ', tool_call_id='c1'))] * 3,
-                )
-                release.set()
-                final_code = code + '\n#' * 80_000
-                exec_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
-                await toolset.call_tool('run_code', {'code': final_code}, exec_ctx, run_code)
-                assert stale_calls == ['stale']
+            await observe(capability, ctx, deltas)
+            release.set()
+
+            final_code = code if restart else 'await slow()\n"done"'
+            exec_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
+            await toolset.call_tool('run_code', {'code': final_code, 'restart': restart}, exec_ctx, run_code)
+            assert slow_calls == (2 if restart else 1)
+            assert stale_calls == (['stale'] if restart else [])
 
     @pytest.mark.parametrize(
         ('invalid_args', 'halt_before_invalid'),

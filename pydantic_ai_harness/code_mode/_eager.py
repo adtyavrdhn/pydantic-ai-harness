@@ -19,7 +19,7 @@ from ._streaming import MAX_SCAN_CHARS, closed_statements, decode_partial_args
 from ._toolset import CodeModeToolset, RunCodeExecution
 
 MAX_SCAN_WORK_CHARS = 1 << 20
-"""Cumulative characters each scan or post-halt reconciliation phase may hand to host parsers."""
+"""Cumulative characters a streamed call may hand to host parsers."""
 
 
 def in_durable_execution(ctx: RunContext[object]) -> bool:
@@ -118,20 +118,10 @@ class EagerCoordinator(Generic[AgentDepsT]):
     ) -> bool:
         """Retain arguments while eager scanning is active; report whether a scan is worthwhile.
 
-        Once scanning halts, updates receive a separate bounded pass for signals that make queued work stale.
+        Once scanning halts, dict updates can still invalidate work that has already started.
         """
         if call.halted:
-            if isinstance(args, str) and not replace_dict:
-                text = call.args_text + args
-                if len(text) <= min(MAX_SCAN_CHARS, MAX_SCAN_WORK_CHARS - call.scan_work_chars):
-                    call.args_text = text
-                    call.scan_work_chars += len(text)
-                    decoded = decode_partial_args(text)
-                    if decoded is not None and decoded.get('restart'):
-                        await self.discard(call)
-                else:
-                    call.scan_work_chars = MAX_SCAN_WORK_CHARS
-            elif isinstance(args, dict):
+            if isinstance(args, dict):
                 code = args.get('code')
                 invalid_prefix = 'code' in args and (
                     not isinstance(code, str) or code != call.fed_prefix and not code.startswith(f'{call.fed_prefix}\n')
@@ -146,7 +136,7 @@ class EagerCoordinator(Generic[AgentDepsT]):
         if isinstance(args, str):
             if len(args) > MAX_SCAN_CHARS - len(call.args_text):
                 call.halted = True
-                call.scan_work_chars = MAX_SCAN_WORK_CHARS
+                self.drop_queued(call)
                 return False
             call.args_text += args
             # A statement can only close on a newline, so deltas without one need no decoding.
@@ -173,6 +163,16 @@ class EagerCoordinator(Generic[AgentDepsT]):
             return True
         return False
 
+    @staticmethod
+    def drop_queued(call: StreamedCodeCall) -> None:
+        """Return queued statements to the tail that normal dispatch will execute."""
+        if not call.queue:
+            return
+        queued_lines = sum(source.count('\n') + 1 for source in call.queue)
+        call.fed_line_count -= queued_lines
+        call.fed_prefix = '\n'.join(call.fed_prefix.split('\n')[: call.fed_line_count])
+        call.queue.clear()
+
     def find_call(self, part_index: int, tool_call_id: str | None) -> StreamedCodeCall | None:
         """Route a delta by part index, following a call ID the provider rewrites mid-stream."""
         indexed_call_id = self.call_ids_by_part_index.get(part_index)
@@ -197,8 +197,7 @@ class EagerCoordinator(Generic[AgentDepsT]):
         if args is None:
             if len(call.args_text) > MAX_SCAN_WORK_CHARS - call.scan_work_chars:
                 call.halted = True
-                call.scan_work_chars = 0
-                await self.receive_args(call, '', replace_dict=False)
+                self.drop_queued(call)
                 return
             call.scan_work_chars += len(call.args_text)
             args = decode_partial_args(call.args_text)
@@ -214,6 +213,7 @@ class EagerCoordinator(Generic[AgentDepsT]):
         if call.args_dict is not None:
             if len(code) > MAX_SCAN_WORK_CHARS - call.scan_work_chars:
                 call.halted = True
+                self.drop_queued(call)
                 return
             call.scan_work_chars += len(code)
 
