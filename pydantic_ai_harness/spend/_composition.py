@@ -18,7 +18,7 @@ from __future__ import annotations
 import warnings
 
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, Hooks, WrapperCapability
-from pydantic_ai.durable_exec._base import BaseDurabilityCapability  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai.durable_exec import BaseDurabilityCapability
 from pydantic_ai.tools import AgentDepsT
 
 from pydantic_ai_harness.spend._exceptions import SpendCompositionWarning
@@ -87,11 +87,35 @@ def _stands_in_for(member: AbstractCapability[AgentDepsT], capability: AbstractC
 def _may_reject_a_billed_response(capability: AbstractCapability[AgentDepsT]) -> bool:
     """Whether nesting this capability inside the accrual is worth reporting.
 
-    `Hooks` defines the wrapper unconditionally, so its definition cannot reveal whether a
-    model-request hook was registered. `WrapperCapability` delegates to what it wraps, so the
-    question moves to that capability unless the wrapper subclass supplies its own method.
-    Durable-execution capabilities are excluded because core requires their dispatch wrapper
-    to remain innermost; reordering is not an available correction for them.
+    The question is whether it brings a `wrap_model_request` of its own that could await a
+    response and then raise. Two kinds of capability define the method unconditionally, so
+    defining it says nothing about them:
+
+    - [`Hooks`][pydantic_ai.capabilities.Hooks] dispatches to whatever hook functions were
+      registered, and the registry that would say whether one was is private. Core publishes
+      `has_wrap_node_run` and `has_wrap_run_event_stream` but no equivalent for model requests;
+      asked for in [pydantic-ai#7177](https://github.com/pydantic/pydantic-ai/issues/7177).
+      Read as "no" until that lands.
+    - [`WrapperCapability`][pydantic_ai.capabilities.WrapperCapability] delegates straight to
+      `self.wrapped`, which is the capability that actually decides, so the question moves
+      there. A wrapper over a real rejector is still reported, under the wrapper's own name,
+      which is the name the reader put in the list.
+
+    A subclass of either that overrides the method supplies its own and is answered on that.
+
+    A durable-execution capability is read as "no" for a different reason: its wrapper
+    dispatches work rather than rejecting a response. Core requires that dispatch to be the
+    innermost wrapper (`BaseDurabilityCapability.get_ordering`), so the report's usual advice
+    to reorder `SpendLimits` would be unavailable. The clock, reads, and accrual instead cross
+    that boundary through `durable_operation`. Matched by `isinstance` against the public base
+    shared by the bundled Temporal, DBOS, and Prefect integrations.
+
+    Everything else is reported, including a capability that would not have rejected anything
+    on the run in hand. `InputGuardrail` is the case in point: it can reach a billed response
+    only under `parallel=True`, and that field is deliberately not read. `parallel` can be
+    flipped without moving anything in the list, so the ordering is the durable property and
+    the one the reader controls; and a capability that silenced its own report by reading a
+    sibling's field would go quiet the day that field stopped meaning what it means here.
     """
     implementation = type(capability).wrap_model_request
     if isinstance(capability, WrapperCapability) and implementation is WrapperCapability.wrap_model_request:
