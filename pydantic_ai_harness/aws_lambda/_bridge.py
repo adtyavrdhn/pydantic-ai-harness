@@ -381,6 +381,7 @@ def _set_exception_if_pending(future: asyncio.Future[T], error: BaseException) -
 _active_bridge: contextvars.ContextVar[StepBridge | None] = contextvars.ContextVar(
     'pydantic_ai_harness_aws_lambda_bridge', default=None
 )
+_active_run = threading.Lock()
 
 
 def current_bridge() -> StepBridge | None:
@@ -508,7 +509,23 @@ def run_durable(
             f'`run_durable()` is already active on this thread. An {ENGINE_NAME} durable handler runs '
             'one agent run at a time; call `run_durable()` once per handler invocation.'
         )
+    if not _active_run.acquire(blocking=False):
+        raise UserError(
+            f'`run_durable()` is already active on another thread. An {ENGINE_NAME} execution '
+            'environment has one shared agent event loop, so concurrent handler calls are unsafe.'
+        )
+    try:
+        return _run_durable_on_agent_loop(agent_run, context=context, cancel_timeout=cancel_timeout)
+    finally:
+        _active_run.release()
 
+
+def _run_durable_on_agent_loop(
+    agent_run: Callable[[], Coroutine[Any, Any, T]],
+    *,
+    context: DurableStepContext,
+    cancel_timeout: float,
+) -> T:
     bridge = StepBridge(context)
     token = _active_bridge.set(bridge)
     loop = _agent_loop.get()

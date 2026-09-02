@@ -593,6 +593,52 @@ class TestCoverageOfRemainingPaths:
         with pytest.raises(UserError, match='already active on this thread'):
             run_durable(lambda: agent.run('go'), context=ctx)
 
+    def test_concurrent_run_durable_calls_from_different_threads_are_rejected(self) -> None:
+        start = threading.Barrier(2)
+        run_started = threading.Event()
+        rejected = threading.Event()
+        release = threading.Event()
+        results: list[str] = []
+        errors: list[BaseException] = []
+
+        async def hold_run() -> str:
+            run_started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+            return 'done'
+
+        def invoke() -> None:
+            start.wait(timeout=5)
+            try:
+                results.append(run_durable(hold_run, context=FakeDurableContext()))
+            except BaseException as exc:
+                errors.append(exc)
+                rejected.set()
+
+        threads = [threading.Thread(target=invoke) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        assert run_started.wait(timeout=5)
+        assert rejected.wait(timeout=5)
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+        assert results == ['done']
+        assert len(errors) == 1
+        assert isinstance(errors[0], UserError)
+        assert 'another thread' in str(errors[0])
+
+    def test_process_guard_is_released_after_a_failed_run(self) -> None:
+        async def fail() -> None:
+            raise RuntimeError('boom')
+
+        with pytest.raises(RuntimeError, match='boom'):
+            run_durable(fail, context=FakeDurableContext())
+
+        assert run_durable(lambda: asyncio.sleep(0, result='recovered'), context=FakeDurableContext()) == 'recovered'
+
     def test_toolsets_without_a_durable_wrapper_pass_through(self) -> None:
         external = ExternalToolset[object]([ToolDefinition(name='remote')], id='ext')
         agent = Agent(tool_then_text(), name='a', toolsets=[external], capabilities=[AWSLambdaDurability()])
