@@ -25,6 +25,7 @@ from pydantic_ai_harness.planning import (
     PlanCreatedEvent,
     PlanEventEmitter,
     PlanItem,
+    Planning,
 )
 from pydantic_ai_harness.spend import SpendLimits, SpendRecordedEvent
 from pydantic_ai_harness.system_reminders import Reminder, ReminderFiredEvent, SystemReminders
@@ -123,7 +124,6 @@ async def test_plan_event_and_legacy_emitter() -> None:
     emitter.on_created(legacy.append)
     with pytest.warns(HarnessDeprecationWarning, match=r'event_emitter.*typed plan events.*on_event'):
         store = InMemoryPlanStore(event_emitter=emitter)
-    from pydantic_ai_harness.planning import Planning
 
     await Agent(FunctionModel(stream_function=_add_then_text), capabilities=[Planning(store=store), hooks]).run('go')
 
