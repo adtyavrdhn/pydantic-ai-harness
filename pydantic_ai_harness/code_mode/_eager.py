@@ -1,339 +1,232 @@
-"""Eager execution for `CodeMode`: feed streamed `run_code` statements into the live REPL.
-
-Eager execution runs the real program, in order, in the real session, as each top-level
-statement closes in the stream. Nothing is predicted, so nothing can miss or be wasted --
-and nothing can be rolled back: side effects land before the tool call is committed, which
-is why the tier is opt-in.
-
-A failed statement leaves the session exactly as a failed whole-snippet feed does today:
-assignments made before the failing line persist and the error surfaces to the model as the
-`run_code` result. The only semantic difference from non-eager execution is timing.
-"""
+"""Eager `CodeMode` toolset and its streamed-call state."""
 
 from __future__ import annotations
 
 import asyncio
 from collections import deque
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import Any, Generic
 
 from pydantic import TypeAdapter, ValidationError
-from pydantic_ai import RunContext
-from pydantic_ai.messages import (
-    AgentStreamEvent,
-    PartDeltaEvent,
-    PartStartEvent,
-    ToolCallPart,
-    ToolCallPartDelta,
-    ToolReturnPart,
-)
+from pydantic_ai import AbstractToolset, RunContext, WrapperToolset
+from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.messages import AgentStreamEvent, PartDeltaEvent, PartStartEvent, ToolCallPart, ToolCallPartDelta
+from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_core import from_json
 from typing_extensions import NotRequired, TypedDict
 
 from ._streaming import MAX_SCAN_CHARS, closed_statements, decode_partial_code
-
-if TYPE_CHECKING:
-    from ._toolset import CodeModeToolset
+from ._toolset import CodeModeToolset, RunCodeExecution, RunCodeTool, in_durable_execution
 
 
-class _RestartArgs(TypedDict):
+class RestartArgs(TypedDict):
     restart: NotRequired[object]
 
 
-_RESTART_ARGS_ADAPTER: TypeAdapter[_RestartArgs] = TypeAdapter(_RestartArgs)
+RESTART_ARGS_ADAPTER: TypeAdapter[RestartArgs] = TypeAdapter(RestartArgs)
+EAGER_OUTPUT_LIMIT = 1 << 20
 
 
-@dataclass(kw_only=True, frozen=True)
-class _EagerPart:
-    """Mutable internals for one streamed `run_code` call, with a stable object shape."""
+@dataclass(kw_only=True)
+class StreamedCodeCall:
+    """State for one `run_code` call while its arguments are streaming."""
 
     tool_call_id: str
+    execution: RunCodeExecution
     args_text: str = ''
     args_dict: dict[str, Any] | None = None
     consumed: int = 0
-    """Top-level statements handed to the feed pump so far."""
-
     scanned_source: str | None = None
-    """The exact completed-lines prefix the last scan parsed.
-
-    Statements only close on line boundaries, so a delta that changes nothing before the
-    final newline cannot change the parse and is skipped. Comparing the parse input itself
-    (rather than a newline count) also covers dict-delta streams, where a provider can
-    replace the whole `code` value without growing it.
-    """
-
     halted: bool = False
-    """No further statements will be fed (a `restart` request was seen in the arguments).
-
-    Statements already fed cannot be unfed; halting bounds the damage. The dispatch handles
-    a restarted part by resetting the session and running the full snippet.
-    """
-
     fed_line_count: int = 0
-    """Source lines covered by pumped statements; the executed prefix ends here."""
-
     fed_prefix: str = ''
-    """Exact source prefix handed to the pump, for divergence detection at execution."""
-
     queue: deque[str] = field(default_factory=deque[str])
-    """Statement sources waiting for the pump, in program order."""
-
     pump: asyncio.Task[None] | None = None
     error: BaseException | None = None
-    feed_count: int = 0
-    output: str = ''
-    """Concatenated print output from completed fragment feeds."""
-
-    output_capped: bool = False
-    """Accumulation hit the host-side byte cap; later fragment prints are dropped."""
-
-    output_bytes: int = 0
-    """Running UTF-8 size of `output`, tracked incrementally so feeds stay linear."""
-
-    nested_calls: dict[str, ToolCallPart] = field(default_factory=dict[str, ToolCallPart])
-    """Tool calls the pumped statements dispatched, keyed by nested tool call id."""
-
-    nested_returns: dict[str, ToolReturnPart] = field(default_factory=dict[str, ToolReturnPart])
-    """Their return parts, under the same nested tool call ids."""
-
-    def append_args_text(self, text: str) -> None:
-        object.__setattr__(self, 'args_text', self.args_text + text)
-
-    def replace_args_dict(self, args: dict[str, Any]) -> None:
-        object.__setattr__(self, 'args_dict', args)
-
-    def halt(self, *, clear_queue: bool = False) -> None:
-        object.__setattr__(self, 'halted', True)
-        if clear_queue:
-            self.queue.clear()
-
-    def record_scan(self, source: str) -> None:
-        object.__setattr__(self, 'scanned_source', source)
-
-    def record_consumed(self, consumed: int) -> None:
-        object.__setattr__(self, 'consumed', consumed)
-
-    def record_statement(self, *, source: str, end_line: int) -> None:
-        self.queue.append(source)
-        object.__setattr__(self, 'fed_line_count', end_line)
-
-    def record_prefix(self, prefix: str) -> None:
-        object.__setattr__(self, 'fed_prefix', prefix)
-
-    def start_pump(self, pump: asyncio.Task[None]) -> None:
-        object.__setattr__(self, 'pump', pump)
-
-    def next_feed(self) -> int:
-        count = self.feed_count + 1
-        object.__setattr__(self, 'feed_count', count)
-        return count
 
     def fail(self, error: BaseException) -> None:
-        object.__setattr__(self, 'error', error)
+        self.error = error
         self.queue.clear()
 
-    def append_output(self, output: str, *, byte_count: int, capped: bool = False) -> None:
-        object.__setattr__(self, 'output', self.output + output)
-        object.__setattr__(self, 'output_bytes', self.output_bytes + byte_count)
-        if capped:
-            object.__setattr__(self, 'output_capped', True)
 
+@dataclass
+class EagerExecution(Generic[AgentDepsT]):
+    """Coordinate streamed calls and background feeds for one agent run."""
 
-@dataclass(frozen=True)
-class EagerState:
-    """Inject complete streamed `run_code` statements into the live REPL.
-
-    Each run owns one state object. It serializes injected statements through the bound
-    `CodeModeToolset`, preserving program order and normal tool-call accounting.
-    """
-
-    _parts: dict[str, _EagerPart] = field(default_factory=dict[str, '_EagerPart'], init=False)
-    _toolset: CodeModeToolset[Any] | None = field(default=None, init=False)
-    _pumps: set[asyncio.Task[None]] = field(default_factory=set['asyncio.Task[None]'], init=False)
-    """Every live pump task, including ones whose part was already popped for execution.
-
-    `close()` cancels these; tracking them separately from `_parts` matters because an
-    executing `run_code` removes its watch before the pump necessarily finishes.
-    """
-
+    calls: dict[str, StreamedCodeCall] = field(default_factory=dict[str, StreamedCodeCall], init=False)
+    pumps: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]], init=False)
     feed_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    """Serializes fragment feeds run-wide, matching the dispatch path's scheduling.
+    run_step: int | None = field(default=None, init=False)
 
-    One pump exists per streamed part, but a response can stream several `run_code` parts;
-    without the lock their fragments would interleave against the single live session even
-    when the run is configured for sequential tool execution. The eager dispatch's tail
-    feed holds it too, so a later part's pump cannot overlap an earlier part's completion.
-    """
+    async def observe(
+        self,
+        event: AgentStreamEvent,
+        ctx: RunContext[AgentDepsT],
+        executor: EagerCodeModeToolset[AgentDepsT],
+    ) -> None:
+        """Consume one stream event and schedule newly completed statements."""
+        if self.run_step != ctx.run_step:
+            stale_calls = list(self.calls.values())
+            self.calls.clear()
+            for call in stale_calls:
+                await self.discard(call)
+            self.run_step = ctx.run_step
 
-    def bind(self, toolset: CodeModeToolset[Any]) -> None:
-        """Attach the owning toolset; feeds go through its `run_code` pipeline."""
-        object.__setattr__(self, '_toolset', toolset)
-
-    # -- stream side ------------------------------------------------------------------------
-
-    async def observe(self, event: AgentStreamEvent, ctx: RunContext[Any]) -> None:
-        """Track one stream event, enqueueing newly closed statements for the pump."""
         match event:
             case PartStartEvent(part=ToolCallPart() as part):
                 if part.tool_name != 'run_code':
                     return
-                part_id = part.tool_call_id
-                watch = self._parts.setdefault(part_id, _EagerPart(tool_call_id=part_id))
-                args = part.args
-                if isinstance(args, str):
-                    watch.append_args_text(args)
-                elif isinstance(args, dict):
-                    watch.replace_args_dict(args)
-                self._scan(watch, ctx)
+                call = self.calls.get(part.tool_call_id)
+                if call is None:
+                    call = StreamedCodeCall(
+                        tool_call_id=part.tool_call_id,
+                        execution=RunCodeExecution(
+                            parent_tool_call_id=part.tool_call_id,
+                            output_limit=EAGER_OUTPUT_LIMIT,
+                        ),
+                        # `run_code` is sequential. Only the first live call may execute before
+                        # dispatch, otherwise later parts could overtake or interleave with it.
+                        halted=bool(self.calls),
+                    )
+                    self.calls[part.tool_call_id] = call
+                if isinstance(part.args, str):
+                    call.args_text += part.args
+                elif isinstance(part.args, dict):
+                    call.args_dict = part.args
+                if call.halted:
+                    return
+                self.scan(call, ctx, executor)
+
             case PartDeltaEvent(delta=ToolCallPartDelta() as delta):
-                watch = self._find_watch(delta.tool_call_id)
-                if watch is None or watch.halted:
-                    # A halted watch stops accumulating too: past the scan cap (or after a
-                    # restart request) the buffered copy of the arguments has no reader.
+                call = self.find_call(delta.tool_call_id)
+                if call is None or call.halted:
                     return
-                args_delta = delta.args_delta
-                if isinstance(args_delta, str):
-                    watch.append_args_text(args_delta)
-                elif isinstance(args_delta, dict):
-                    merged = dict(watch.args_dict or {})
-                    merged.update(args_delta)
-                    watch.replace_args_dict(merged)
-                if len(watch.args_text) > MAX_SCAN_CHARS:
-                    watch.halt()
+                if isinstance(delta.args_delta, str):
+                    call.args_text += delta.args_delta
+                elif isinstance(delta.args_delta, dict):
+                    call.args_dict = {**(call.args_dict or {}), **delta.args_delta}
+                if len(call.args_text) > MAX_SCAN_CHARS:
+                    call.halted = True
                     return
-                self._scan(watch, ctx)
+                self.scan(call, ctx, executor)
+
             case _:
                 return
 
-    def _find_watch(self, tool_call_id: str | None) -> _EagerPart | None:
+    def find_call(self, tool_call_id: str | None) -> StreamedCodeCall | None:
         if tool_call_id is not None:
-            return self._parts.get(tool_call_id)
-        if len(self._parts) == 1:  # pragma: no cover - delta without id, single-part fallback
-            return next(iter(self._parts.values()))
+            return self.calls.get(tool_call_id)
+        if len(self.calls) == 1:  # pragma: no cover - provider fallback for an ID-less delta
+            return next(iter(self.calls.values()))
         return None
 
-    def _current_code(self, watch: _EagerPart) -> str | None:
-        if watch.args_dict is not None:
-            code = watch.args_dict.get('code')
+    @staticmethod
+    def current_code(call: StreamedCodeCall) -> str | None:
+        if call.args_dict is not None:
+            code = call.args_dict.get('code')
             return code if isinstance(code, str) else None
-        return decode_partial_code(watch.args_text)
+        return decode_partial_code(call.args_text)
 
-    def _restart_requested(self, watch: _EagerPart) -> bool:
-        """Whether the streamed arguments show a `restart` request so far.
-
-        The key can stream after the code, in which case the prefix has already run by the
-        time it appears; that residue is documented on the `eager` flag. Checking the raw
-        text means a snippet that merely mentions the key in a string also halts feeding,
-        which costs eagerness, never correctness.
-        """
-        if watch.args_dict is not None:
-            return bool(watch.args_dict.get('restart'))
-        # Fast path for the common un-escaped literal.
-        if '"restart"' in watch.args_text:
+    @staticmethod
+    def restart_requested(call: StreamedCodeCall) -> bool:
+        if call.args_dict is not None:
+            return bool(call.args_dict.get('restart'))
+        if '"restart"' in call.args_text:
             return True
-        # Fall back to partial-JSON decode to catch Unicode-escaped keys like `"\u0072estart"`.
-        if not watch.args_text or len(watch.args_text) > MAX_SCAN_CHARS:
+        if not call.args_text or len(call.args_text) > MAX_SCAN_CHARS:
             return False
         try:
-            decoded = _RESTART_ARGS_ADAPTER.validate_python(
-                from_json(watch.args_text, allow_partial='trailing-strings')
-            )
-        except (ValueError, ValidationError):  # pragma: no cover - malformed JSON fragments that models don't emit
+            decoded = RESTART_ARGS_ADAPTER.validate_python(from_json(call.args_text, allow_partial='trailing-strings'))
+        except (ValueError, ValidationError):  # pragma: no cover - malformed fragments from a provider
             return False
         return bool(decoded.get('restart'))
 
-    def _scan(self, watch: _EagerPart, ctx: RunContext[Any]) -> None:
-        """Re-parse the streamed code and enqueue any statements that newly closed.
-
-        No `halted` guard here: `observe` drops deltas for halted watches, and every halt
-        cause (restart, prefix rewrite, oversized arguments) re-detects itself on a rescan.
-        """
-        if self._restart_requested(watch):
-            watch.halt()
+    def scan(
+        self,
+        call: StreamedCodeCall,
+        ctx: RunContext[AgentDepsT],
+        executor: EagerCodeModeToolset[AgentDepsT],
+    ) -> None:
+        """Queue top-level statements that have become stable in the stream."""
+        if self.restart_requested(call):
+            call.halted = True
             return
-        code = self._current_code(watch)
+        code = self.current_code(call)
         if code is None:
             return
         if len(code) > MAX_SCAN_CHARS:
-            watch.halt(clear_queue=True)
+            call.halted = True
+            if call.fed_prefix and not code.startswith(call.fed_prefix):
+                call.queue.clear()
             return
-        source_prefix = code[: code.rfind('\n') + 1]
-        if source_prefix == watch.scanned_source:
-            return
-        watch.record_scan(source_prefix)
-        lines = code.split('\n')
-        if watch.fed_line_count and '\n'.join(lines[: watch.fed_line_count]) != watch.fed_prefix:
-            # A dict delta rewrote code that already executed. Keep `fed_prefix` as the text
-            # that actually ran and stop feeding; the dispatch's divergence check resets the
-            # session and asks the model to resend.
-            watch.halt()
-            return
-        fresh, consumed = closed_statements(code, watch.consumed)
-        watch.record_consumed(consumed)
-        # Each queued source is a contiguous line slice from the end of the previous
-        # statement, so comments and blank lines between statements feed with them and the
-        # concatenation of all slices reproduces the prefix exactly.
-        for statement in fresh:
-            end = statement.end_lineno or statement.lineno
-            source = '\n'.join(lines[watch.fed_line_count : end])
-            watch.record_statement(source=source, end_line=end)
-        watch.record_prefix('\n'.join(lines[: watch.fed_line_count]))
-        # One pump per part: enqueueing happens before this check, so a finished pump
-        # always means an empty queue, and a live one will drain what was just added.
-        if watch.queue and (watch.pump is None or watch.pump.done()):
-            pump = asyncio.create_task(self._run_pump(watch, ctx))
-            watch.start_pump(pump)
-            self._pumps.add(pump)
-            pump.add_done_callback(self._pumps.discard)
 
-    async def _run_pump(self, watch: _EagerPart, ctx: RunContext[Any]) -> None:
-        """Feed queued statements one at a time; an error stops the part for good."""
-        toolset = self._toolset
-        if toolset is None:  # pragma: no cover - `__aenter__` binds before any stream event
-            raise RuntimeError('`EagerState` is not bound to a `CodeModeToolset`; the toolset was never entered')
-        while watch.queue and watch.error is None:
-            source = watch.queue.popleft()
-            feed_count = watch.next_feed()
-            feed_ctx = replace(ctx, tool_call_id=f'{watch.tool_call_id}~e{feed_count}', tool_name='run_code')
+        source_prefix = code[: code.rfind('\n') + 1]
+        if source_prefix == call.scanned_source:
+            return
+        call.scanned_source = source_prefix
+
+        lines = code.split('\n')
+        if call.fed_line_count and '\n'.join(lines[: call.fed_line_count]) != call.fed_prefix:
+            call.halted = True
+            return
+
+        statements, call.consumed = closed_statements(code, call.consumed)
+        for statement in statements:
+            end = statement.end_lineno or statement.lineno
+            call.queue.append('\n'.join(lines[call.fed_line_count : end]))
+            call.fed_line_count = end
+        call.fed_prefix = '\n'.join(lines[: call.fed_line_count])
+
+        if call.queue and (call.pump is None or call.pump.done()):
+            pump = asyncio.create_task(self.run_pump(call, ctx, executor))
+            call.pump = pump
+            self.pumps.add(pump)
+            pump.add_done_callback(self.pumps.discard)
+
+    async def run_pump(
+        self,
+        call: StreamedCodeCall,
+        ctx: RunContext[AgentDepsT],
+        executor: EagerCodeModeToolset[AgentDepsT],
+    ) -> None:
+        """Feed a streamed call's queued statements in program order."""
+        while call.queue and call.error is None:
+            source = call.queue.popleft()
+            feed_ctx = replace(ctx, tool_call_id=call.tool_call_id, tool_name='run_code')
             try:
                 async with self.feed_lock:
-                    await toolset.feed_eager_fragment(watch, source, feed_ctx)
-            except Exception as e:  # cancellation propagates; everything else is held for the dispatch
-                watch.fail(e)
+                    await executor.feed_fragment(call, source, feed_ctx)
+            except Exception as error:
+                call.fail(error)
 
-    # -- execution side ---------------------------------------------------------------------
+    def pop_call(self, tool_call_id: str, code: str) -> StreamedCodeCall | None:
+        """Take the streamed state for a completed call, tolerating a rewritten call ID."""
+        call = self.calls.pop(tool_call_id, None)
+        if call is not None:
+            return call
+        rekeyed = next(
+            (
+                call_id
+                for call_id, candidate in self.calls.items()
+                if candidate.fed_prefix and code.startswith(candidate.fed_prefix)
+            ),
+            None,
+        )
+        return self.calls.pop(rekeyed) if rekeyed is not None else None
 
-    def pop_watch(self, tool_call_id: str, code: str) -> _EagerPart | None:
-        """Remove and return the watch for an executing part, tolerating provider-rewritten ids.
+    @staticmethod
+    async def drain(call: StreamedCodeCall) -> None:
+        if call.pump is not None:
+            await call.pump
 
-        Falls back to any part whose executed prefix matches the submitted code, since a
-        re-keyed part is still the same program.
-        """
-        watch = self._parts.pop(tool_call_id, None)
-        if watch is not None:
-            return watch
-        # An empty executed prefix matches any code; requiring one keeps an unrelated
-        # just-started part from being adopted (and then executed twice).
-        rekeyed = next((pid for pid, c in self._parts.items() if c.fed_prefix and code.startswith(c.fed_prefix)), None)
-        return self._parts.pop(rekeyed) if rekeyed is not None else None
+    async def discard(self, call: StreamedCodeCall) -> None:
+        call.queue.clear()
+        if call.pump is not None:
+            await self.cancel_pump(call.pump)
 
-    async def drain(self, watch: _EagerPart) -> None:
-        """Wait until every enqueued statement has been fed (or the part errored).
-
-        At most one pump exists per part: `_scan` enqueues before ensuring the pump, so a
-        finished pump means an empty queue, and no new statements arrive once the part's
-        arguments are complete.
-        """
-        if watch.pump is not None:
-            await watch.pump
-
-    async def discard(self, watch: _EagerPart) -> None:
-        """Cancel statements queued for a rewritten part."""
-        watch.queue.clear()
-        if watch.pump is not None:
-            await self._cancel_pump(watch.pump)
-
-    async def _cancel_pump(self, pump: asyncio.Task[None]) -> None:
+    @staticmethod
+    async def cancel_pump(pump: asyncio.Task[None]) -> None:
         pump.cancel()
         try:
             await pump
@@ -341,16 +234,111 @@ class EagerState:
             pass
 
     async def close(self) -> None:
-        """Cancel every live pump and drop all watches at run end.
-
-        Pumps are cancelled from the task set rather than the watches: a part that reached
-        execution was already popped from `_parts`, but its pump may still be feeding when
-        the run fails, and an abandoned fragment must not keep invoking tools.
-        """
-        self._parts.clear()
-        pumps = list(self._pumps)
-        self._pumps.clear()
+        """Cancel all background work owned by this run."""
+        self.calls.clear()
+        self.run_step = None
+        pumps = list(self.pumps)
+        self.pumps.clear()
         for pump in pumps:
-            # The done-callback prunes finished pumps, so these are live; `cancel` on one
-            # that finished in the meantime is a no-op and the await returns immediately.
-            await self._cancel_pump(pump)
+            await self.cancel_pump(pump)
+
+
+@dataclass
+class EagerCodeModeToolset(CodeModeToolset[AgentDepsT]):
+    """Run-scoped `CodeModeToolset` specialization for streamed execution."""
+
+    execution: EagerExecution[AgentDepsT] = field(default_factory=EagerExecution, init=False, repr=False)
+
+    async def for_run_step(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
+        new_self = await super().for_run_step(ctx)
+        if new_self is self:
+            return self
+        if not isinstance(new_self, EagerCodeModeToolset):  # pragma: no cover - `replace` preserves the class
+            raise TypeError('EagerCodeModeToolset.for_run_step() returned a different toolset type')
+        new_self.execution = self.execution
+        return new_self
+
+    async def __aexit__(self, *args: Any) -> bool | None:
+        result = None
+        try:
+            await self.execution.close()
+        finally:
+            result = await super().__aexit__(*args)
+        return result
+
+    async def observe_stream_event(self, event: AgentStreamEvent, ctx: RunContext[AgentDepsT]) -> None:
+        await self.execution.observe(event, ctx, self)
+
+    async def call_tool(
+        self,
+        name: str,
+        tool_args: dict[str, Any],
+        ctx: RunContext[AgentDepsT],
+        tool: ToolsetTool[AgentDepsT],
+    ) -> Any:
+        if not isinstance(tool, RunCodeTool) or in_durable_execution(ctx):
+            return await super().call_tool(name, tool_args, ctx, tool)
+
+        code = tool_args.get('code')
+        call = self.execution.pop_call(ctx.tool_call_id or 'pyd_ai_code_mode', code) if isinstance(code, str) else None
+        if call is None:
+            return await super().call_tool(name, tool_args, ctx, tool)
+
+        if tool_args.get('restart', False):
+            await self.execution.discard(call)
+            async with self.execution.feed_lock:
+                return await super().call_tool(name, tool_args, ctx, tool)
+
+        assert isinstance(code, str)
+        lines = code.split('\n')
+        if '\n'.join(lines[: call.fed_line_count]) != call.fed_prefix:
+            await self.execution.discard(call)
+            run_state = self._run_state
+            assert run_state is not None, '`CodeModeToolset` must be entered before calling `run_code`'
+            run_state.reset()
+            raise ModelRetry(
+                'The submitted code no longer matches the prefix eager execution already ran, '
+                'so the session was restarted. Send the snippet again.'
+            )
+
+        await self.execution.drain(call)
+        if call.error is not None:
+            if isinstance(call.error, ModelRetry):
+                raise ModelRetry(call.execution.prepend_to_error(call.error.message)) from call.error
+            raise call.error  # pragma: no cover - fragment execution normalizes exceptions to `ModelRetry`
+
+        tail = '\n'.join(lines[call.fed_line_count :])
+        async with self.execution.feed_lock:
+            try:
+                result = await self._execute_code(tail, ctx, tool, call.execution)
+            except ModelRetry as error:
+                raise ModelRetry(call.execution.prepend_to_error(error.message)) from error
+        return call.execution.build_tool_return(result)
+
+    async def feed_fragment(
+        self,
+        call: StreamedCodeCall,
+        source: str,
+        ctx: RunContext[AgentDepsT],
+    ) -> None:
+        tools = await self.get_tools(ctx)
+        tool = tools['run_code']
+        if not isinstance(tool, RunCodeTool):  # pragma: no cover - constructed by `get_tools`
+            raise TypeError('CodeModeToolset returned an invalid run_code tool')
+        await self._execute_code(source, ctx, tool, call.execution)
+
+
+def eager_toolset_from_context(ctx: RunContext[AgentDepsT]) -> EagerCodeModeToolset[AgentDepsT] | None:
+    """Return the active step's eager toolset without storing or rebinding it."""
+    tool_manager = ctx.tool_manager
+    if tool_manager is None or tool_manager.tools is None:
+        return None  # pragma: no cover - the agent installs its tool manager before streaming
+    tool = tool_manager.tools.get('run_code')
+    if tool is None:
+        return None  # pragma: no cover - eager `CodeMode` always contributes `run_code`
+    toolset = tool.toolset
+    while isinstance(toolset, WrapperToolset):
+        if isinstance(toolset, EagerCodeModeToolset):
+            return toolset
+        toolset = toolset.wrapped
+    return None

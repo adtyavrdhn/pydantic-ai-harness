@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, AsyncIterable, Sequence
+from collections.abc import AsyncIterable, Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -14,20 +14,19 @@ from pydantic_ai.messages import AgentStreamEvent, ModelResponse, NativeToolSear
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector
 from typing_extensions import TypedDict
 
-from pydantic_ai_harness.code_mode._eager import EagerState
+from pydantic_ai_harness.code_mode._eager import EagerCodeModeToolset, eager_toolset_from_context
 from pydantic_ai_harness.code_mode._toolset import (
     CodeModeMount,
     CodeModeOS,
     CodeModeResourceLimits,
     CodeModeToolset,
-    _in_durable_execution,  # pyright: ignore[reportPrivateUsage]
+    in_durable_execution,
 )
 
 if TYPE_CHECKING:
     from pydantic_ai.capabilities.abstract import ValidatedToolArgs
     from pydantic_ai.messages import ToolCallPart
     from pydantic_ai.models import ModelRequestContext
-    from pydantic_ai.run import AgentRunResult
 
 
 _DISCOVERY_ANNOUNCEMENT_PREFIX = (
@@ -121,12 +120,10 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     eager: bool = False
     """Execute complete streamed statements before the `run_code` call finishes.
 
-    This experimental mode uses asyncio and is inactive under durable execution. Side effects
+    This mode uses asyncio and is inactive under durable execution. Side effects
     cannot be rolled back and run before approval hooks see the completed tool call. See the
     Code Mode guide for the execution and `restart` semantics.
     """
-
-    _eager_state: EagerState | None = field(default=None, init=False, repr=False)
 
     dynamic_catalog: bool = False
     """Keep the `run_code` tool definition cache-stable as the sandboxed toolset grows.
@@ -166,18 +163,26 @@ class CodeMode(AbstractCapability[AgentDepsT]):
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> CodeMode[AgentDepsT]:
         """Return a fresh instance so concurrent runs don't share mutable per-run state."""
-        if not self.dynamic_catalog and not self.eager:
+        if not self.dynamic_catalog:
             return self
         # `replace` re-runs `__init__`, resetting `init=False` fields: `_announced_tools`
         # starts fresh (intended).
-        clone = replace(self)
-        if self.eager:
-            clone._eager_state = EagerState()
-        return clone
+        return replace(self)
 
     def get_wrapper_toolset(self, toolset: AbstractToolset[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
         """Wrap the agent's assembled toolset, splitting it into native + sandboxed subsets if needed."""
-        wrapper = CodeModeToolset(
+        if self.eager:
+            return EagerCodeModeToolset(
+                wrapped=toolset,
+                tool_selector=self.tools,
+                max_retries=self.max_retries,
+                max_tool_calls=self.max_tool_calls,
+                resource_limits=self.resource_limits,
+                dynamic_catalog=self.dynamic_catalog,
+                os_access=self.os_access,
+                mount=self.mount,
+            )
+        return CodeModeToolset(
             wrapped=toolset,
             tool_selector=self.tools,
             max_retries=self.max_retries,
@@ -186,11 +191,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
             dynamic_catalog=self.dynamic_catalog,
             os_access=self.os_access,
             mount=self.mount,
-            eager=self._eager_state,
         )
-        if self._eager_state is not None:
-            self._eager_state.bind(wrapper)
-        return wrapper
 
     @property
     def has_wrap_run_event_stream(self) -> bool:
@@ -214,29 +215,11 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         execution, where overlapping non-deterministic work with the stream has no place in
         a replayed workflow.
         """
-        state = self._eager_state
-        if state is not None and _in_durable_execution(ctx):
-            state = None
-        try:
-            async for event in stream:
-                yield event
-                if state is not None:
-                    await state.observe(event, ctx)
-        finally:
-            if isinstance(stream, AsyncGenerator):
-                await stream.aclose()
-
-    async def after_run(self, ctx: RunContext[AgentDepsT], *, result: AgentRunResult[Any]) -> AgentRunResult[Any]:
-        """Stop any statement pump the stream abandoned before the run returns."""
-        if self._eager_state is not None:
-            await self._eager_state.close()
-        return result
-
-    async def on_run_error(self, ctx: RunContext[AgentDepsT], *, error: BaseException) -> AgentRunResult[Any]:
-        """Stop any statement pump when the run fails, then let the error propagate."""
-        if self._eager_state is not None:
-            await self._eager_state.close()
-        raise error
+        toolset = None if in_durable_execution(ctx) else eager_toolset_from_context(ctx)
+        async for event in stream:
+            yield event
+            if toolset is not None:
+                await toolset.observe_stream_event(event, ctx)
 
     async def after_tool_execute(
         self,

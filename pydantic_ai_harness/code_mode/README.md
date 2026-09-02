@@ -238,14 +238,11 @@ time-bounded work behind a Temporal activity instead.
 
 State persists between `run_code` calls within the same agent run -- variables, imports, and function definitions carry over. Pass `restart: true` in the tool call to reset state. If a worker crash or host-side execution failure invalidates the session, `run_code` returns a model retry that reports the reset; the next snippet must recreate any required state.
 
-## Eager execution (experimental)
+## Eager execution
 
-`eager=True` executes streamed `run_code` snippets while the model is still generating
-them: each top-level statement runs in the live REPL as soon as it has fully streamed,
-and the `run_code` dispatch executes only the remainder. This overlaps execution latency
-with model generation. Nothing is predicted, so nothing runs that the program did not
-ask for -- and nothing is rolled back: side effects land before the tool call is
-committed, which is why the tier is opt-in.
+`CodeMode(eager=True)` starts executing complete top-level statements from a streamed
+`run_code` call before the model finishes generating the rest of the code. This overlaps
+model generation with sandbox execution and nested tool calls.
 
 ```python
 from pydantic_ai import Agent
@@ -257,31 +254,17 @@ agent = Agent(
 )
 ```
 
-A statement that fails mid-stream leaves the session exactly as a failed snippet does
-today: assignments made before the failing line persist, and the error surfaces as the
-`run_code` result for the model to retry against (prints from statements that succeeded
-earlier are included). `restart: true` discards the executed prefix along with the rest
-of the session. If the code submitted at execution no longer matches the prefix that
-already ran (a provider rewriting the part mid-stream), the session resets and the model
-is asked to resend the snippet.
+The streamed prefix and final remainder are one logical `run_code` call: they share REPL
+state, the `max_tool_calls` budget, captured output, and nested tool-call metadata. Nested
+tool hooks still apply. Hooks around the completed `run_code` call run later, after any
+eager prefix has executed, so do not use eager mode when those hooks must approve or
+rewrite code before it runs. If one response contains multiple `run_code` calls, only the
+first executes eagerly; the rest wait for normal dispatch so their declared order is kept.
 
-Budgets span the whole call: `max_tool_calls` counts nested calls across the streamed
-prefix and the dispatched remainder together, and fragments from concurrently streamed
-`run_code` parts execute one at a time against the session.
-
-Two consequences of running before the call completes:
-
-- Statements execute before the completed `run_code` call reaches `before_tool_execute`
-  hooks, so a guard capability that would block, rewrite, or defer `run_code` for
-  approval is applied only to the dispatch, after the streamed prefix already ran. Do not
-  enable `eager` on runs that gate `run_code` behind such a guard.
-- A `restart: true` call re-executes the full snippet on a fresh session. The watcher
-  stops feeding as soon as `restart` appears in the streamed arguments, but statements
-  injected before the key arrives have already run once, so their side effects repeat.
-
-Enabling `eager` puts runs in streaming mode and uses asyncio tasks. Under durable
-execution (Temporal, DBOS), the option is inactive and statements run only when the
-completed tool call executes.
+Eager execution cannot roll back side effects. A late `restart: true` may repeat work that
+already ran, and a rewritten streamed prefix resets the REPL and asks the model to resend
+the code. Eager mode uses asyncio and is inactive under durable execution such as Temporal
+or DBOS.
 
 ## Temporal durability
 
