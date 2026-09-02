@@ -272,7 +272,16 @@ class StepBridge:
                     return
                 task.add_done_callback(lambda finished: _forward(finished, result))
 
-            loop.call_soon_threadsafe(schedule)
+            try:
+                if not loop.is_running():
+                    raise RuntimeError
+                loop.call_soon_threadsafe(schedule)
+            except RuntimeError:
+                raise AgentLoopGone(
+                    f'The {ENGINE_NAME} agent event loop stopped before durable step {name!r} could be '
+                    'scheduled, so its result can never arrive. This should not happen; please report '
+                    'it at https://github.com/pydantic/pydantic-ai-harness/issues.'
+                ) from None
             while True:
                 try:
                     return result.result(timeout=_LOOP_LIVENESS_POLL_SECONDS)

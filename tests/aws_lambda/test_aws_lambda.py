@@ -739,6 +739,28 @@ class TestBridgeFailureModes:
         assert dead.is_closed()
         gc.collect()
 
+    @pytest.mark.filterwarnings('ignore::pytest.PytestUnraisableExceptionWarning')
+    def test_an_agent_loop_closed_before_step_scheduling_fails_instead_of_blocking(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setattr(_bridge, '_agent_loop', loops)
+
+        class CloseBeforeBodyContext(FakeDurableContext):
+            def step(self, func, name=None, config=None):  # type: ignore[no-untyped-def]
+                loop = loops.get()
+                thread = loops._thread  # pyright: ignore[reportPrivateUsage]
+                assert thread is not None
+                loop.call_soon_threadsafe(loop.stop)
+                thread.join(timeout=5)
+                assert loop.is_closed()
+                return super().step(func, name=name, config=config)
+
+        with pytest.raises(_bridge.AgentLoopGone, match='agent event loop stopped'):
+            run_durable(lambda: build_agent(act).run('go'), context=CloseBeforeBodyContext(), cancel_timeout=0.05)
+
+        gc.collect()
+
     def test_a_step_that_outlasts_the_liveness_poll_keeps_waiting(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The poll interval is not a deadline. A step that runs longer than it simply keeps
         waiting, because the loop that owes it a result is still there to deliver one."""
