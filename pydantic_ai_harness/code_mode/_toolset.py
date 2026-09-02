@@ -84,34 +84,20 @@ _SANDBOX_LIMIT_MARKERS = {
 
 
 @runtime_checkable
-class _Durability(Protocol):
-    """The part of a durable-execution capability CodeMode needs."""
+class _TemporalDurability(Protocol):
+    """The part of Temporal's public durability capability CodeMode needs."""
 
     in_durable_context: bool
 
 
-def _durability_active(ctx: RunContext[object], module_prefix: str) -> bool:
-    """Whether a durable-execution capability under `module_prefix` is in its durable context.
-
-    Structural rather than imported: the durability extras are optional, so the check walks
-    the capability's MRO for the module family instead of importing its classes.
-    """
+def _in_temporal_workflow(ctx: RunContext[object]) -> bool:
+    """Whether this tool call runs in a Temporal workflow without importing its optional extra."""
     return any(
-        any(base.__module__.startswith(module_prefix) for base in type(capability).__mro__)
-        and isinstance(capability, _Durability)
+        any(base.__module__.startswith('pydantic_ai.durable_exec.temporal') for base in type(capability).__mro__)
+        and isinstance(capability, _TemporalDurability)
         and capability.in_durable_context
         for capability in ctx.capabilities.values()
     )
-
-
-def _in_temporal_workflow(ctx: RunContext[object]) -> bool:
-    """Whether this tool call runs in a Temporal workflow (drives Temporal-specific limits)."""
-    return _durability_active(ctx, 'pydantic_ai.durable_exec.temporal')
-
-
-def in_durable_execution(ctx: RunContext[object]) -> bool:
-    """Whether any durable executor is replay-sensitive here; streaming tiers stay inactive."""
-    return _durability_active(ctx, 'pydantic_ai.durable_exec')
 
 
 def _exhausted_sandbox_limit(error: MontyRuntimeError) -> str | None:
@@ -516,13 +502,10 @@ class _RunCodeTool(ToolsetTool[AgentDepsT]):
 
 @dataclass
 class RunCodeExecution:
-    """State accumulated across every feed belonging to one logical `run_code` call."""
+    """State accumulated while executing one `run_code` call."""
 
     parent_tool_call_id: str
-    output_limit: int | None = None
     output: str = ''
-    output_bytes: int = 0
-    output_capped: bool = False
     call_count: int = 0
     budget_exhausted: bool = False
     nested_calls: dict[str, ToolCallPart] = field(default_factory=dict[str, ToolCallPart])
@@ -541,30 +524,7 @@ class RunCodeExecution:
         return f'{self.parent_tool_call_id}__{self.call_count}'
 
     def append_output(self, output: str) -> None:
-        """Append one feed's output, applying the optional call-wide byte limit."""
-        if not output or self.output_capped:
-            return
-        encoded = output.encode()
-        if self.output_limit is None or self.output_bytes + len(encoded) <= self.output_limit:
-            self.output += output
-            self.output_bytes += len(encoded)
-            return
-
-        marker = '\n[eager output truncated]\n'
-        marker_encoded = marker.encode()[: self.output_limit]
-        prefix_limit = self.output_limit - len(marker_encoded)
-        existing = self.output.encode()
-        kept = (existing[:prefix_limit] + encoded[: max(prefix_limit - len(existing), 0)]).decode('utf-8', 'ignore')
-        self.output = kept + marker_encoded.decode()
-        self.output_bytes = len(self.output.encode())
-        self.output_capped = True
-
-    def prepend_to_error(self, message: str) -> str:
-        """Include output from successful earlier feeds in a later feed's error."""
-        output = self.output.rstrip('\n')
-        if not output:
-            return message
-        return f'[stdout before error]\n{output}\n[/stdout before error]\n{message}'
+        self.output += output
 
     def build_tool_return(self, result: Any) -> ToolReturn[Any]:
         """Build the single public result for the logical `run_code` call."""
@@ -811,15 +771,6 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentDepsT], tool: ToolsetTool[AgentDepsT]
     ) -> Any:
         """Execute Python code in the sandbox, or pass through to a native tool."""
-        return await self._call_tool_impl(name, tool_args, ctx, tool)
-
-    async def _call_tool_impl(
-        self,
-        name: str,
-        tool_args: dict[str, Any],
-        ctx: RunContext[AgentDepsT],
-        tool: ToolsetTool[AgentDepsT],
-    ) -> Any:
         run_code_tool = self._as_run_code_tool(tool)
         if run_code_tool is None:
             # Native (non-sandboxed) tool -- pass through to the wrapped toolset.

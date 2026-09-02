@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass, field, replace
-from typing import Any, Generic
+from typing import Any, Generic, Protocol, runtime_checkable
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import AbstractToolset, RunContext, WrapperToolset
@@ -17,7 +17,7 @@ from pydantic_core import from_json
 from typing_extensions import NotRequired, TypedDict
 
 from ._streaming import MAX_SCAN_CHARS, closed_statements, decode_partial_code
-from ._toolset import CodeModeToolset, RunCodeExecution, in_durable_execution
+from ._toolset import CodeModeToolset, RunCodeExecution
 
 
 class RestartArgs(TypedDict):
@@ -28,12 +28,56 @@ RESTART_ARGS_ADAPTER: TypeAdapter[RestartArgs] = TypeAdapter(RestartArgs)
 EAGER_OUTPUT_LIMIT = 1 << 20
 
 
+@runtime_checkable
+class _Durability(Protocol):
+    in_durable_context: bool
+
+
+def in_durable_execution(ctx: RunContext[object]) -> bool:
+    """Whether a durable executor is active, where eager streaming must stay disabled."""
+    return any(
+        any(base.__module__.startswith('pydantic_ai.durable_exec') for base in type(capability).__mro__)
+        and isinstance(capability, _Durability)
+        and capability.in_durable_context
+        for capability in ctx.capabilities.values()
+    )
+
+
+@dataclass
+class _EagerRunCodeExecution(RunCodeExecution):
+    output_bytes: int = 0
+    output_capped: bool = False
+
+    def append_output(self, output: str) -> None:
+        if not output or self.output_capped:
+            return
+        encoded = output.encode()
+        if self.output_bytes + len(encoded) <= EAGER_OUTPUT_LIMIT:
+            self.output += output
+            self.output_bytes += len(encoded)
+            return
+
+        marker_encoded = b'\n[eager output truncated]\n'[:EAGER_OUTPUT_LIMIT]
+        prefix_limit = EAGER_OUTPUT_LIMIT - len(marker_encoded)
+        existing = self.output.encode()
+        kept = (existing[:prefix_limit] + encoded[: max(prefix_limit - len(existing), 0)]).decode('utf-8', 'ignore')
+        self.output = kept + marker_encoded.decode()
+        self.output_bytes = len(self.output.encode())
+        self.output_capped = True
+
+    def prepend_to_error(self, message: str) -> str:
+        output = self.output.rstrip('\n')
+        if not output:
+            return message
+        return f'[stdout before error]\n{output}\n[/stdout before error]\n{message}'
+
+
 @dataclass(kw_only=True)
 class StreamedCodeCall:
     """State for one `run_code` call while its arguments are streaming."""
 
     tool_call_id: str
-    execution: RunCodeExecution
+    execution: _EagerRunCodeExecution
     args_text: str = ''
     args_dict: dict[str, Any] | None = None
     consumed: int = 0
@@ -81,9 +125,8 @@ class EagerExecution(Generic[AgentDepsT]):
                 if call is None:
                     call = StreamedCodeCall(
                         tool_call_id=part.tool_call_id,
-                        execution=RunCodeExecution(
+                        execution=_EagerRunCodeExecution(
                             parent_tool_call_id=part.tool_call_id,
-                            output_limit=EAGER_OUTPUT_LIMIT,
                         ),
                         # `run_code` is sequential. Only the first live call may execute before
                         # dispatch, otherwise later parts could overtake or interleave with it.

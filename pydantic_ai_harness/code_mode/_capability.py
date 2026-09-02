@@ -14,13 +14,16 @@ from pydantic_ai.messages import AgentStreamEvent, ModelResponse, NativeToolSear
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector
 from typing_extensions import TypedDict
 
-from pydantic_ai_harness.code_mode._eager import EagerCodeModeToolset, eager_toolset_from_context
+from pydantic_ai_harness.code_mode._eager import (
+    EagerCodeModeToolset,
+    eager_toolset_from_context,
+    in_durable_execution,
+)
 from pydantic_ai_harness.code_mode._toolset import (
     CodeModeMount,
     CodeModeOS,
     CodeModeResourceLimits,
     CodeModeToolset,
-    in_durable_execution,
 )
 
 if TYPE_CHECKING:
