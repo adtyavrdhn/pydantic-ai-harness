@@ -240,10 +240,8 @@ State persists between `run_code` calls within the same agent run -- variables, 
 
 ## Eager execution
 
-`CodeMode(eager=True)` runs each complete top-level statement as soon as it arrives in a
-streamed `run_code` call. It does not wait for the model to finish writing the entire
-snippet, so earlier statements and their tool calls can finish while later code is still
-being generated.
+Normally, `CodeMode` waits for the model to finish writing a `run_code` call before it
+runs any code. Set `eager=True` to start sooner:
 
 ```python
 from pydantic_ai import Agent
@@ -255,17 +253,32 @@ agent = Agent(
 )
 ```
 
-The streamed prefix and final remainder are one logical `run_code` call: they share REPL
-state, the `max_tool_calls` budget, captured output, and nested tool-call metadata. Nested
-tool hooks still apply. Hooks around the completed `run_code` call run later, after any
-eager prefix has executed, so do not use eager mode when those hooks must approve or
-rewrite code before it runs. If one response contains multiple `run_code` calls, only the
-first executes eagerly; the rest wait for normal dispatch so their declared order is kept.
+For example, suppose the model produces this code one line at a time:
 
-Eager execution cannot roll back side effects. A late `restart: true` may repeat work that
-already ran, and a rewritten streamed prefix resets the REPL and asks the model to resend
-the code. Eager mode uses asyncio and is inactive under durable execution such as Temporal
-or DBOS.
+```python
+first = await fetch_item(item_id=1)
+second = await fetch_item(item_id=2)
+[first, second]
+```
+
+With eager mode, the first call to `fetch_item` can begin as soon as the first line is
+complete. `CodeMode` continues receiving the remaining lines at the same time. Without
+eager mode, neither call begins until the model has produced the whole snippet.
+
+The code still counts as one `run_code` call. It uses one REPL session, one tool-call limit,
+and one combined result. Hooks on `fetch_item` and other tools called by the code still run.
+Hooks around `run_code` itself run only after the model has finished writing the call, so
+they cannot approve or change lines that eager mode has already run.
+
+Keep these limitations in mind:
+
+- Eager mode cannot undo side effects from code that has already run.
+- If the model later requests `restart: true`, some work may run again.
+- If the model changes an earlier line while streaming, `CodeMode` resets the REPL and asks
+  the model to send the code again.
+- If a model response contains more than one `run_code` call, only the first uses eager
+  execution. The others wait so the calls run in the order the model requested.
+- Eager mode is disabled when using durable execution such as Temporal or DBOS.
 
 ## Temporal durability
 
