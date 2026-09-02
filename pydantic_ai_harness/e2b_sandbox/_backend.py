@@ -166,23 +166,10 @@ class _E2BProcess:
         self._backend = backend
         self._deadline = deadline
         self._started = started
-        self._lock = anyio.Lock()
-        self._outcome: CommandResult | Exception | None = None
 
     async def wait(self) -> CommandResult:
-        """Wait for the command and return its result, the same one on every call."""
-        # `_settle` is effectful (its deadline path kills the command), so the protocol's
-        # promise that repeated and concurrent waits agree is kept by settling once under
-        # the lock and handing every later caller the cached outcome.
-        async with self._lock:
-            if self._outcome is None:
-                try:
-                    self._outcome = await self._settle()
-                except Exception as error:
-                    self._outcome = error
-        if isinstance(self._outcome, Exception):
-            raise self._outcome
-        return self._outcome
+        """Wait for the command and return its result."""
+        return await self._settle()
 
     async def _settle(self) -> CommandResult:
         import e2b
