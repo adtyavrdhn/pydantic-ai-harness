@@ -114,29 +114,35 @@ class EagerExecution(Generic[AgentDepsT]):
                     )
                     self.calls[part.tool_call_id] = call
                     self.call_ids_by_part_index[event.index] = part.tool_call_id
-                if isinstance(part.args, str):
-                    call.args_text += part.args
-                elif isinstance(part.args, dict):
-                    call.args_dict = part.args
+                self.update_args(call, part.args, replace_dict=True)
                 if call.halted:
+                    await self.reconcile_halted(call)
                     return
                 await self.scan(call, ctx, executor)
 
             case PartDeltaEvent(delta=ToolCallPartDelta() as delta):
                 call = self.find_call(event.index, delta.tool_call_id)
-                if call is None or call.halted:
+                if call is None:
                     return
-                if isinstance(delta.args_delta, str):
-                    call.args_text += delta.args_delta
-                elif isinstance(delta.args_delta, dict):
-                    call.args_dict = {**(call.args_dict or {}), **delta.args_delta}
+                self.update_args(call, delta.args_delta, replace_dict=False)
+                if call.halted:
+                    await self.reconcile_halted(call)
+                    return
                 if len(call.args_text) > MAX_SCAN_CHARS:
                     call.halted = True
+                    await self.reconcile_halted(call)
                     return
                 await self.scan(call, ctx, executor)
 
             case _:
                 return
+
+    @staticmethod
+    def update_args(call: StreamedCodeCall, args: str | dict[str, Any] | None, *, replace_dict: bool) -> None:
+        if isinstance(args, str):
+            call.args_text += args
+        elif isinstance(args, dict):
+            call.args_dict = args if replace_dict else {**(call.args_dict or {}), **args}
 
     def find_call(self, part_index: int, tool_call_id: str | None) -> StreamedCodeCall | None:
         indexed_call_id = self.call_ids_by_part_index.get(part_index)
@@ -167,6 +173,16 @@ class EagerExecution(Generic[AgentDepsT]):
             return False
         return bool(decoded.get('restart'))
 
+    async def reconcile_halted(self, call: StreamedCodeCall) -> None:
+        """Cancel queued work if later arguments invalidate an executed prefix."""
+        if self.restart_requested(call):
+            await self.discard(call)
+            return
+        if call.args_dict is not None:
+            code = call.args_dict.get('code')
+            if isinstance(code, str) and call.fed_prefix and not code.startswith(call.fed_prefix):
+                await self.discard(call)
+
     async def scan(
         self,
         call: StreamedCodeCall,
@@ -183,8 +199,7 @@ class EagerExecution(Generic[AgentDepsT]):
         # scanning once their cumulative input is bounded; final dispatch still runs all code.
         if input_size > MAX_SCAN_WORK_CHARS - call.scan_work_chars:
             call.halted = True
-            if isinstance(dict_code, str) and call.fed_prefix and not dict_code.startswith(call.fed_prefix):
-                await self.discard(call)
+            await self.reconcile_halted(call)
             return
         call.scan_work_chars += input_size
 
@@ -198,8 +213,7 @@ class EagerExecution(Generic[AgentDepsT]):
             return
         if len(code) > MAX_SCAN_CHARS:
             call.halted = True
-            if call.fed_prefix and not code.startswith(call.fed_prefix):
-                await self.discard(call)
+            await self.reconcile_halted(call)
             return
 
         source_prefix = code[: code.rfind('\n') + 1]

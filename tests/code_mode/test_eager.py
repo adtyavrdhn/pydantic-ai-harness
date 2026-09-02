@@ -932,7 +932,7 @@ class TestEagerCodeMode:
 
         initial = 'await slow()\nawait stale()\n"done"'
         same_prefix = initial + '\n' + '# padding\n' * 10_000
-        diverged = 'replacement = 1\n' + '# padding\n' * 25_000
+        diverged = 'replacement = 1\nreplacement'
         async with prepared_eager_toolset([Tool(slow), Tool(stale)]) as (capability, _, ctx, _):
             await observe(
                 capability,
@@ -953,7 +953,7 @@ class TestEagerCodeMode:
                             index=0,
                             delta=ToolCallPartDelta(args_delta={'code': same_prefix}, tool_call_id='c1'),
                         )
-                        for _ in range(8)
+                        for _ in range(9)
                     ),
                     PartDeltaEvent(
                         index=0,
