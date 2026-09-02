@@ -495,7 +495,7 @@ def _global_mode_is_sequential(get_mode: Callable[..., ParallelExecutionMode]) -
 
 
 @dataclass(kw_only=True)
-class RunCodeTool(ToolsetTool[AgentDepsT]):
+class _RunCodeTool(ToolsetTool[AgentDepsT]):
     """ToolsetTool subclass that caches data computed during `get_tools`.
 
     Avoids a redundant `get_tools` call in `call_tool` by storing the
@@ -790,7 +790,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             description += _TOOL_SEARCH_ADDENDUM
 
         result: dict[str, ToolsetTool[AgentDepsT]] = dict(native_tools)
-        result[_RUN_CODE_TOOL_NAME] = RunCodeTool(
+        result[_RUN_CODE_TOOL_NAME] = _RunCodeTool(
             toolset=self,
             tool_def=ToolDefinition(
                 name=_RUN_CODE_TOOL_NAME,
@@ -820,7 +820,8 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
         tool: ToolsetTool[AgentDepsT],
     ) -> Any:
-        if not isinstance(tool, RunCodeTool):
+        run_code_tool = self._as_run_code_tool(tool)
+        if run_code_tool is None:
             # Native (non-sandboxed) tool -- pass through to the wrapped toolset.
             return await self.wrapped.call_tool(name, tool_args, ctx, tool)
 
@@ -834,14 +835,18 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             run_state.reset()
 
         execution = RunCodeExecution(parent_tool_call_id=ctx.tool_call_id or 'pyd_ai_code_mode')
-        result = await self._execute_code(code, ctx, tool, execution)
+        result = await self._execute_code(code, ctx, run_code_tool, execution)
         return execution.build_tool_return(result)
+
+    @staticmethod
+    def _as_run_code_tool(tool: ToolsetTool[AgentDepsT]) -> _RunCodeTool[AgentDepsT] | None:
+        return tool if isinstance(tool, _RunCodeTool) else None
 
     async def _execute_code(  # noqa: C901
         self,
         code: str,
         ctx: RunContext[AgentDepsT],
-        tool: RunCodeTool[AgentDepsT],
+        tool: _RunCodeTool[AgentDepsT],
         execution: RunCodeExecution,
     ) -> Any:
         """Execute one REPL feed and accumulate it into a logical `run_code` call."""

@@ -17,7 +17,7 @@ from pydantic_core import from_json
 from typing_extensions import NotRequired, TypedDict
 
 from ._streaming import MAX_SCAN_CHARS, closed_statements, decode_partial_code
-from ._toolset import CodeModeToolset, RunCodeExecution, RunCodeTool, in_durable_execution
+from ._toolset import CodeModeToolset, RunCodeExecution, in_durable_execution
 
 
 class RestartArgs(TypedDict):
@@ -276,7 +276,8 @@ class EagerCodeModeToolset(CodeModeToolset[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
         tool: ToolsetTool[AgentDepsT],
     ) -> Any:
-        if not isinstance(tool, RunCodeTool) or in_durable_execution(ctx):
+        run_code_tool = self._as_run_code_tool(tool)
+        if run_code_tool is None or in_durable_execution(ctx):
             return await super().call_tool(name, tool_args, ctx, tool)
 
         code = tool_args.get('code')
@@ -310,7 +311,7 @@ class EagerCodeModeToolset(CodeModeToolset[AgentDepsT]):
         tail = '\n'.join(lines[call.fed_line_count :])
         async with self.execution.feed_lock:
             try:
-                result = await self._execute_code(tail, ctx, tool, call.execution)
+                result = await self._execute_code(tail, ctx, run_code_tool, call.execution)
             except ModelRetry as error:
                 raise ModelRetry(call.execution.prepend_to_error(error.message)) from error
         return call.execution.build_tool_return(result)
@@ -323,9 +324,10 @@ class EagerCodeModeToolset(CodeModeToolset[AgentDepsT]):
     ) -> None:
         tools = await self.get_tools(ctx)
         tool = tools['run_code']
-        if not isinstance(tool, RunCodeTool):  # pragma: no cover - constructed by `get_tools`
+        run_code_tool = self._as_run_code_tool(tool)
+        if run_code_tool is None:  # pragma: no cover - constructed by `get_tools`
             raise TypeError('CodeModeToolset returned an invalid run_code tool')
-        await self._execute_code(source, ctx, tool, call.execution)
+        await self._execute_code(source, ctx, run_code_tool, call.execution)
 
 
 def eager_toolset_from_context(ctx: RunContext[AgentDepsT]) -> EagerCodeModeToolset[AgentDepsT] | None:
