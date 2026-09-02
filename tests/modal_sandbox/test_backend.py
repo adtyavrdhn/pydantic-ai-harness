@@ -494,6 +494,12 @@ class TestRun:
         with pytest.raises(ModalSandboxError, match='wait failed'):
             await backend.run(['x'])
 
+    async def test_raw_run_wait_failure_is_a_sandbox_error(self, fake_modal: FakeModal) -> None:
+        fake_modal.wait_error = RuntimeError('raw wait failed')
+        backend = await ModalSandboxBackend.create()
+        with pytest.raises(ModalSandboxError, match='raw wait failed'):
+            await backend.run(['x'])
+
     async def test_cancelling_run_propagates_the_cancellation(self, fake_modal: FakeModal) -> None:
         # A cancelled run abandons the result collection (reaping its readers) and re-raises
         # the cancellation untranslated; the command itself runs on until its Modal deadline.
