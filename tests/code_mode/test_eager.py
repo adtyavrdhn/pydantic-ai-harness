@@ -9,8 +9,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 import pytest
-from pydantic import TypeAdapter
-from pydantic_ai import Agent, RunContext, Tool
+from pydantic_ai import Agent, RunContext, Tool, ToolReturn
 from pydantic_ai.capabilities import AbstractCapability, ValidatedToolArgs
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import (
@@ -65,7 +64,7 @@ def prior_run_code_calls(messages: list[ModelMessage]) -> int:
         for message in messages
         if isinstance(message, ModelResponse)
         for part in message.parts
-        if isinstance(part, ToolCallPart)
+        if isinstance(part, ToolCallPart) and part.tool_name == 'run_code'
     )
 
 
@@ -406,6 +405,82 @@ class TestEagerCodeMode:
 
         assert calls == ['one', 'two']
 
+    async def test_run_code_does_not_overtake_an_earlier_native_tool(self):
+        calls: list[str] = []
+        stream_finished = asyncio.Event()
+
+        def authorize() -> str:
+            calls.append('authorize')
+            return 'authorized'
+
+        def act() -> str:
+            assert stream_finished.is_set()
+            calls.append('act')
+            return 'done'
+
+        code = 'result = await act()\nx = 1\nresult'
+
+        async def stream_code(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if prior_run_code_calls(messages):
+                yield 'done'
+                return
+            yield {
+                0: DeltaToolCall(name='authorize', json_args='{}'),
+                1: DeltaToolCall(name='run_code'),
+            }
+            for chunk in stream_json_args(code):
+                yield {1: DeltaToolCall(json_args=chunk)}
+                await asyncio.sleep(0)
+            stream_finished.set()
+
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_code),
+            deps_type=type(None),
+            capabilities=[CodeMode(eager=True, tools=['act'])],
+        )
+        agent.tool_plain(sequential=True)(authorize)
+        agent.tool_plain(act)
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert calls == ['authorize', 'act']
+
+    async def test_deltas_are_matched_by_part_index_and_call_id(self):
+        calls: list[str] = []
+
+        def probe() -> None:
+            calls.append('wrong')  # pragma: no cover - reaching this line fails the assertion below
+
+        async with prepared_eager_toolset([Tool(probe)]) as (capability, _, ctx, _):
+            await observe(
+                capability,
+                ctx,
+                [
+                    PartStartEvent(
+                        index=0,
+                        part=ToolCallPart(tool_name='run_code', args='', tool_call_id='code-call'),
+                    ),
+                    PartStartEvent(
+                        index=1,
+                        part=ToolCallPart(tool_name='native', args='', tool_call_id='native-call'),
+                    ),
+                    PartDeltaEvent(
+                        index=1,
+                        delta=ToolCallPartDelta(args_delta={'code': 'await probe()\nx = 1\nx'}),
+                    ),
+                    PartDeltaEvent(
+                        index=0,
+                        delta=ToolCallPartDelta(
+                            args_delta={'code': 'await probe()\nx = 1\nx'}, tool_call_id='wrong-code-call'
+                        ),
+                    ),
+                ],
+            )
+            await asyncio.sleep(0)
+
+        assert calls == []
+
     @pytest.mark.parametrize('oversized', [False, True])
     async def test_diverged_prefix_restarts_the_session(self, oversized: bool):
         started = asyncio.Event()
@@ -442,6 +517,8 @@ class TestEagerCodeMode:
                 ctx,
                 [PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': rewritten}, tool_call_id='c1'))],
             )
+            assert cancelled.is_set()
+            assert stale_calls == []
             exec_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
 
             with pytest.raises(ModelRetry, match='no longer matches'):
@@ -451,6 +528,78 @@ class TestEagerCodeMode:
 
         assert cancelled.is_set()
         assert stale_calls == []
+
+    async def test_late_restart_cancels_queued_statements(self):
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        stale_calls: list[str] = []
+
+        async def slow() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        def stale() -> None:
+            stale_calls.append('stale')  # pragma: no cover - reaching this line fails the assertion below
+
+        async with prepared_eager_toolset([Tool(slow), Tool(stale)]) as (capability, _, ctx, _):
+            code = 'await slow()\nawait stale()\n"done"'
+            await observe(
+                capability,
+                ctx,
+                [
+                    PartStartEvent(
+                        index=0, part=ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='c1')
+                    )
+                ],
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            await observe(
+                capability,
+                ctx,
+                [PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'restart': True}, tool_call_id='c1'))],
+            )
+
+            assert cancelled.is_set()
+            assert stale_calls == []
+
+    async def test_incomplete_compound_statement_waits_until_it_is_closed(self):
+        called = asyncio.Event()
+        calls: list[str] = []
+
+        def probe() -> None:
+            calls.append('probe')
+            called.set()
+
+        async with prepared_eager_toolset([Tool(probe)]) as (capability, toolset, ctx, run_code):
+            partial = 'if True:\n    await probe()\n'
+            complete = partial + 'x = 1\nx'
+            await observe(
+                capability,
+                ctx,
+                [
+                    PartStartEvent(
+                        index=0, part=ToolCallPart(tool_name='run_code', args={'code': partial}, tool_call_id='c1')
+                    )
+                ],
+            )
+            await asyncio.sleep(0)
+            assert calls == []
+
+            await observe(
+                capability,
+                ctx,
+                [PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': complete}, tool_call_id='c1'))],
+            )
+            await asyncio.wait_for(called.wait(), timeout=5)
+            exec_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
+            result = await toolset.call_tool('run_code', {'code': complete}, exec_ctx, run_code)
+
+        assert calls == ['probe']
+        assert result.return_value == 1
 
     async def test_rewritten_tool_call_id_adopts_the_matching_prefix(self):
         calls: list[str] = []
@@ -560,16 +709,22 @@ class TestEagerCodeMode:
         assert calls == ['step']
         assert result.return_value == 'step'
 
-    async def test_incomplete_and_irrelevant_stream_events_are_inert(self):
-        async with prepared_eager_toolset([]) as (capability, _, ctx, _):
+    async def test_malformed_and_irrelevant_stream_events_fall_back_to_dispatch(self):
+        calls: list[str] = []
+
+        def probe() -> str:
+            calls.append('probe')
+            return 'done'
+
+        async with prepared_eager_toolset([Tool(probe)]) as (capability, toolset, ctx, run_code):
             oversized = '{"code": "' + 'x' * 300_000
             await observe(
                 capability,
                 ctx,
                 [
-                    PartStartEvent(index=0, part=ToolCallPart(tool_name='other', args={}, tool_call_id='other')),
                     PartStartEvent(index=1, part=ToolCallPart(tool_name='run_code', args='[', tool_call_id='one')),
                     PartStartEvent(index=1, part=ToolCallPart(tool_name='run_code', args='', tool_call_id='one')),
+                    PartStartEvent(index=5, part=ToolCallPart(tool_name='other', args={}, tool_call_id='other')),
                     PartDeltaEvent(
                         index=1,
                         delta=ToolCallPartDelta(args_delta={'restart': False}, tool_call_id='one'),
@@ -579,9 +734,17 @@ class TestEagerCodeMode:
                     PartStartEvent(index=2, part=ToolCallPart(tool_name='run_code', args='', tool_call_id='two')),
                     PartDeltaEvent(index=3, delta=ToolCallPartDelta(args_delta='ignored')),
                     PartDeltaEvent(index=4, delta=ToolCallPartDelta(args_delta='ignored', tool_call_id='missing')),
-                    PartEndEvent(index=4, part=ToolCallPart(tool_name='other', args={}, tool_call_id='other')),
+                    PartEndEvent(index=5, part=ToolCallPart(tool_name='other', args={}, tool_call_id='other')),
                 ],
             )
+            assert calls == []
+
+            code = 'answer = await probe()\nanswer'
+            exec_ctx = dataclasses.replace(ctx, tool_call_id='one', tool_name='run_code')
+            result = await toolset.call_tool('run_code', {'code': code}, exec_ctx, run_code)
+
+        assert calls == ['probe']
+        assert result.return_value == 'done'
 
     async def test_validation_retry_does_not_disable_later_eager_execution(self):
         valid_call_started = asyncio.Event()
@@ -683,35 +846,124 @@ class TestEagerCodeMode:
 
         assert cancelled.is_set()
 
-    async def test_output_is_capped_across_fragments(self):
+    async def test_output_matches_normal_code_mode_across_fragments(self):
         def blob(size: int) -> str:
             return 'x' * size
 
         code = 'print(await blob(size=1048575))\nprint("y")\n"ok"'
+        tools = [Tool(blob)]
 
-        async def stream_code(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
-            if prior_run_code_calls(messages):
-                yield 'done'
-                return
-            yield {1: DeltaToolCall(name='run_code')}
-            for chunk in stream_json_args(code):
-                yield {1: DeltaToolCall(json_args=chunk)}
-                await asyncio.sleep(0)
+        async with prepared_eager_toolset(tools) as (capability, toolset, ctx, run_code):
+            await observe(
+                capability,
+                ctx,
+                [
+                    PartStartEvent(
+                        index=0, part=ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='c1')
+                    )
+                ],
+            )
+            exec_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
+            eager_result = await toolset.call_tool('run_code', {'code': code}, exec_ctx, run_code)
 
-        agent: Agent[None, str] = Agent(
-            FunctionModel(stream_function=stream_code),
-            deps_type=type(None),
-            capabilities=[CodeMode(eager=True)],
-        )
-        agent.tool_plain(blob)
+        normal_root = CodeMode[None]().get_wrapper_toolset(FunctionToolset[None](tools=tools))
+        assert isinstance(normal_root, CodeModeToolset)
+        normal_ctx = build_run_context()
+        async with normal_root:
+            manager = await ToolManager(toolset=normal_root).for_run_step(normal_ctx)
+            normal_ctx.tool_manager = manager
+            assert manager.tools is not None
+            normal_tool = manager.tools['run_code']
+            normal_ctx = dataclasses.replace(normal_ctx, tool_call_id='c1', tool_name='run_code')
+            normal_result = await normal_root.call_tool('run_code', {'code': code}, normal_ctx, normal_tool)
 
-        result = await agent.run('go')
+        assert isinstance(eager_result, ToolReturn)
+        assert isinstance(normal_result, ToolReturn)
+        assert eager_result.return_value == normal_result.return_value
 
-        content = run_code_return_content(result.all_messages())
-        output = TypeAdapter(dict[str, object]).validate_python(content).get('output')
-        assert isinstance(output, str)
-        assert len(output.encode()) <= 1 << 20
-        assert '[eager output truncated]' in output
+    async def test_cumulative_scan_limit_falls_back_to_normal_execution(self):
+        calls: list[str] = []
+
+        def probe() -> str:
+            calls.append('probe')
+            return 'done'
+
+        partial = 'answer = (\n' + '# padding\n' * 10_000
+        complete = 'answer = await probe()\nx = 1\nanswer'
+        async with prepared_eager_toolset([Tool(probe)]) as (capability, toolset, ctx, run_code):
+            events: list[AgentStreamEvent] = [
+                PartStartEvent(
+                    index=0,
+                    part=ToolCallPart(tool_name='run_code', args={'code': partial}, tool_call_id='c1'),
+                )
+            ]
+            events.extend(
+                PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': partial}, tool_call_id='c1'))
+                for _ in range(10)
+            )
+            events.append(
+                PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': complete}, tool_call_id='c1'))
+            )
+            await observe(capability, ctx, events)
+            await asyncio.sleep(0)
+            assert calls == []
+
+            exec_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
+            result = await toolset.call_tool('run_code', {'code': complete}, exec_ctx, run_code)
+
+        assert calls == ['probe']
+        assert result.return_value == 'done'
+
+    async def test_cumulative_scan_limit_cancels_a_diverged_prefix(self):
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        stale_calls: list[str] = []
+
+        async def slow() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        def stale() -> None:
+            stale_calls.append('stale')  # pragma: no cover - reaching this line fails the assertion below
+
+        initial = 'await slow()\nawait stale()\n"done"'
+        same_prefix = initial + '\n' + '# padding\n' * 10_000
+        diverged = 'replacement = 1\n' + '# padding\n' * 25_000
+        async with prepared_eager_toolset([Tool(slow), Tool(stale)]) as (capability, _, ctx, _):
+            await observe(
+                capability,
+                ctx,
+                [
+                    PartStartEvent(
+                        index=0, part=ToolCallPart(tool_name='run_code', args={'code': initial}, tool_call_id='c1')
+                    )
+                ],
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            await observe(
+                capability,
+                ctx,
+                [
+                    *(
+                        PartDeltaEvent(
+                            index=0,
+                            delta=ToolCallPartDelta(args_delta={'code': same_prefix}, tool_call_id='c1'),
+                        )
+                        for _ in range(8)
+                    ),
+                    PartDeltaEvent(
+                        index=0,
+                        delta=ToolCallPartDelta(args_delta={'code': diverged}, tool_call_id='c1'),
+                    ),
+                ],
+            )
+
+            assert cancelled.is_set()
+            assert stale_calls == []
 
     async def test_inactive_during_durable_execution(self):
         class DurableExecution(AbstractCapability[None]):

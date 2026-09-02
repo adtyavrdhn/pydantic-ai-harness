@@ -502,10 +502,14 @@ class _RunCodeTool(ToolsetTool[AgentDepsT]):
 
 @dataclass
 class RunCodeExecution:
-    """State accumulated while executing one `run_code` call."""
+    """Mutable state for one model-visible `run_code` call.
+
+    Normal execution uses one feed. Eager execution shares this object across several feeds so
+    nested-call IDs, budgets, output, and metadata do not reset between statements.
+    """
 
     parent_tool_call_id: str
-    output: str = ''
+    capture: PrintCapture = field(default_factory=PrintCapture)
     call_count: int = 0
     budget_exhausted: bool = False
     nested_calls: dict[str, ToolCallPart] = field(default_factory=dict[str, ToolCallPart])
@@ -523,19 +527,17 @@ class RunCodeExecution:
         self.call_count += 1
         return f'{self.parent_tool_call_id}__{self.call_count}'
 
-    def append_output(self, output: str) -> None:
-        self.output += output
-
     def build_tool_return(self, result: Any) -> ToolReturn[Any]:
         """Build the single public result for the logical `run_code` call."""
-        if not self.output:
+        output = self.capture.joined
+        if not output:
             return_value: Any = result if result is not None else {}
         elif result is None:
-            return_value = {'output': self.output}
+            return_value = {'output': output}
         elif _contains_multimodal(result):
-            return_value = [self.output, *result] if isinstance(result, list) else [self.output, result]
+            return_value = [output, *result] if isinstance(result, list) else [output, result]
         else:
-            return_value = {'output': self.output, 'result': result}
+            return_value = {'output': output, 'result': result}
 
         return ToolReturn(
             return_value=return_value,
@@ -905,7 +907,9 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         type_check = fresh_repl and bool(callable_defs)
         type_check_stubs = self._build_type_check_stubs(callable_defs) if type_check else None
 
-        capture = PrintCapture()
+        # One collector is reused across eager feeds. This keeps the same output cap and error
+        # behavior as a normal call while presenting one combined result to the model.
+        capture = execution.capture
 
         try:
             session = run_state.get_session(
@@ -1009,8 +1013,6 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             ) from e
 
         result = completed.output
-        execution.append_output(capture.joined)
-
         # Validate result to reconstruct multimodal types (e.g. BinaryContent from
         # serialized dicts) so they flow through to the model natively.
         if result is not None:

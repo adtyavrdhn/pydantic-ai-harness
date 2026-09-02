@@ -165,11 +165,9 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         return CapabilityOrdering(position='outermost', wraps=[_ToolSearch])
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> CodeMode[AgentDepsT]:
-        """Return a fresh instance so concurrent runs don't share mutable per-run state."""
+        """Return a fresh instance so concurrent runs don't share `_announced_tools`."""
         if not self.dynamic_catalog:
             return self
-        # `replace` re-runs `__init__`, resetting `init=False` fields: `_announced_tools`
-        # starts fresh (intended).
         return replace(self)
 
     def get_wrapper_toolset(self, toolset: AbstractToolset[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
@@ -233,9 +231,9 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         args: ValidatedToolArgs,
         result: Any,
     ) -> Any:
-        """Announce newly-discovered tools when `dynamic_catalog` is enabled.
+        """Announce newly-discovered tools from a local `search_tools` return.
 
-        The native-search path is handled by
+        Only active with `dynamic_catalog=True`. The native-search path is handled by
         [`after_model_request`][pydantic_ai_harness.CodeMode.after_model_request] instead
         (server-side search emits a `NativeToolSearchReturnPart` rather than a regular tool
         execute result).

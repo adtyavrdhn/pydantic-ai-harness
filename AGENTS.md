@@ -95,8 +95,6 @@ solves.
 - Investigate a reported gap with focused coverage for the flagged file or test.
 - docstrings use single backticks (markdown), not RST double backticks
 - no typecasting (`as` in TypeScript, `cast()` in Python) -- use type narrowing instead
-- make private dataclasses frozen by default so callers cannot rebind implementation state;
-  stateful internals may mutate owned collections and use explicit internal transitions
 - prefer the most generic input types possible (reduce dependency chains)
 - don't add comments that restate what the code does
 

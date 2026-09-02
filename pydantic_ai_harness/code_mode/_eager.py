@@ -25,7 +25,7 @@ class RestartArgs(TypedDict):
 
 
 RESTART_ARGS_ADAPTER: TypeAdapter[RestartArgs] = TypeAdapter(RestartArgs)
-EAGER_OUTPUT_LIMIT = 1 << 20
+MAX_SCAN_WORK_CHARS = 1 << 20
 
 
 @runtime_checkable
@@ -43,41 +43,12 @@ def in_durable_execution(ctx: RunContext[object]) -> bool:
     )
 
 
-@dataclass
-class _EagerRunCodeExecution(RunCodeExecution):
-    output_bytes: int = 0
-    output_capped: bool = False
-
-    def append_output(self, output: str) -> None:
-        if not output or self.output_capped:
-            return
-        encoded = output.encode()
-        if self.output_bytes + len(encoded) <= EAGER_OUTPUT_LIMIT:
-            self.output += output
-            self.output_bytes += len(encoded)
-            return
-
-        marker_encoded = b'\n[eager output truncated]\n'[:EAGER_OUTPUT_LIMIT]
-        prefix_limit = EAGER_OUTPUT_LIMIT - len(marker_encoded)
-        existing = self.output.encode()
-        kept = (existing[:prefix_limit] + encoded[: max(prefix_limit - len(existing), 0)]).decode('utf-8', 'ignore')
-        self.output = kept + marker_encoded.decode()
-        self.output_bytes = len(self.output.encode())
-        self.output_capped = True
-
-    def prepend_to_error(self, message: str) -> str:
-        output = self.output.rstrip('\n')
-        if not output:
-            return message
-        return f'[stdout before error]\n{output}\n[/stdout before error]\n{message}'
-
-
 @dataclass(kw_only=True)
 class StreamedCodeCall:
     """State for one `run_code` call while its arguments are streaming."""
 
     tool_call_id: str
-    execution: _EagerRunCodeExecution
+    execution: RunCodeExecution
     args_text: str = ''
     args_dict: dict[str, Any] | None = None
     consumed: int = 0
@@ -85,6 +56,7 @@ class StreamedCodeCall:
     halted: bool = False
     fed_line_count: int = 0
     fed_prefix: str = ''
+    scan_work_chars: int = 0
     queue: deque[str] = field(default_factory=deque[str])
     pump: asyncio.Task[None] | None = None
     error: BaseException | None = None
@@ -99,9 +71,11 @@ class EagerExecution(Generic[AgentDepsT]):
     """Coordinate streamed calls and background feeds for one agent run."""
 
     calls: dict[str, StreamedCodeCall] = field(default_factory=dict[str, StreamedCodeCall], init=False)
+    call_ids_by_part_index: dict[int, str] = field(default_factory=dict[int, str], init=False)
     pumps: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]], init=False)
     feed_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     run_step: int | None = field(default=None, init=False)
+    first_tool_part_index: int | None = field(default=None, init=False)
 
     async def observe(
         self,
@@ -111,38 +85,45 @@ class EagerExecution(Generic[AgentDepsT]):
     ) -> None:
         """Consume one stream event and schedule newly completed statements."""
         if self.run_step != ctx.run_step:
+            # Argument validation can reject a call before `call_tool` consumes its stream state.
+            # Retire that orphan before it can disable eager execution on the retry step.
             stale_calls = list(self.calls.values())
             self.calls.clear()
+            self.call_ids_by_part_index.clear()
+            self.first_tool_part_index = None
             for call in stale_calls:
                 await self.discard(call)
             self.run_step = ctx.run_step
 
         match event:
             case PartStartEvent(part=ToolCallPart() as part):
+                if self.first_tool_part_index is None:
+                    self.first_tool_part_index = event.index
                 if part.tool_name != 'run_code':
                     return
                 call = self.calls.get(part.tool_call_id)
                 if call is None:
                     call = StreamedCodeCall(
                         tool_call_id=part.tool_call_id,
-                        execution=_EagerRunCodeExecution(
+                        execution=RunCodeExecution(
                             parent_tool_call_id=part.tool_call_id,
                         ),
-                        # `run_code` is sequential. Only the first live call may execute before
-                        # dispatch, otherwise later parts could overtake or interleave with it.
-                        halted=bool(self.calls),
+                        # Eager work may start only for the response's first tool call. Anything
+                        # earlier must reach normal dispatch before this sequential tool can run.
+                        halted=event.index != self.first_tool_part_index or bool(self.calls),
                     )
                     self.calls[part.tool_call_id] = call
+                    self.call_ids_by_part_index[event.index] = part.tool_call_id
                 if isinstance(part.args, str):
                     call.args_text += part.args
                 elif isinstance(part.args, dict):
                     call.args_dict = part.args
                 if call.halted:
                     return
-                self.scan(call, ctx, executor)
+                await self.scan(call, ctx, executor)
 
             case PartDeltaEvent(delta=ToolCallPartDelta() as delta):
-                call = self.find_call(delta.tool_call_id)
+                call = self.find_call(event.index, delta.tool_call_id)
                 if call is None or call.halted:
                     return
                 if isinstance(delta.args_delta, str):
@@ -152,17 +133,18 @@ class EagerExecution(Generic[AgentDepsT]):
                 if len(call.args_text) > MAX_SCAN_CHARS:
                     call.halted = True
                     return
-                self.scan(call, ctx, executor)
+                await self.scan(call, ctx, executor)
 
             case _:
                 return
 
-    def find_call(self, tool_call_id: str | None) -> StreamedCodeCall | None:
-        if tool_call_id is not None:
-            return self.calls.get(tool_call_id)
-        if len(self.calls) == 1:  # pragma: no cover - provider fallback for an ID-less delta
-            return next(iter(self.calls.values()))
-        return None
+    def find_call(self, part_index: int, tool_call_id: str | None) -> StreamedCodeCall | None:
+        indexed_call_id = self.call_ids_by_part_index.get(part_index)
+        if indexed_call_id is None:
+            return None
+        if tool_call_id is not None and tool_call_id != indexed_call_id:
+            return None
+        return self.calls.get(indexed_call_id)
 
     @staticmethod
     def current_code(call: StreamedCodeCall) -> str | None:
@@ -185,23 +167,39 @@ class EagerExecution(Generic[AgentDepsT]):
             return False
         return bool(decoded.get('restart'))
 
-    def scan(
+    async def scan(
         self,
         call: StreamedCodeCall,
         ctx: RunContext[AgentDepsT],
         executor: EagerCodeModeToolset[AgentDepsT],
     ) -> None:
         """Queue top-level statements that have become stable in the stream."""
+        input_size = len(call.args_text)
+        dict_code: object = None
+        if call.args_dict is not None:
+            dict_code = call.args_dict.get('code')
+            input_size = len(dict_code) if isinstance(dict_code, str) else 0
+        # Both partial JSON decoding and AST parsing revisit the growing input. Stop eager
+        # scanning once their cumulative input is bounded; final dispatch still runs all code.
+        if input_size > MAX_SCAN_WORK_CHARS - call.scan_work_chars:
+            call.halted = True
+            if isinstance(dict_code, str) and call.fed_prefix and not dict_code.startswith(call.fed_prefix):
+                await self.discard(call)
+            return
+        call.scan_work_chars += input_size
+
         if self.restart_requested(call):
             call.halted = True
+            await self.discard(call)
             return
+
         code = self.current_code(call)
         if code is None:
             return
         if len(code) > MAX_SCAN_CHARS:
             call.halted = True
             if call.fed_prefix and not code.startswith(call.fed_prefix):
-                call.queue.clear()
+                await self.discard(call)
             return
 
         source_prefix = code[: code.rfind('\n') + 1]
@@ -212,6 +210,7 @@ class EagerExecution(Generic[AgentDepsT]):
         lines = code.split('\n')
         if call.fed_line_count and '\n'.join(lines[: call.fed_line_count]) != call.fed_prefix:
             call.halted = True
+            await self.discard(call)
             return
 
         statements, call.consumed = closed_statements(code, call.consumed)
@@ -279,7 +278,9 @@ class EagerExecution(Generic[AgentDepsT]):
     async def close(self) -> None:
         """Cancel all background work owned by this run."""
         self.calls.clear()
+        self.call_ids_by_part_index.clear()
         self.run_step = None
+        self.first_tool_part_index = None
         pumps = list(self.pumps)
         self.pumps.clear()
         for pump in pumps:
@@ -298,6 +299,7 @@ class EagerCodeModeToolset(CodeModeToolset[AgentDepsT]):
             return self
         if not isinstance(new_self, EagerCodeModeToolset):  # pragma: no cover - `replace` preserves the class
             raise TypeError('EagerCodeModeToolset.for_run_step() returned a different toolset type')
+        # Step-specific toolset copies participate in the same run-owned stream coordination.
         new_self.execution = self.execution
         return new_self
 
@@ -347,16 +349,11 @@ class EagerCodeModeToolset(CodeModeToolset[AgentDepsT]):
 
         await self.execution.drain(call)
         if call.error is not None:
-            if isinstance(call.error, ModelRetry):
-                raise ModelRetry(call.execution.prepend_to_error(call.error.message)) from call.error
             raise call.error  # pragma: no cover - fragment execution normalizes exceptions to `ModelRetry`
 
         tail = '\n'.join(lines[call.fed_line_count :])
         async with self.execution.feed_lock:
-            try:
-                result = await self._execute_code(tail, ctx, run_code_tool, call.execution)
-            except ModelRetry as error:
-                raise ModelRetry(call.execution.prepend_to_error(error.message)) from error
+            result = await self._execute_code(tail, ctx, run_code_tool, call.execution)
         return call.execution.build_tool_return(result)
 
     async def feed_fragment(

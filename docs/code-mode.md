@@ -226,7 +226,7 @@ runs any code. Set `eager=True` to start sooner:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.code_mode import CodeMode
+from pydantic_ai_harness import CodeMode
 
 agent = Agent(
     'openai:gpt-5.6-sol',
@@ -257,8 +257,8 @@ Keep these limitations in mind:
 - If the model later requests `restart: true`, some work may run again.
 - If the model changes an earlier line while streaming, `CodeMode` resets the REPL and asks
   the model to send the code again.
-- If a model response contains more than one `run_code` call, only the first uses eager
-  execution. The others wait so the calls run in the order the model requested.
+- Eager execution is used only when `run_code` is the first tool call in a model response.
+  Later tool calls wait for normal dispatch so they run in the order the model requested.
 - Eager mode is disabled when using durable execution such as Temporal or DBOS.
 
 ## Temporal durability

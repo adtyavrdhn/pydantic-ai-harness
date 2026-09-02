@@ -1,11 +1,4 @@
-"""Shared scanner for streamed `run_code` arguments.
-
-Streaming tiers of `CodeMode` (eager execution now, speculative execution planned) watch
-the model stream the `run_code` tool call and act on the code before the call completes.
-Both need the same two primitives: recovering the `code` string prefix from partially
-streamed JSON arguments, and deciding which top-level statements of that prefix are
-complete enough to act on.
-"""
+"""Parse partial `run_code` arguments for eager execution."""
 
 from __future__ import annotations
 
@@ -27,11 +20,10 @@ _PARTIAL_ARGS_ADAPTER: TypeAdapter[_PartialArgs] = TypeAdapter(_PartialArgs)
 MAX_SCAN_CHARS = 1 << 18
 """Largest streamed prefix (in characters) the host will decode or `ast.parse`.
 
-Larger snippets run whole at dispatch. The host parsers have no sandbox around them, and
-both run on every delta of a growing prefix, so their work must be bounded: repeated
-parses are quadratic, and adversarial nesting exercises parser depth limits. Characters
-are the honest unit because parser work scales with them; the equivalent UTF-8 byte size
-can be up to four times larger.
+Larger snippets run whole at dispatch. This bounds one parse; the eager coordinator also
+bounds cumulative parsing across all deltas because repeatedly parsing a growing prefix is
+quadratic. Characters are the honest unit because parser work scales with them; the
+equivalent UTF-8 byte size can be up to four times larger.
 """
 
 
@@ -60,9 +52,8 @@ def closed_statements(code: str, consumed: int) -> tuple[list[ast.stmt], int]:
     does not parse yields nothing -- either an open bracket/triple-quote closes later, or the
     model wrote broken code and the real run will surface the error.
 
-    The full prefix is re-parsed on each delta. That is quadratic in snippet length, which is
-    acceptable for model-written snippets; the reference implementation's incremental scanner is
-    the known upgrade path.
+    The caller limits cumulative parsing work across deltas and falls back to normal dispatch
+    when that limit is reached.
     """
     # Only `\n` terminates lines here. A snippet using lone `\r` separators parses (the AST
     # counts them as lines) but the executed-prefix slicing is `\n`-based, so treating `\r`
