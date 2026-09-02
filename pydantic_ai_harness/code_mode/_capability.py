@@ -14,11 +14,7 @@ from pydantic_ai.messages import AgentStreamEvent, ModelResponse, NativeToolSear
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector
 from typing_extensions import TypedDict
 
-from pydantic_ai_harness.code_mode._eager import (
-    EagerCodeModeToolset,
-    eager_toolset_from_context,
-    in_durable_execution,
-)
+from pydantic_ai_harness.code_mode._eager import EagerCodeModeToolset, in_durable_execution
 from pydantic_ai_harness.code_mode._toolset import (
     CodeModeMount,
     CodeModeOS,
@@ -123,9 +119,9 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     eager: bool = False
     """Execute complete streamed statements before the `run_code` call finishes.
 
-    This mode uses asyncio and is inactive under durable execution. Side effects
-    cannot be rolled back and run before approval hooks see the completed tool call. See the
-    Code Mode guide for the execution and `restart` semantics.
+    Needs asyncio, like the sandbox executor, and is inactive under durable execution. Side
+    effects cannot be rolled back and run before hooks on `run_code` see the completed call.
+    See the Code Mode guide for the execution and `restart` semantics.
     """
 
     dynamic_catalog: bool = False
@@ -216,7 +212,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         execution, where overlapping non-deterministic work with the stream has no place in
         a replayed workflow.
         """
-        toolset = None if in_durable_execution(ctx) else eager_toolset_from_context(ctx)
+        toolset = None if in_durable_execution(ctx) else EagerCodeModeToolset.from_run_context(ctx)
         async for event in stream:
             yield event
             if toolset is not None:

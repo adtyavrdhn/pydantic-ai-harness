@@ -282,6 +282,10 @@ Keep these limitations in mind:
 - Eager execution is used only when `run_code` is the first tool call in a model response.
   Later tool calls wait for normal dispatch so they run in the order the model requested.
 - Eager mode is disabled when using durable execution such as Temporal or DBOS.
+- Eager mode needs asyncio, like the rest of the sandbox executor.
+- If a statement is interrupted before it finishes, for example because the call failed
+  validation, the session restarts and the next snippet must recreate its state.
+- Tools called from statements that ran early are traced before the `run_code` span opens.
 
 ## Temporal durability
 

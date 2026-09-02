@@ -33,6 +33,8 @@ from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.code_mode import CodeMode, CodeModeToolset
 
+from .._recording_durability import RecordingDurability
+
 pytestmark = pytest.mark.anyio
 
 
@@ -466,7 +468,7 @@ class TestEagerCodeMode:
         assert result.output == 'done'
         assert calls == ['authorize', 'act']
 
-    async def test_deltas_are_matched_by_part_index_and_call_id(self):
+    async def test_deltas_are_matched_by_part_index(self):
         calls: list[str] = []
 
         def probe() -> None:
@@ -489,20 +491,13 @@ class TestEagerCodeMode:
                         index=1,
                         delta=ToolCallPartDelta(args_delta={'code': 'await probe()\nx = 1\nx'}),
                     ),
-                    PartDeltaEvent(
-                        index=0,
-                        delta=ToolCallPartDelta(
-                            args_delta={'code': 'await probe()\nx = 1\nx'}, tool_call_id='wrong-code-call'
-                        ),
-                    ),
                 ],
             )
             await asyncio.sleep(0)
 
         assert calls == []
 
-    @pytest.mark.parametrize('oversized', [False, True])
-    async def test_diverged_prefix_restarts_the_session(self, oversized: bool):
+    async def test_diverged_prefix_restarts_the_session(self):
         started = asyncio.Event()
         cancelled = asyncio.Event()
         stale_calls: list[str] = []
@@ -520,7 +515,7 @@ class TestEagerCodeMode:
 
         async with prepared_eager_toolset([Tool(slow), Tool(stale)]) as (capability, toolset, ctx, run_code):
             original = 'x = 1\nawait slow()\nawait stale()\nx'
-            rewritten = 'y = 2\ny' + ('\n' + '# padding\n' * 30_000 if oversized else '')
+            rewritten = 'y = 2\ny'
             await observe(
                 capability,
                 ctx,
@@ -621,7 +616,7 @@ class TestEagerCodeMode:
         assert calls == ['probe']
         assert result.return_value == 1
 
-    async def test_rewritten_tool_call_id_adopts_the_matching_prefix(self):
+    async def test_rewritten_tool_call_id_follows_the_streamed_call(self):
         calls: list[str] = []
 
         def probe(value: str) -> str:
@@ -637,7 +632,8 @@ class TestEagerCodeMode:
                     PartStartEvent(
                         index=0,
                         part=ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='stream-id'),
-                    )
+                    ),
+                    PartDeltaEvent(index=0, delta=ToolCallPartDelta(tool_call_id='final-id')),
                 ],
             )
             exec_ctx = dataclasses.replace(ctx, tool_call_id='final-id', tool_name='run_code')
@@ -742,7 +738,7 @@ class TestEagerCodeMode:
                 capability,
                 ctx,
                 [
-                    PartStartEvent(index=1, part=ToolCallPart(tool_name='run_code', args='[', tool_call_id='one')),
+                    PartStartEvent(index=1, part=ToolCallPart(tool_name='run_code', args='[\\n', tool_call_id='one')),
                     PartStartEvent(index=1, part=ToolCallPart(tool_name='run_code', args='', tool_call_id='one')),
                     PartStartEvent(index=5, part=ToolCallPart(tool_name='other', args={}, tool_call_id='other')),
                     PartDeltaEvent(
@@ -918,8 +914,11 @@ class TestEagerCodeMode:
                 )
             ]
             events.extend(
-                PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': partial}, tool_call_id='c1'))
-                for _ in range(10)
+                PartDeltaEvent(
+                    index=0,
+                    delta=ToolCallPartDelta(args_delta={'code': partial + '# more\n' * step}, tool_call_id='c1'),
+                )
+                for step in range(1, 11)
             )
             events.append(
                 PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'code': complete}, tool_call_id='c1'))
@@ -934,68 +933,7 @@ class TestEagerCodeMode:
         assert calls == ['probe']
         assert result.return_value == 'done'
 
-    @pytest.mark.parametrize('invalid_args', ['diverged', 'restart', 'missing_code'])
-    async def test_scan_limit_cancels_when_later_args_invalidate_the_prefix(self, invalid_args: str):
-        started = asyncio.Event()
-        cancelled = asyncio.Event()
-        stale_calls: list[str] = []
-
-        async def slow() -> None:
-            started.set()
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
-
-        def stale() -> None:
-            stale_calls.append('stale')  # pragma: no cover - reaching this line fails the assertion below
-
-        initial = 'await slow()\nawait stale()\n"done"'
-        same_prefix = initial + '\n' + '# padding\n' * 10_000
-        async with prepared_eager_toolset([Tool(slow), Tool(stale)]) as (capability, _, ctx, _):
-            await observe(
-                capability,
-                ctx,
-                [
-                    PartStartEvent(
-                        index=0, part=ToolCallPart(tool_name='run_code', args={'code': initial}, tool_call_id='c1')
-                    )
-                ],
-            )
-            await asyncio.wait_for(started.wait(), timeout=5)
-            await observe(
-                capability,
-                ctx,
-                [
-                    PartDeltaEvent(
-                        index=0,
-                        delta=ToolCallPartDelta(args_delta={'code': same_prefix}, tool_call_id='c1'),
-                    )
-                    for _ in range(11)
-                ],
-            )
-            if invalid_args == 'diverged':
-                event: AgentStreamEvent = PartDeltaEvent(
-                    index=0,
-                    delta=ToolCallPartDelta(args_delta={'code': 'replacement = 1\nreplacement'}, tool_call_id='c1'),
-                )
-            elif invalid_args == 'restart':
-                event = PartDeltaEvent(
-                    index=0,
-                    delta=ToolCallPartDelta(args_delta={'restart': True}, tool_call_id='c1'),
-                )
-            else:
-                event = PartStartEvent(
-                    index=0,
-                    part=ToolCallPart(tool_name='run_code', args={'wrong': True}, tool_call_id='c1'),
-                )
-            await observe(capability, ctx, [event])
-
-            assert cancelled.is_set()
-            assert stale_calls == []
-
-    async def test_halted_string_stream_keeps_only_restart_reconciliation(self):
+    async def test_interrupted_statement_restarts_the_session(self):
         started = asyncio.Event()
         cancelled = asyncio.Event()
 
@@ -1007,36 +945,33 @@ class TestEagerCodeMode:
                 cancelled.set()
                 raise
 
-        code = 'await slow()\nx = 1\n"done"'
-        initial_args = '{"code": ' + json.dumps(code)
-        async with prepared_eager_toolset([Tool(slow)]) as (capability, _, ctx, _):
+        async with prepared_eager_toolset([Tool(slow)]) as (capability, toolset, ctx, run_code):
+            code = 'saved = 7\nawait slow()\nx = 1\nx'
             await observe(
                 capability,
                 ctx,
                 [
                     PartStartEvent(
-                        index=0, part=ToolCallPart(tool_name='run_code', args=initial_args, tool_call_id='c1')
+                        index=0, part=ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='c1')
                     )
                 ],
             )
             await asyncio.wait_for(started.wait(), timeout=5)
+            # The call never reaches dispatch (for example, argument validation rejected it), so the
+            # next step retires it while `slow()` is still running.
+            next_step = dataclasses.replace(ctx, run_step=1)
             await observe(
                 capability,
-                ctx,
-                [
-                    PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=', "padding": "' + 'x' * 300_000)),
-                    PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta='", "res')),
-                    PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta='tart": true}')),
-                ],
+                next_step,
+                [PartStartEvent(index=0, part=ToolCallPart(tool_name='other', args={}, tool_call_id='o1'))],
             )
-
             assert cancelled.is_set()
+
+            exec_ctx = dataclasses.replace(next_step, tool_call_id='c2', tool_name='run_code')
+            with pytest.raises(ModelRetry, match='not defined'):
+                await toolset.call_tool('run_code', {'code': 'saved'}, exec_ctx, run_code)
 
     async def test_inactive_during_durable_execution(self):
-        class DurableExecution(AbstractCapability[None]):
-            in_durable_context = True
-
-        DurableExecution.__module__ = 'pydantic_ai.durable_exec.dbos'
         stream_finished = asyncio.Event()
         calls: list[str] = []
 
@@ -1059,8 +994,9 @@ class TestEagerCodeMode:
 
         agent: Agent[None, str] = Agent(
             FunctionModel(stream_function=stream_code),
+            name='eager',
             deps_type=type(None),
-            capabilities=[CodeMode(eager=True), DurableExecution()],
+            capabilities=[CodeMode(eager=True), RecordingDurability()],
         )
         agent.tool_plain(search)
 

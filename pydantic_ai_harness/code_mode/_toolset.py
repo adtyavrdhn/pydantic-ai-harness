@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import keyword
 import re
@@ -934,6 +935,10 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             except MontyRuntimeError:
                 # The session is idle again and keeps assignments made before the failing line.
                 run_state.has_executed_feed = True
+                raise
+            except asyncio.CancelledError:
+                # The feed never finished, so the REPL is mid-statement. Start fresh next time.
+                run_state.reset()
                 raise
             run_state.has_executed_feed = True
         except MontySyntaxError as e:
