@@ -17,6 +17,7 @@ from pydantic_ai import (
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.sandboxes import LocalSandbox
 
 from pydantic_ai_harness import Coder
 from pydantic_ai_harness.repo_context import AgentContextInventory, AssetRoot
@@ -116,7 +117,7 @@ async def test_coder_completes_task(
         'internal-incident privacy behavior for both formats. Follow the repository architecture, cover the service '
         'and CLI paths including explicit internal opt-in, and run the full test suite.'
     )
-    result = await agent.run(prompt)
+    result = await agent.run(prompt, sandbox=LocalSandbox(root=workspace))
 
     assert result.all_messages() == snapshot(
         [
