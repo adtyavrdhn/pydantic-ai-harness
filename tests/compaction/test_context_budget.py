@@ -95,7 +95,7 @@ def _ctx(model: Any = None) -> Any:
         tracer: Tracer = dataclasses.field(default_factory=NoOpTracer)
 
         async def emit(self, event: Any) -> Any:
-            # Like the real `RunContext.emit` with no listeners: inline dispatch
+            # Like the real `RunContext.emit` with no listeners: immediate dispatch
             # returns the (unmutated) event for the emitter to inspect.
             return event
 

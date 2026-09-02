@@ -453,7 +453,7 @@ Raw message content is not recorded.
 ## Events
 
 Every strategy attempt emits `CompactionStartEvent` (from the compaction event family Pydantic AI core defines and its provider-native compaction capabilities share) after its trigger fires and before it rewrites
-history. The event reports the strategy, message count, and estimated tokens. It uses inline
+history. The event reports the strategy, message count, and estimated tokens. It uses immediate
 dispatch, so capability and application listeners can call `cancel()` before the strategy
 continues. Cancellation applies to this attempt only; a later trigger tries again. A cancelled
 fallback candidate is a deliberate skip and does not advance the fallback chain.
@@ -482,7 +482,7 @@ class HoldCompaction(AbstractCapability[Any]):
 ```
 
 Application code can register the same listener with `@hooks.on.event(CompactionStartEvent)`.
-Because the decision is inline, listeners must finish synchronously with the attempt rather than
+Because the decision is dispatched immediately, listeners must finish synchronously with the attempt rather than
 deferring an answer to background work.
 
 ## Compaction receipts

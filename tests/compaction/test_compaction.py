@@ -126,7 +126,7 @@ def _make_ctx(
         )
 
         async def emit(self, event: Any) -> Any:
-            # Like the real `RunContext.emit` with no listeners: inline dispatch
+            # Like the real `RunContext.emit` with no listeners: immediate dispatch
             # returns the (unmutated) event for the emitter to inspect.
             return event
 
