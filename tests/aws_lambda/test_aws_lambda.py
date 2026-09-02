@@ -150,23 +150,23 @@ class TestDurableAgentHandler:
         received: list[float] = []
 
         def fake_run_durable(agent_run: Any, *, context: _bridge.DurableStepContext, cancel_timeout: float) -> str:
-            del agent_run, context
+            del context
             received.append(cancel_timeout)
-            return 'done'
+            return asyncio.run(agent_run())
 
         monkeypatch.setattr(_bridge, 'run_durable', fake_run_durable)
 
         @durable_agent_handler(cancel_timeout=30)
         async def handler(event: object, context: _bridge.DurableStepContext) -> str:
             del event, context
-            return 'unused'
+            return 'handler result'
 
-        assert handler({}, FakeDurableContext()) == 'done'
+        assert handler({}, FakeDurableContext()) == 'handler result'
         assert received == [30]
 
     def test_wrong_decorator_order_is_rejected(self) -> None:
         async def handler(event: object, context: object) -> None:
-            del event, context
+            """Stub used only to verify decorator composition."""
 
         sdk_wrapped = durable_execution(handler)
         with pytest.raises(
