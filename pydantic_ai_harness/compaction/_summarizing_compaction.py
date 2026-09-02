@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic_ai._run_context import AgentDepsT
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, durable_operation
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     ModelMessage,
@@ -22,6 +22,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model
 from pydantic_ai.models.fallback import FallbackModel
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
 
 from pydantic_ai_harness._usage import reserved_usage_limits
@@ -275,6 +276,13 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     `ModelRequestContext.model`; set this explicitly to pin the summarizer regardless.
     """
 
+    model_settings: ModelSettings | None = field(default=None, kw_only=True)
+    """Settings for the dedicated summary model call.
+
+    These merge over defaults carried by `model`, allowing the summary call to use a
+    policy that differs from the running agent without mutating the model.
+    """
+
     max_messages: int | None = None
     """Trigger compaction when message count exceeds this value."""
 
@@ -369,6 +377,10 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     Opt-in for now: the receipt text is content, so defaulting it on is deferred to the
     benchmark eval-rig pass.  The mechanism itself is structural.
     """
+
+    # Override the inherited default ID because durable-operation recovery needs a stable identity.
+    _: KW_ONLY
+    id: str | None = 'summarizing_compaction'
 
     def __post_init__(self) -> None:
         if self.max_messages is None and self.max_tokens is None and self.max_fraction is None:
@@ -603,6 +615,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         request_context.messages = compacted
         return request_context
 
+    @durable_operation('summarize')
     async def _summarize(
         self,
         messages: list[ModelMessage],
@@ -637,6 +650,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         agent: Agent[None, str] = Agent(
             cast('Model[Any] | str', model),
             instructions=self.instructions,
+            model_settings=self.model_settings,
         )
         result = await agent.run(prompt, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
         return result.output.strip()
