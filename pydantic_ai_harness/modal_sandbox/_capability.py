@@ -15,7 +15,6 @@ from pydantic_ai_harness.modal_sandbox._backend import (
     DEFAULT_APP_NAME,
     DEFAULT_IMAGE,
     DEFAULT_SANDBOX_TIMEOUT,
-    PROVIDER,
     ModalSandboxBackend,
     ModalSandboxUnavailableError,
 )
@@ -90,7 +89,7 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
     async def acquire_sandbox(self, ctx: RunContext[AgentDepsT]) -> SandboxRef:
         """Create or reuse the sandbox for this logical run."""
         if self.sandbox_id is not None:
-            return SandboxRef(provider=PROVIDER, sandbox_id=self.sandbox_id)
+            return SandboxRef(sandbox_id=self.sandbox_id)
         if ctx.run_id is None:  # pragma: no cover - core assigns it before acquisition
             raise RuntimeError('Modal sandbox acquisition requires a run ID.')
         backend = await ModalSandboxBackend.create_or_connect(
@@ -102,19 +101,17 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
             workdir=self.workdir,
             env=self.env,
         )
-        ref = SandboxRef(provider=PROVIDER, sandbox_id=backend.sandbox_id)
+        ref = SandboxRef(sandbox_id=backend.sandbox_id)
         await backend.close(terminate=False)
         return ref
 
-    async def get_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef | None) -> SandboxBackend | None:
+    async def get_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> SandboxBackend | None:
         """Reconnect to a referenced Modal sandbox without provisioning one."""
-        if ref is None or ref.provider != PROVIDER:
-            return None
         return await ModalSandboxBackend.connect(ref.sandbox_id)
 
     async def release_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> None:
         """Terminate an owned sandbox; leave an attached sandbox to its owner."""
-        if self.sandbox_id is not None or ref.provider != PROVIDER:
+        if self.sandbox_id is not None:
             return
         try:
             backend = await ModalSandboxBackend.connect(ref.sandbox_id)
