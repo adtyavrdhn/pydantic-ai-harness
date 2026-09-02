@@ -614,6 +614,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     deferred_tool_results=deferred_results,
                     output_type=output_type,
                     deps=config.deps,
+                    capabilities=config.capabilities,
                     toolsets=config.toolsets,
                     # Per-run override for the client's model config choice; `None` uses the
                     # agent's own model, never mutating the shared agent. A `model_resolver` (if
@@ -832,9 +833,15 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         """Names of the tools that pause for the client's approval, announced `pending` in `_emit_event`.
 
         Only `FunctionToolset`-held tools expose `requires_approval` without a live run context;
-        tools from other toolset types are treated as not requiring approval.
+        tools from other toolset types are treated as not requiring approval. A session capability
+        is asked for its toolset the same way, so its approval-required tools are announced too --
+        except when it builds one per run, which needs a run context this scan doesn't have.
         """
         toolsets: list[AbstractToolset[AgentDepsT]] = [*self._agent.toolsets, *(config.toolsets or [])]
+        for capability in config.capabilities or ():
+            contributed = capability.get_toolset()
+            if isinstance(contributed, AbstractToolset):
+                toolsets.append(contributed)
         names: set[str] = set()
         for toolset in toolsets:
             if isinstance(toolset, FunctionToolset):
