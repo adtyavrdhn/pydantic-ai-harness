@@ -159,23 +159,10 @@ class _ModalProcess:
         self._backend = backend
         self._deadline = deadline
         self._started_at = started_at
-        self._lock = anyio.Lock()
-        self._outcome: CommandResult | Exception | None = None
 
     async def wait(self) -> CommandResult:
-        """Wait for the command and return its result, the same one on every call."""
-        # `_settle` is effectful (it can kill the command and consume the single-consumer readers), so the protocol's
-        # promise that repeated and concurrent waits agree is kept by settling once under
-        # the lock and handing every later caller the cached outcome.
-        async with self._lock:
-            if self._outcome is None:
-                try:
-                    self._outcome = await self._settle()
-                except Exception as error:
-                    self._outcome = error
-        if isinstance(self._outcome, Exception):
-            raise self._outcome
-        return self._outcome
+        """Wait for the command and return its result."""
+        return await self._settle()
 
     async def _settle(self) -> CommandResult:
         async def read(reader: modal.io_streams.StreamReader[bytes]) -> str:
@@ -226,12 +213,6 @@ class _ModalProcess:
         # Modal's own timer runs -- the platform starts counting when the command starts, inside
         # that round trip -- so a deadline kill always lands inside it and an earlier exit does not.
         return exit_code == _SIGKILL_EXIT and elapsed >= self._deadline
-
-    async def kill(self) -> None:
-        raise NotImplementedError(
-            'Modal exposes no way to kill an individual command; start it with `timeout=` so the '
-            'platform kills it at the deadline, or terminate the whole sandbox.'
-        )
 
 
 class _ModalFilesystem:
