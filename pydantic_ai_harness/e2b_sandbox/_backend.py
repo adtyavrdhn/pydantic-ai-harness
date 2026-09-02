@@ -41,6 +41,7 @@ from pydantic_ai.sandboxes import (
     CommandResult,
     FileEntry,
     SandboxBackend,
+    SandboxError,
     SandboxTimeoutError,
     SandboxUnavailableError,
 )
@@ -53,9 +54,7 @@ if TYPE_CHECKING:
     from pydantic_ai.sandboxes import (
         SandboxCommand,
         SandboxFilesystem,
-        SandboxProcess,
         SupportsFilesystem,
-        SupportsStart,
     )
 
 __all__ = (
@@ -109,7 +108,7 @@ async def _kill_sandbox(sandbox_id: str, kill: Callable[[], Awaitable[object]]) 
     await raise_after_cleanup(translated)
 
 
-class E2BSandboxError(RuntimeError):
+class E2BSandboxError(SandboxError):
     """A recoverable E2B provider operation failed."""
 
 
@@ -149,14 +148,10 @@ def _command_line(command: SandboxCommand, shell: bool) -> str:
 
 
 class _E2BProcess:
-    """A command running inside an E2B sandbox, as returned by `E2BSandboxBackend.start`.
+    """Private command result helper used by `E2BSandboxBackend.run`.
 
-    Deliberately not a `SupportsStream`: E2B delivers live output through `on_stdout` /
-    `on_stderr` callbacks that the SDK's own event pump awaits, and it exposes no async
-    iterator over them. Bridging the callbacks into a queue would either block that pump when
-    nobody consumes the stream (breaking the protocol's promise that skipping `stream()` never
-    changes `wait()`) or buffer the whole output, which is not streaming. `wait()` returns the
-    complete result instead.
+    E2B delivers output through callbacks that the SDK's own event pump awaits, so complete
+    results are collected by `wait()` instead.
     """
 
     def __init__(
@@ -173,10 +168,6 @@ class _E2BProcess:
         self._started = started
         self._lock = anyio.Lock()
         self._outcome: CommandResult | Exception | None = None
-
-    @property
-    def pid(self) -> int | None:
-        return self._handle.pid
 
     async def wait(self) -> CommandResult:
         """Wait for the command and return its result, the same one on every call."""
@@ -333,7 +324,7 @@ class E2BSandboxBackend(SandboxBackend):
     [`connect`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.connect]; the `E2BSandbox`
     capability does both for you.
 
-    One process opt-in is implemented: background commands (`SupportsStart`).
+    Commands run as one-shot operations, with complete output returned after they finish.
 
     Every command runs through `/bin/bash -l -c`, so an argv sequence is quoted into a single
     shell word string first and login startup files run before the command does. E2B's own
@@ -569,7 +560,7 @@ class E2BSandboxBackend(SandboxBackend):
         protocol's cancellation contract; the kill is best effort, and the sandbox's own
         lifetime remains the backstop.
         """
-        process = await self.start(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
+        process = await self._start(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
         try:
             return await process.wait()
         except SandboxTimeoutError:
@@ -581,7 +572,7 @@ class E2BSandboxBackend(SandboxBackend):
             await _kill_quietly(process)
             raise
 
-    async def start(
+    async def _start(
         self,
         command: SandboxCommand,
         *,
@@ -590,7 +581,7 @@ class E2BSandboxBackend(SandboxBackend):
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
     ) -> _E2BProcess:
-        """Start a command without waiting, returning a handle to the running process."""
+        """Start the private command helper used by `run`."""
         line = _command_line(command, shell)
         cwd = absolute_path('cwd', cwd)
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
@@ -669,13 +660,9 @@ if TYPE_CHECKING:
     # Pins full structural conformance -- signatures included -- which `isinstance` cannot
     # check. `__new__` rather than a call, because neither SDK object can be constructed
     # without a live sandbox behind it; this block never runs. There is deliberately no
-    # `SupportsStream` pin: see `_E2BProcess`.
     _sandbox = e2b.AsyncSandbox.__new__(e2b.AsyncSandbox)
     _handle = e2b.AsyncCommandHandle.__new__(e2b.AsyncCommandHandle)
     _backend = E2BSandboxBackend(_sandbox)
-    _process = _E2BProcess(_handle, backend=_backend, deadline=None, started=0.0)
     _backend_conforms: SandboxBackend = _backend
     _filesystem_backend_conforms: SupportsFilesystem = _backend
-    _start_conforms: SupportsStart = _backend
     _filesystem_conforms: SandboxFilesystem = _backend.fs
-    _process_conforms: SandboxProcess = _process

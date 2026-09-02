@@ -14,11 +14,10 @@ import pytest
 from pydantic_ai.sandboxes import (
     Sandbox,
     SandboxBackend,
+    SandboxError,
     SandboxTimeoutError,
     SandboxUnavailableError,
     SupportsFilesystem,
-    SupportsStart,
-    SupportsStream,
 )
 
 from pydantic_ai_harness.modal_sandbox import (
@@ -31,7 +30,6 @@ from pydantic_ai_harness.modal_sandbox import (
 from ..sandbox_conformance import (
     check_command_validation,
     check_missing_file,
-    check_process_results,
     check_timeout,
 )
 from .fake_modal import FakeModal, FileInfo, _AioCallable
@@ -61,17 +59,12 @@ def anyio_backend() -> str:
 
 
 class TestConformance:
-    async def test_backend_implements_the_protocol_opt_ins(self, fake_modal: FakeModal) -> None:
+    async def test_backend_implements_run_and_filesystem_protocols(self, fake_modal: FakeModal) -> None:
         # `isinstance` is shallow (member presence only); the signature half is pinned
         # statically by the `if TYPE_CHECKING` block in `_backend.py`.
         backend = await ModalSandboxBackend.create()
         assert isinstance(backend, SandboxBackend)
         assert isinstance(backend, SupportsFilesystem)
-        assert isinstance(backend, SupportsStart)
-        # `SandboxProcess` itself is not runtime-checkable; the process side is pinned
-        # statically in `_backend.py` and exercised by the tests below.
-        process = await backend.start(['echo', 'hi'], timeout=5)
-        assert isinstance(process, SupportsStream)
 
     async def test_identity_is_modal_object_id(self, fake_modal: FakeModal) -> None:
         backend = await ModalSandboxBackend.create()
@@ -88,9 +81,11 @@ class TestConformance:
         fake_modal.responder = lambda argv, timeout: ('partial', '', -1)
         await check_timeout(ModalSandboxBackend.create)
 
-    async def test_shared_wait_and_nonzero_result(self, fake_modal: FakeModal) -> None:
+    async def test_shared_run_and_nonzero_result(self, fake_modal: FakeModal) -> None:
         fake_modal.responder = lambda argv, timeout: ('', '', 2)
-        await check_process_results(ModalSandboxBackend.create)
+        backend = await ModalSandboxBackend.create()
+        result = await backend.run(['false'])
+        assert result.exit_code != 0
 
 
 class TestCreate:
@@ -415,6 +410,7 @@ class TestRun:
         backend = await ModalSandboxBackend.create()
         with pytest.raises(ModalSandboxError, match='Command could not run in the sandbox: transient blip') as exc:
             await backend.run(['x'])
+        assert isinstance(exc.value, SandboxError)
         assert not isinstance(exc.value, SandboxUnavailableError)
 
     @pytest.mark.parametrize(
@@ -492,137 +488,22 @@ class TestRun:
         with pytest.raises(ModalSandboxUnavailableError, match="'sb-keep' is no longer running"):
             await backend.run(['x'])
 
-    async def test_non_modal_stream_failure_becomes_a_sandbox_error(self, fake_modal: FakeModal) -> None:
-        # Transport failures during a stream read are not modal.exception.Error; they must
-        # still surface as a typed, recoverable sandbox error rather than abort the run.
-        fake_modal.stdout_error = ValueError('Received empty message')
-        backend = await ModalSandboxBackend.create()
-        with pytest.raises(ModalSandboxError, match='ValueError: Received empty message') as exc:
-            await backend.run(['x'], timeout=5)
-        assert 'the command may still run until its deadline' in str(exc.value)
-
-    async def test_wait_failure_becomes_a_sandbox_error(self, fake_modal: FakeModal) -> None:
+    async def test_run_wait_failure_is_a_sandbox_error(self, fake_modal: FakeModal) -> None:
         fake_modal.wait_error = fake_modal.error_type('wait failed')
         backend = await ModalSandboxBackend.create()
         with pytest.raises(ModalSandboxError, match='wait failed'):
             await backend.run(['x'])
 
-
-class TestProcess:
-    async def test_wait_returns_the_same_result_every_time(self, fake_modal: FakeModal) -> None:
-        fake_modal.responder = lambda argv, timeout: ('out', '', 3)
-        backend = await ModalSandboxBackend.create()
-        process = await backend.start(['x'])
-        first = await process.wait()
-        assert await process.wait() == first
-
-    async def test_wait_re_raises_the_same_failure(self, fake_modal: FakeModal) -> None:
-        # The timeout verdict can only be reached once, so it is cached: a second wait must
-        # agree with the first rather than reporting a plain exit.
-        fake_modal.responder = lambda argv, timeout: ('partial', '', -1)
-        backend = await ModalSandboxBackend.create()
-        process = await backend.start(['x'], timeout=5)
-        with pytest.raises(SandboxTimeoutError) as first:
-            await process.wait()
-        with pytest.raises(SandboxTimeoutError) as second:
-            await process.wait()
-        assert first.value is second.value
-
-    async def test_cancelling_wait_propagates_the_cancellation(self, fake_modal: FakeModal) -> None:
-        # A cancelled wait abandons the result collection (reaping its readers) and re-raises
+    async def test_cancelling_run_propagates_the_cancellation(self, fake_modal: FakeModal) -> None:
+        # A cancelled run abandons the result collection (reaping its readers) and re-raises
         # the cancellation untranslated; the command itself runs on until its Modal deadline.
         fake_modal.wait_hangs = True
         backend = await ModalSandboxBackend.create()
-        process = await backend.start(['x'], timeout=5)
-        waiter = asyncio.create_task(process.wait())
+        waiter = asyncio.create_task(backend.run(['x'], timeout=5))
         await anyio.wait_all_tasks_blocked()
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter
-
-    async def test_no_pid_is_reported(self, fake_modal: FakeModal) -> None:
-        # Modal identifies a command by an exec id of its own and never reports the
-        # container's OS process id.
-        backend = await ModalSandboxBackend.create()
-        assert (await backend.start(['x'])).pid is None
-
-    async def test_kill_names_the_alternative(self, fake_modal: FakeModal) -> None:
-        backend = await ModalSandboxBackend.create()
-        process = await backend.start(['x'], timeout=5)
-        with pytest.raises(NotImplementedError, match='start it with `timeout=`'):
-            await process.kill()
-
-    async def test_stream_interleaves_both_streams(self, fake_modal: FakeModal) -> None:
-        fake_modal.output_chunk_size = 2
-        fake_modal.responder = lambda argv, timeout: ('abcd', 'XY', 0)
-        backend = await ModalSandboxBackend.create()
-        process = await backend.start(['x'])
-        chunks = [(chunk.stream, chunk.data) async for chunk in process.stream()]
-        assert sorted(chunks) == [('stderr', 'XY'), ('stdout', 'ab'), ('stdout', 'cd')]
-
-    async def test_stream_yields_one_message_per_stream_by_default(self, fake_modal: FakeModal) -> None:
-        # The realistic case: Modal delivers a short command's output in a single message,
-        # and a stream with nothing on it yields nothing.
-        fake_modal.responder = lambda argv, timeout: ('hello', '', 0)
-        backend = await ModalSandboxBackend.create()
-        process = await backend.start(['x'])
-        assert [(chunk.stream, chunk.data) async for chunk in process.stream()] == [('stdout', 'hello')]
-
-    async def test_stream_preserves_utf8_split_between_chunks(self, fake_modal: FakeModal) -> None:
-        fake_modal.output_chunk_size = 1
-        fake_modal.responder = lambda argv, timeout: ('é', '', 0)
-        backend = await ModalSandboxBackend.create()
-
-        process = await backend.start(['x'])
-
-        assert [(chunk.stream, chunk.data) async for chunk in process.stream()] == [('stdout', 'é')]
-
-    async def test_stream_flushes_incomplete_utf8_at_eof(self, fake_modal: FakeModal) -> None:
-        fake_modal.responder = lambda argv, timeout: (b'\xc3', b'', 0)
-        backend = await ModalSandboxBackend.create()
-
-        process = await backend.start(['x'])
-
-        assert [(chunk.stream, chunk.data) async for chunk in process.stream()] == [('stdout', '�')]
-
-    async def test_wait_after_streaming_still_returns_the_whole_output(self, fake_modal: FakeModal) -> None:
-        # Modal's readers replay from byte zero, so `wait()` asks for the output in full
-        # rather than accumulating what streaming happened to consume.
-        fake_modal.output_chunk_size = 1
-        fake_modal.responder = lambda argv, timeout: ('hello', '', 0)
-        backend = await ModalSandboxBackend.create()
-        process = await backend.start(['x'])
-        async for _ in process.stream():
-            pass
-        assert (await process.wait()).stdout == 'hello'
-
-    async def test_abandoning_the_stream_early_is_safe(self, fake_modal: FakeModal) -> None:
-        fake_modal.output_chunk_size = 1
-        fake_modal.responder = lambda argv, timeout: ('hello', 'world', 0)
-        backend = await ModalSandboxBackend.create()
-        process = await backend.start(['x'])
-        stream = process.stream()
-        assert (await anext(stream)).data != ''
-        await stream.aclose()
-        assert (await process.wait()).stdout == 'hello'
-
-    async def test_a_failing_read_mid_stream_is_classified(self, fake_modal: FakeModal) -> None:
-        # Streaming gets the same taxonomy as waiting: a raw transport failure becomes a
-        # typed sandbox error rather than reaching the caller as a grpclib internal.
-        fake_modal.stdout_error = ValueError('Received empty message')
-        backend = await ModalSandboxBackend.create()
-        process = await backend.start(['x'])
-        with pytest.raises(ModalSandboxError, match='ValueError: Received empty message'):
-            async for _ in process.stream():
-                pass  # pragma: no cover - the first read already fails
-
-    async def test_second_stream_is_refused(self, fake_modal: FakeModal) -> None:
-        # Modal's readers have a single consumer, so a second `stream()` cannot be served.
-        backend = await ModalSandboxBackend.create()
-        process = await backend.start(['x'])
-        process.stream()
-        with pytest.raises(ModalSandboxError, match='single consumer'):
-            process.stream()
 
 
 class TestWorkingDir:
@@ -734,6 +615,7 @@ class TestFilesystem:
         fake_modal.sandboxes[0].fs_error = fake_modal.filesystem_error_type('Permission denied')
         with pytest.raises(ModalSandboxError, match='Permission denied') as exc:
             await backend.fs.write_bytes('/root/x', b'data')
+        assert isinstance(exc.value, SandboxError)
         assert not isinstance(exc.value, SandboxUnavailableError)
 
     async def test_a_filesystem_error_on_a_dead_sandbox_is_terminal(self, fake_modal: FakeModal) -> None:

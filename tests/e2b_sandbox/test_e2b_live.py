@@ -187,16 +187,6 @@ class TestRealExecution:
 
         assert result.exit_code == 127
 
-    async def test_start_reports_a_pid_that_can_be_killed(self, sandbox: E2BSandboxBackend) -> None:
-        """Validates the fake-encoded assumption that E2B reports a real pid and can kill it."""
-        marker = f'/tmp/{_unique("killed")}'
-        process = await sandbox.start(f'sleep 10; touch {marker}', shell=True)
-        assert process.pid is not None
-
-        await process.kill()
-        await anyio.sleep(15)
-        assert await sandbox.fs.exists(marker) is False
-
 
 class TestCreateConfiguration:
     """Create-time configuration reaching the real process, not only E2B create arguments."""
