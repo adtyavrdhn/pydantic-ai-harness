@@ -969,6 +969,62 @@ class TestEagerCodeMode:
         assert calls == ['probe']
         assert result.return_value == 'done'
 
+    @pytest.mark.parametrize('restart', [False, True])
+    async def test_halted_string_stream_reconciles_queued_work(self, restart: bool):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        cancelled = asyncio.Event()
+        stale_calls: list[str] = []
+
+        async def slow() -> None:
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        def stale() -> None:
+            stale_calls.append('stale')  # pragma: no cover - reaching this line fails the assertion below
+
+        code = 'await slow()\nawait stale()\n"done"'
+        args_text = '{"code":"' + json.dumps(code)[1:-1]
+        padding = '\\n#' * 10_000
+        async with prepared_eager_toolset([Tool(slow), Tool(stale)]) as (capability, toolset, ctx, run_code):
+            await observe(
+                capability,
+                ctx,
+                [PartStartEvent(index=0, part=ToolCallPart(tool_name='run_code', args=args_text, tool_call_id='c1'))],
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            await observe(
+                capability,
+                ctx,
+                [PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=padding, tool_call_id='c1'))] * 8,
+            )
+            ending = '","restart":true}' if restart else '"}'
+            await observe(
+                capability,
+                ctx,
+                [PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=ending, tool_call_id='c1'))],
+            )
+            if restart:
+                assert cancelled.is_set()
+                release.set()
+                await asyncio.sleep(0)
+                assert stale_calls == []
+            else:
+                await observe(
+                    capability,
+                    ctx,
+                    [PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=' ', tool_call_id='c1'))] * 3,
+                )
+                release.set()
+                final_code = code + '\n#' * 80_000
+                exec_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
+                await toolset.call_tool('run_code', {'code': final_code}, exec_ctx, run_code)
+                assert stale_calls == ['stale']
+
     @pytest.mark.parametrize(
         ('invalid_args', 'halt_before_invalid'),
         [
