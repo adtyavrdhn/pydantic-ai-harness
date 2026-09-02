@@ -22,7 +22,6 @@ from pydantic_ai.exceptions import (
     UserError,
 )
 from pydantic_ai.models import KnownModelName, Model
-from pydantic_ai.sandboxes import Sandbox
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT, ObjectJsonSchema, RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
@@ -32,7 +31,6 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.toolsets._capability_owned import CapabilityOwnedToolset
 from pydantic_ai.usage import UsageLimits
 
-from pydantic_ai_harness._sandbox import is_framework_unavailable
 from pydantic_ai_harness.subagents._models import ModelOption, validate_restriction
 
 logger = logging.getLogger(__name__)
@@ -343,7 +341,6 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
                 else None
             )
             settings = None
-        sandbox: Sandbox | None = None if is_framework_unavailable(ctx.sandbox) else ctx.sandbox
         run = sub_agent.agent.run(
             task,
             deps=ctx.deps,
@@ -353,7 +350,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
             usage_limits=usage_limits,
             toolsets=toolsets,
             capabilities=capabilities,
-            sandbox=sandbox,
+            sandbox=ctx.sandbox,
             event_stream_handler=self._event_stream_handler,
         )
         timeout = sub_agent.timeout_seconds

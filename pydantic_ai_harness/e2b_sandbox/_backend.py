@@ -70,9 +70,6 @@ __all__ = (
 # here.
 DEFAULT_SANDBOX_TIMEOUT = 300
 
-PROVIDER = 'e2b'
-"""The `provider` half of a `SandboxRef` this backend answers to."""
-
 _MISSING_E2B = 'The \'e2b\' package is required for E2BSandbox. Install it with `uv add "pydantic-ai-harness[e2b]"`.'
 
 _AUTH_MESSAGE = 'E2B rejected the credentials. Set a valid E2B_API_KEY in the environment.'
@@ -359,10 +356,6 @@ class E2BSandboxBackend(SandboxBackend):
 
     sandbox: e2b.AsyncSandbox
     """The underlying `e2b.AsyncSandbox`, for provider-specific functionality."""
-
-    @property
-    def provider(self) -> str:
-        return PROVIDER
 
     def __init__(
         self,

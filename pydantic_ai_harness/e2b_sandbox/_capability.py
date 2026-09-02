@@ -12,7 +12,6 @@ from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai_harness._sandbox_provider import absolute_path
 from pydantic_ai_harness.e2b_sandbox._backend import (
     DEFAULT_SANDBOX_TIMEOUT,
-    PROVIDER,
     E2BSandboxBackend,
 )
 
@@ -85,7 +84,7 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
     async def acquire_sandbox(self, ctx: RunContext[AgentDepsT]) -> SandboxRef:
         """Create or reuse the sandbox for this logical run."""
         if self.sandbox_id is not None:
-            return SandboxRef(provider=PROVIDER, sandbox_id=self.sandbox_id)
+            return SandboxRef(sandbox_id=self.sandbox_id)
         if ctx.run_id is None:  # pragma: no cover - core assigns it before acquisition
             raise RuntimeError('E2B sandbox acquisition requires a run ID.')
         metadata = dict(self.metadata or ())
@@ -99,16 +98,14 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
             metadata=metadata,
             allow_internet_access=self.allow_internet_access,
         )
-        return SandboxRef(provider=PROVIDER, sandbox_id=backend.sandbox_id)
+        return SandboxRef(sandbox_id=backend.sandbox_id)
 
-    async def get_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef | None) -> SandboxBackend | None:
+    async def get_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> SandboxBackend | None:
         """Reconnect to a referenced E2B sandbox without provisioning one."""
-        if ref is None or ref.provider != PROVIDER:
-            return None
         return await E2BSandboxBackend.connect(ref.sandbox_id, working_dir=self.workdir)
 
     async def release_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> None:
         """Kill an owned sandbox; leave an attached sandbox to its owner."""
-        if self.sandbox_id is not None or ref.provider != PROVIDER:
+        if self.sandbox_id is not None:
             return
         await E2BSandboxBackend.kill_by_id(ref.sandbox_id)

@@ -89,16 +89,10 @@ class TestLifecycle:
         ]
 
     async def test_get_sandbox_reconnects_by_ref(self, fake_modal: FakeModal) -> None:
-        backend = await ModalSandbox[None]().get_sandbox(_ctx(), SandboxRef(provider='modal', sandbox_id='sb-existing'))
+        backend = await ModalSandbox[None]().get_sandbox(_ctx(), SandboxRef(sandbox_id='sb-existing'))
 
         assert isinstance(backend, ModalSandboxBackend)
         assert fake_modal.attach_ids == ['sb-existing']
-
-    async def test_get_sandbox_declines_other_providers(self, fake_modal: FakeModal) -> None:
-        backend = await ModalSandbox[None]().get_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='x'))
-
-        assert backend is None
-        assert fake_modal.sandboxes == []
 
     async def test_release_reconnects_and_terminates(self, fake_modal: FakeModal) -> None:
         capability = ModalSandbox[None]()
@@ -112,7 +106,7 @@ class TestLifecycle:
     async def test_release_is_idempotent_when_sandbox_is_gone(self, fake_modal: FakeModal) -> None:
         fake_modal.attach_error = fake_modal.unavailable_type('gone')
 
-        await ModalSandbox[None]().release_sandbox(_ctx(), SandboxRef(provider='modal', sandbox_id='gone'))
+        await ModalSandbox[None]().release_sandbox(_ctx(), SandboxRef(sandbox_id='gone'))
 
     async def test_attached_sandbox_is_not_owned(self, fake_modal: FakeModal) -> None:
         capability = ModalSandbox[None](sandbox_id='sb-existing')
@@ -120,7 +114,7 @@ class TestLifecycle:
         ref = await capability.acquire_sandbox(_ctx())
         await capability.release_sandbox(_ctx(), ref)
 
-        assert ref == SandboxRef(provider='modal', sandbox_id='sb-existing')
+        assert ref == SandboxRef(sandbox_id='sb-existing')
         assert fake_modal.sandboxes == []
 
 

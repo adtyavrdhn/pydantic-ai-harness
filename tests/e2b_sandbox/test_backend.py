@@ -68,9 +68,8 @@ class TestConformance:
         backend = await E2BSandboxBackend.create()
         assert not isinstance(await backend.start(['echo', 'hi']), SupportsStream)
 
-    async def test_identity_is_provider_and_e2b_sandbox_id(self, fake_e2b: FakeE2B) -> None:
+    async def test_identity_is_e2b_sandbox_id(self, fake_e2b: FakeE2B) -> None:
         backend = await E2BSandboxBackend.create()
-        assert backend.provider == 'e2b'
         assert backend.sandbox_id == 'sbx-1'
         assert backend.sandbox is fake_e2b.sandboxes[0]
 

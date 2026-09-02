@@ -87,16 +87,10 @@ class TestLifecycle:
             await E2BSandbox[None]().acquire_sandbox(_ctx())
 
     async def test_get_sandbox_reconnects_by_ref(self, fake_e2b: FakeE2B) -> None:
-        backend = await E2BSandbox[None]().get_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='sbx-existing'))
+        backend = await E2BSandbox[None]().get_sandbox(_ctx(), SandboxRef(sandbox_id='sbx-existing'))
 
         assert isinstance(backend, E2BSandboxBackend)
         assert fake_e2b.connect_calls == [('sbx-existing', None)]
-
-    async def test_get_sandbox_declines_other_providers(self, fake_e2b: FakeE2B) -> None:
-        backend = await E2BSandbox[None]().get_sandbox(_ctx(), SandboxRef(provider='modal', sandbox_id='x'))
-
-        assert backend is None
-        assert fake_e2b.sandboxes == []
 
     async def test_release_kills_without_reconnecting(self, fake_e2b: FakeE2B) -> None:
         capability = E2BSandbox[None]()
@@ -109,14 +103,14 @@ class TestLifecycle:
         assert fake_e2b.sandboxes[0].killed is True
 
     async def test_release_is_idempotent_when_sandbox_is_gone(self, fake_e2b: FakeE2B) -> None:
-        await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='gone'))
+        await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(sandbox_id='gone'))
 
         assert fake_e2b.kill_ids == ['gone']
 
     async def test_release_is_idempotent_when_sandbox_was_already_killed(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.new_sandbox('owned')
         capability = E2BSandbox[None]()
-        ref = SandboxRef(provider='e2b', sandbox_id='owned')
+        ref = SandboxRef(sandbox_id='owned')
 
         await capability.release_sandbox(_ctx(), ref)
         await capability.release_sandbox(_ctx(), ref)
@@ -128,13 +122,13 @@ class TestLifecycle:
         fake_e2b.kill_hangs = True
 
         with pytest.raises(e2b_sandbox.E2BSandboxError, match='Timed out'):
-            await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='sbx-hung'))
+            await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(sandbox_id='sbx-hung'))
 
     async def test_release_auth_failure_is_terminal(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.kill_error = fake_e2b.auth_type('bad key')
 
         with pytest.raises(E2BSandboxAuthError, match='E2B rejected the credentials'):
-            await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(provider='e2b', sandbox_id='sbx-owned'))
+            await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(sandbox_id='sbx-owned'))
 
     async def test_release_kill_completes_under_cancellation(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.new_sandbox('sbx-owned')
@@ -144,7 +138,7 @@ class TestLifecycle:
             task_group.start_soon(
                 E2BSandbox[None]().release_sandbox,
                 _ctx(),
-                SandboxRef(provider='e2b', sandbox_id='sbx-owned'),
+                SandboxRef(sandbox_id='sbx-owned'),
             )
             while not fake_e2b.kill_started:
                 await anyio.sleep(0)
@@ -161,7 +155,7 @@ class TestLifecycle:
             task_group.start_soon(
                 E2BSandbox[None]().release_sandbox,
                 _ctx(),
-                SandboxRef(provider='e2b', sandbox_id='sbx-owned'),
+                SandboxRef(sandbox_id='sbx-owned'),
             )
             while not fake_e2b.kill_started:
                 await anyio.sleep(0)
@@ -174,7 +168,7 @@ class TestLifecycle:
         ref = await capability.acquire_sandbox(_ctx())
         await capability.release_sandbox(_ctx(), ref)
 
-        assert ref == SandboxRef(provider='e2b', sandbox_id='sbx-existing')
+        assert ref == SandboxRef(sandbox_id='sbx-existing')
         assert fake_e2b.sandboxes == []
 
 

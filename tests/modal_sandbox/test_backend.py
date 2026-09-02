@@ -73,9 +73,8 @@ class TestConformance:
         process = await backend.start(['echo', 'hi'], timeout=5)
         assert isinstance(process, SupportsStream)
 
-    async def test_identity_is_provider_and_modal_object_id(self, fake_modal: FakeModal) -> None:
+    async def test_identity_is_modal_object_id(self, fake_modal: FakeModal) -> None:
         backend = await ModalSandboxBackend.create()
-        assert backend.provider == 'modal'
         assert backend.sandbox_id == 'sb-owned'
         assert backend.sandbox is fake_modal.sandboxes[0]
 
