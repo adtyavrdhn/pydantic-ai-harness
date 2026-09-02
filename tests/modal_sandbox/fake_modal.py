@@ -75,49 +75,14 @@ class _HangingAioCall:
 
 
 class _FakeStream:
-    """Mimics a Modal exec stdio stream: readable whole via `.read.aio()`, or iterable.
+    """Mimics the whole-output `.read.aio()` surface used by the backend."""
 
-    `wait()` reads the whole stream with `.read.aio()`, and `stream()` iterates chunks. Both
-    replay from byte zero, like Modal's own readers: every read opens a fresh view of the
-    command's output, so reading after iterating returns everything again. `chunk_size`
-    controls how the iterable path splits the data; `None` yields it as a single chunk (the
-    realistic "one message" case, and what most tests want).
-    """
-
-    def __init__(
-        self,
-        data: bytes,
-        chunk_size: int | None,
-        error: Exception | None = None,
-    ) -> None:
+    def __init__(self, data: bytes) -> None:
         self._data = data
-        self._chunk_size = chunk_size
-        self._error = error
         self.read = _AioCallable(self._read)
-        self._pending: list[bytes] = []
-        self._pos = 0
 
     def _read(self) -> bytes:
-        if self._error is not None:
-            raise self._error
         return self._data
-
-    def __aiter__(self) -> _FakeStream:
-        if self._chunk_size is None:
-            self._pending = [self._data] if self._data else []
-        else:
-            self._pending = [self._data[i : i + self._chunk_size] for i in range(0, len(self._data), self._chunk_size)]
-        self._pos = 0
-        return self
-
-    async def __anext__(self) -> bytes:
-        if self._error is not None:
-            raise self._error
-        if self._pos >= len(self._pending):
-            raise StopAsyncIteration
-        piece = self._pending[self._pos]
-        self._pos += 1
-        return piece
 
 
 class _FakeProcess:
@@ -126,14 +91,11 @@ class _FakeProcess:
         stdout: bytes,
         stderr: bytes,
         returncode: int,
-        chunk_size: int | None,
-        stdout_error: Exception | None,
-        stderr_error: Exception | None,
         wait_error: Exception | None,
         wait_hangs: bool,
     ) -> None:
-        self.stdout = _FakeStream(stdout, chunk_size, stdout_error)
-        self.stderr = _FakeStream(stderr, chunk_size, stderr_error)
+        self.stdout = _FakeStream(stdout)
+        self.stderr = _FakeStream(stderr)
         self._returncode = returncode
         self._wait_error = wait_error
         self.returncode: int | None = None
@@ -307,9 +269,6 @@ class FakeSandbox:
             _stream_bytes(stdout),
             _stream_bytes(stderr),
             code,
-            self._control.output_chunk_size,
-            self._control.stdout_error,
-            self._control.stderr_error,
             self._control.wait_error,
             self._control.wait_hangs,
         )
@@ -359,13 +318,8 @@ class FakeModal:
         self.attach_error: Exception | None = None
         self.attach_poll_result: int | None = None
         self.exec_error: Exception | None = None
-        self.stdout_error: Exception | None = None
-        self.stderr_error: Exception | None = None
         self.wait_error: Exception | None = None
         self.wait_hangs = False
-        # How the fake splits exec output when the stream reader iterates it; None yields the
-        # whole output as one chunk.
-        self.output_chunk_size: int | None = None
         self.module = self._build_module()
 
     @property
