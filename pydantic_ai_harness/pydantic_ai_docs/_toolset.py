@@ -10,7 +10,7 @@ from pydantic_ai.sandboxes import Sandbox
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from pydantic_ai_harness._sandbox import sandbox_or_local, sandbox_path
+from pydantic_ai_harness._sandbox import sandbox_path
 
 _REMOTE_BASE = 'https://raw.githubusercontent.com/pydantic/pydantic-ai/main/docs'
 """Raw-markdown base for the live fallback. Tracks `pydantic/pydantic-ai:main`,
@@ -70,8 +70,7 @@ class PydanticAIDocsToolset(FunctionToolset[AgentDepsT]):
         if self._cache is not None and topic in self._cache:
             return self._cache[topic]
 
-        sandbox = sandbox_or_local(ctx.sandbox)
-        markdown = await self._read_local(sandbox, ctx.sandbox, topic)
+        markdown = await self._read_local(ctx.sandbox, topic)
         if markdown is None:
             markdown = await self._fetch_remote(topic)
 
@@ -79,12 +78,12 @@ class PydanticAIDocsToolset(FunctionToolset[AgentDepsT]):
             self._cache[topic] = markdown
         return markdown
 
-    async def _read_local(self, sandbox: Sandbox, original: Sandbox, topic: PydanticAIDocsTopic) -> str | None:
+    async def _read_local(self, sandbox: Sandbox, topic: PydanticAIDocsTopic) -> str | None:
         """Return the local checkout's markdown for `topic`, or `None` to fall back to remote."""
         if self._local_docs_path is None:
             return None
         local_path = self._local_docs_path / f'{topic.value}.md'
-        path = await sandbox.resolve(sandbox_path(local_path, sandbox=sandbox, original=original))
+        path = await sandbox.resolve(sandbox_path(local_path))
         try:
             return await sandbox.read_text(path)
         except (FileNotFoundError, IsADirectoryError, NotADirectoryError):

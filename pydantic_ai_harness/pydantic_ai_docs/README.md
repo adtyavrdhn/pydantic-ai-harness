@@ -32,9 +32,10 @@ agent = Agent(
 )
 ```
 
-When the run has no sandbox attached, the tool reads the agent process's filesystem directly,
-as before (POSIX only; on Windows, local reads need an attached sandbox, and the remote fetch
-still works without one). An explicitly configured `UnavailableSandbox` does not fall back.
+Reading a local checkout needs a sandbox attached to the run; without one, the tool raises an
+error that says how to attach one (`sandbox=LocalSandbox(root=...)` for the agent process's own
+filesystem). With no local path configured, every call goes to the remote source and no sandbox
+is needed.
 
 ## Resolution order
 
@@ -50,8 +51,8 @@ The capability never runs git. Keep the local checkout current yourself; the rem
 always reads `main`, so it is the fresh fallback.
 
 `local_docs_path` takes precedence over the `PYDANTIC_AI_HARNESS_DOCS_PATH` environment variable.
-With a sandbox attached, `~` is not expanded -- use an absolute sandbox path or a path relative
-to its working directory. With neither path set, every call goes straight to the remote source.
+`~` is not expanded -- use an absolute sandbox path or a path relative to its working
+directory. With neither path set, every call goes straight to the remote source.
 
 ## Configuration
 

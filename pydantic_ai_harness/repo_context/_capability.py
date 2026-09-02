@@ -13,7 +13,7 @@ from pydantic_ai.sandboxes import Sandbox
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 from pydantic_ai.toolsets import AgentToolset
 
-from pydantic_ai_harness._sandbox import sandbox_or_local, sandbox_path
+from pydantic_ai_harness._sandbox import sandbox_path
 from pydantic_ai_harness.repo_context._loader import (
     ContextFile,
     discover_instruction_files,
@@ -127,15 +127,9 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         """Load walk-up instruction files through `ctx.sandbox` so `get_instructions` is sync."""
         if not self.autoload_instructions:
             return
-        sandbox = sandbox_or_local(ctx.sandbox)
-        workspace = await self._workspace(
-            sandbox, path=sandbox_path(self.workspace_dir, sandbox=sandbox, original=ctx.sandbox)
-        )
-        home = (
-            Path(await sandbox.resolve(sandbox_path(self.home_dir, sandbox=sandbox, original=ctx.sandbox)))
-            if self.home_dir is not None
-            else None
-        )
+        sandbox = ctx.sandbox
+        workspace = await self._workspace(sandbox, path=sandbox_path(self.workspace_dir))
+        home = Path(await sandbox.resolve(sandbox_path(self.home_dir))) if self.home_dir is not None else None
         self._context_files = await discover_instruction_files(sandbox, workspace, home, self.filenames)
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
@@ -181,7 +175,7 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         raw_path = args.get(self.traversal_path_arg)
         if not isinstance(raw_path, str) or not isinstance(result, str):
             return result
-        sandbox = sandbox_or_local(ctx.sandbox)
+        sandbox = ctx.sandbox
         directory = await self._resolve_directory(sandbox, raw_path)
         key = str(directory)
         if key in self._seen_dirs:

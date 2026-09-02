@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -17,7 +18,6 @@ from pydantic_ai.sandboxes import LocalSandbox, Sandbox, UnavailableSandbox
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness._sandbox import sandbox_or_local
 from pydantic_ai_harness.repo_context import (
     AgentContextInventory,
     ContextFile,
@@ -235,33 +235,12 @@ class TestInstructions:
         # Read-once: `before_run` loaded the file, so subsequent edits are not picked up.
         assert second is not None and 'second' not in second
 
-    def test_application_unavailable_sandbox_never_enables_host_fallback(self) -> None:
-        default = RunContext[None](deps=None, model=TestModel(), usage=RunUsage()).sandbox.backend
-        assert isinstance(default, UnavailableSandbox)
-        policy = Sandbox(UnavailableSandbox(default.reason))
-
-        assert sandbox_or_local(policy) is policy
-
-    @pytest.mark.skipif(sys.platform == 'win32', reason='host fallback is POSIX-only')
-    async def test_framework_default_sandbox_preserves_host_fallback(self, tmp_path: Path) -> None:
+    async def test_autoload_without_sandbox_raises(self, tmp_path: Path) -> None:
         _write(tmp_path / 'CLAUDE.md', 'host instructions')
-        captured: list[list[ModelMessage]] = []
+        agent = Agent(TestModel(), capabilities=[RepoContext[object](workspace_dir=tmp_path)])
 
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            del info
-            captured.append(messages)
-            return ModelResponse(parts=[TextPart('done')])
-
-        agent = Agent(
-            FunctionModel(model),
-            capabilities=[RepoContext[object](workspace_dir=tmp_path, expose_inventory_tool=False)],
-        )
-
-        await agent.run('go')
-
-        request = captured[0][0]
-        assert isinstance(request, ModelRequest)
-        assert 'host instructions' in (request.instructions or '')
+        with pytest.raises(UserError, match='No sandbox is attached'):
+            await agent.run('go')
 
 
 class TestToolset:
