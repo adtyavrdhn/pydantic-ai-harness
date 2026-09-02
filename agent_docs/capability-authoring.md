@@ -168,6 +168,36 @@ Before treating a capability as done, check how it composes with:
 `CodeMode` is a useful reference for wrapper-toolset composition, tool
 selection, `ToolSearch` interaction, public docs, and test depth.
 
+### Deciding What Two Of It Mean
+
+Every capability answers "what if an agent has two of me?", and the answer is
+the default `id` written in the class body -- there is no separate policy to
+declare. Pydantic AI reads it: a class-declared `id` means two are one
+configuration stated twice, and it merges them field by field; no default `id`
+means two are two, kept apart under derived ids. `combine` only needs
+overriding when the field-by-field merge cannot express the answer, such as a
+budget that should take the *smaller* of two values.
+
+Pick by asking what the capability's toolset registers:
+
+- **Fixed tool names** (`read_file`, `run_command`, `write_memory`) --
+  declare a default `id`. Two of them could never coexist anyway; they collided
+  on the tool name. Declaring the id turns that late, confusing toolset error
+  into a merge, which is what lets two packaged harnesses that each carry the
+  capability compose.
+- **Names derived from a resource** -- derive the `id` from the same thing, the
+  way `StackOne` uses `stackone-{account_id}` and Pydantic AI's `MCP` uses its
+  URL. Two resources stay two capabilities; two of one resource collide, which
+  is the right answer for a mistake.
+- **Neither: hooks, guards, observers** -- no default `id`. Several per agent
+  is the normal shape, and `CombinedCapability` chains them.
+
+Record the choice in `tests/test_capability_combine.py`;
+`test_every_capability_declares_a_combine_policy` fails until you do. Write the
+reason from what the capability actually does, not from what would be
+convenient: a reason like "one per rooted directory" is wrong if the toolset's
+fixed tool names make two unreachable.
+
 ## CI And Dependency Footprint
 
 Most capabilities add a package extra and a test module, which is cheap. Some

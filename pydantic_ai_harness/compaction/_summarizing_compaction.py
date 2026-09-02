@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
-from pydantic_ai.capabilities.abstract import merge_capability_fields
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     ModelMessage,
@@ -655,12 +654,3 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         )
         result = await agent.run(prompt, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
         return result.output.strip()
-
-    @classmethod
-    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
-        """One summarizing compaction per agent: the merged configuration is what the run uses.
-
-        Two of these would each make their own model call and the second would summarize the
-        first's summary, so a repeat is a duplicate rather than a second strategy.
-        """
-        return merge_capability_fields(capabilities)

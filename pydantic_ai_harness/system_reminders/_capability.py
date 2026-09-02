@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Generic, Literal, TypeGuard
 
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
-from pydantic_ai.capabilities.abstract import merge_capability_fields
 from pydantic_ai.messages import (
     CachePoint,
     ModelMessage,
@@ -267,15 +266,6 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
     def get_serialization_name(cls) -> str | None:
         """Not spec-serializable: reminders take arbitrary callables."""
         return None
-
-    @classmethod
-    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
-        """Reminders accumulate: every reminder either side declared still fires.
-
-        `reminders` and `dynamic_reminders` are additive sequences, so the merge unions them
-        rather than keeping one list. Scalars like `cache_ttl` still take the later value.
-        """
-        return merge_capability_fields(capabilities)
 
 
 @dataclass

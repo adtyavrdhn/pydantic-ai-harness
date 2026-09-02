@@ -8,7 +8,6 @@ from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
-from pydantic_ai.capabilities.abstract import merge_capability_fields
 from pydantic_ai.messages import CachePoint, ModelRequest, ModelResponse, UserPromptPart
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AgentToolset
@@ -234,16 +233,6 @@ class Planning(AbstractCapability[AgentDepsT]):
     def get_serialization_name(cls) -> str | None:
         """Serialization name for agent-spec support."""
         return 'Planning'
-
-    @classmethod
-    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
-        """One plan per agent: the merged configuration is what the run uses.
-
-        `PlanningToolset` registers fixed tool names under a fixed toolset `id`, so two of these
-        collided on `write_plan` before ids existed. Merging is what lets a bundle carrying a
-        default `Planning` compose with another that does the same.
-        """
-        return merge_capability_fields(capabilities)
 
 
 def _reminder_text(plan: str) -> str:

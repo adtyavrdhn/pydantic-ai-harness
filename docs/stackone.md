@@ -93,15 +93,18 @@ Passing `actions` selects `individual` mode automatically. Explicitly combining 
 In `search_execute` mode, action IDs are returned by the search tool at runtime and should not be guessed. In
 `individual` mode, all selected tool schemas are sent to the model, so filter large action sets with `actions`.
 
-To keep StackOne tools out of the model context until they are needed, pass `defer_loading=True`. The capability uses
-`id='stackone'` by default so it can be loaded on demand. Give each instance a distinct `id` when one agent uses
-multiple StackOne accounts:
+To keep StackOne tools out of the model context until they are needed, pass `defer_loading=True`. The capability needs
+an `id` to be loaded on demand, and derives one from the linked account -- `StackOne(account_id='45320')` is
+`stackone-45320` -- so one agent can reach several accounts without naming each one:
 
 ```python
 from pydantic_ai_harness import StackOne
 
 StackOne(account_id='your-linked-account-id', defer_loading=True)
 ```
+
+Two capabilities on the *same* account share that id and are rejected at agent construction, which is what you want:
+one linked account is one connection. Pass an explicit `id=` if you need to override the derived one.
 
 ### Bound large tool results
 

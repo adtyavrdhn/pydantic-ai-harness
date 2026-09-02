@@ -170,7 +170,7 @@ override-dependencies = ['anthropic>=1.0.0', 'openai>=2.45.0']
 # TEMPORARY, remove before merge: `combine` and `merge_capability_fields` are unreleased. Tracks
 # https://github.com/pydantic/pydantic-ai/pull/7248; swap back to a released floor once it ships.
 [tool.uv.sources]
-pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai", subdirectory = "pydantic_ai_slim", branch = "default-capability-ids" }
+pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai", subdirectory = "pydantic_ai_slim", rev = "1e41e4e2d" }
 
 
 [tool.hatch.build.targets.wheel]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -11,7 +10,7 @@ from uuid import uuid4
 
 from pydantic_ai import CallToolsNode, ModelRequestNode
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
-from pydantic_ai.capabilities.abstract import AgentNode, NodeResult, WrapRunHandler, merge_capability_fields
+from pydantic_ai.capabilities.abstract import AgentNode, NodeResult, WrapRunHandler
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
@@ -684,8 +683,3 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
                 )
                 snapshot_saved.set(len(messages))
         return result
-
-    @classmethod
-    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
-        """One run identity per agent: the merged configuration is what the run persists under."""
-        return merge_capability_fields(capabilities)

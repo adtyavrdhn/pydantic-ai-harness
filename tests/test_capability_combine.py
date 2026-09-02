@@ -1,8 +1,23 @@
-"""How two harness capabilities that resolve to the same `id` compose.
+"""What two of a harness capability on one agent mean.
 
 Every capability this package ships is listed in `COMBINE_POLICY`, and
 `test_every_capability_declares_a_combine_policy` fails when one is missing. Adding a capability is
 therefore a decision about what two of it mean, taken once, here.
+
+The three answers, and what picks between them:
+
+- `Combines` -- the class declares a default `id`, so two are one configuration stated twice and
+  Pydantic AI merges them field by field. This is what lets two packaged harnesses that each carry
+  a `ToolOutputLimits` compose instead of colliding.
+- `Anonymous` -- no default `id`, and two really do coexist.
+- `Collides` -- no default `id`, and two never coexist anyway, because the toolset registers fixed
+  tool names. A fact rather than a preference, and pinned by
+  `test_two_of_a_colliding_capability_still_raise` so it cannot drift back into an `Anonymous`
+  reason describing a configuration ("one per rooted directory") that is unreachable.
+
+Declaring a default `id` is the whole policy: there is no `combine` to write unless the merge needs
+something the field-by-field default cannot express, such as a budget that should take the *smaller*
+value. None of this package's capabilities needs one.
 
 The core half of this lives in `pydantic-ai`'s `tests/test_capability_combine.py`.
 """
@@ -10,13 +25,14 @@ The core half of this lives in `pydantic-ai`'s `tests/test_capability_combine.py
 from __future__ import annotations
 
 import importlib
-import inspect
 import pkgutil
+import tempfile
 import warnings
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.util import find_spec
+from pathlib import Path
 from typing import Any, TypeGuard
 
 import pytest
@@ -25,8 +41,10 @@ from pydantic_ai.capabilities import CombinedCapability
 from pydantic_ai.capabilities.abstract import (
     AbstractCapability,
     combine_duplicate_capabilities,
+    declares_default_id,
     leaf_capabilities,
 )
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.test import TestModel
 
 import pydantic_ai_harness
@@ -48,12 +66,39 @@ from pydantic_ai_harness.system_reminders import Reminder
 
 pytestmark = pytest.mark.anyio
 
+_TMP_A = Path(tempfile.mkdtemp(prefix='combine-a-'))
+_TMP_B = Path(tempfile.mkdtemp(prefix='combine-b-'))
+"""Two distinct roots, so a `Collides` pair differs in the way its `Anonymous` reason once claimed
+mattered -- and still collides."""
+
 
 @dataclass
 class Anonymous:
-    """No default `id`: two of these are two different things, so `combine` is never reached."""
+    """No default `id`, and two of them really do coexist: two different things, both active."""
 
     reason: str
+
+
+@dataclass
+class Collides:
+    """No default `id`, and two of them never coexist: their toolsets register the same tool names.
+
+    A fact about the capability, not a preference. It is recorded here because the alternative --
+    an `Anonymous` reason like "one per rooted directory" -- describes a configuration the fixed
+    tool names make unreachable, and nothing would catch the drift.
+
+    Whether these should instead declare a default `id`, so that two merge, is a decision for each
+    capability's owner: merging `FileSystem` would union allow-lists, which widens access. This
+    table records where the question applies rather than answering it silently.
+    """
+
+    reason: str
+    make: Callable[[type[Any]], tuple[AbstractCapability[Any], AbstractCapability[Any]]] | None = None
+    """Builds two from the discovered class, when two can be built without credentials or a network.
+
+    Takes the class rather than closing over an import: these capabilities live in optional groups,
+    and a module-level import would break the whole file on a lane that installs none of them.
+    """
 
 
 @dataclass
@@ -65,14 +110,7 @@ class Combines:
     check: Callable[[Any], None]
 
 
-@dataclass
-class Rejects:
-    """A default `id`, and two of them are a mistake this capability will not paper over."""
-
-    reason: str
-
-
-Policy = Anonymous | Combines | Rejects
+Policy = Anonymous | Collides | Combines
 
 
 def _check_memory(merged: Any) -> None:
@@ -172,43 +210,61 @@ COMBINE_POLICY: dict[str, Policy] = {
         ),
         _check_advisor,
     ),
-    # -- A default `id`, but two of them are a mistake rather than a composition. --
-    'StackOne': Rejects('each instance authenticates a different account, so merging would silently drop one'),
     # -- Several of these is the normal case, so they stay anonymous. --
-    'BrowserUse': Anonymous('one per browser profile, with its own allow-list'),
-    'ExaAgent': Anonymous('one per Exa research configuration'),
-    'ExaSearch': Anonymous('one per Exa search configuration'),
-    'PlaywrightBrowser': Anonymous('one per browser profile'),
-    'YouResearch': Anonymous('one per You.com research configuration'),
-    'YouSearch': Anonymous('one per You.com search configuration'),
     'Coder': Anonymous('a packaged harness; composing two is composing their members'),
     'Researcher': Anonymous('a packaged harness; composing two is composing their members'),
-    'CapabilityCreation': Anonymous('one per authoring directory'),
     'ClampOversizedMessages': Anonymous('clamping twice is a no-op; several thresholds compose'),
     'ClearToolResults': Anonymous('several form an escalation ladder, like `TieredCompaction` tiers'),
     'DeduplicateFileReads': Anonymous('file-read identification is agent-specific; one per `file_key`'),
-    'CodeMode': Anonymous('one per sandboxed execution surface'),
-    'ConversationSearch': Anonymous('one per searchable source'),
     'DynamicWorkflow': Anonymous('one per workflow definition'),
-    'FileSystem': Anonymous('one per rooted directory, with its own allow/deny patterns'),
     'InputGuardrail': Anonymous('several guards is the design'),
     'OutputGuardrail': Anonymous('several guards is the design'),
     'PromptInjectionDefender': Anonymous('one per `tool_filter`; several scopes compose'),
     'ToolGuardrail': Anonymous('several guards is the design'),
-    'LocalStack': Anonymous('one per endpoint'),
-    'Macroscope': Anonymous('one per configured command'),
     'ManagedPrompt': Anonymous('one per prompt name'),
-    'ModalSandbox': Anonymous('one per sandbox'),
-    'PydanticAIDocs': Anonymous('one per docs source'),
-    'PyaiDocs': Anonymous('deprecated alias of `PydanticAIDocs`'),
     'RepoContext': Anonymous('one per workspace root'),
     'ReportContextUsage': Anonymous('a passive observer; several callbacks compose'),
-    'Shell': Anonymous('one per working directory, with its own allow/deny lists'),
-    'Skills': Anonymous('one per skills directory'),
+    'Skills': Anonymous('one per skills directory; it contributes instructions, not tools'),
     'SlidingWindowCompaction': Anonymous('composes as a tier under `TieredCompaction`'),
+    'StackOne': Anonymous('one per linked account, and `account_id` is what names it'),
     'TieredCompaction': Anonymous('drives other strategies; one per tier list'),
     'WarnNearLimits': Anonymous('a passive observer; several thresholds compose'),
     'WarnOnCacheBusts': Anonymous('a passive observer; several thresholds compose'),
+    # -- No default `id`, but two never coexist anyway: their tool names collide. --
+    'FileSystem': Collides(
+        'its toolset registers `read_file` and friends under fixed names',
+        lambda cls: (cls(str(_TMP_A)), cls(str(_TMP_B))),
+    ),
+    'Shell': Collides(
+        'its toolset registers `run_command` and friends under fixed names',
+        lambda cls: (cls(cwd=str(_TMP_A)), cls(cwd=str(_TMP_B))),
+    ),
+    'CapabilityCreation': Collides(
+        'its toolset registers `author_capability` and friends under fixed names',
+        lambda cls: (cls(str(_TMP_A)), cls(str(_TMP_B))),
+    ),
+    'PydanticAIDocs': Collides(
+        'its toolset registers `read_pyai_docs` under a fixed name',
+        lambda cls: (cls(), cls()),
+    ),
+    'PyaiDocs': Collides('deprecated alias of `PydanticAIDocs`, and collides the same way'),
+    'Macroscope': Collides(
+        'its toolset registers `run_macroscope_review` under a fixed name',
+        lambda cls: (cls(), cls()),
+    ),
+    'LocalStack': Collides(
+        'its toolset registers `aws_cli` and `localstack_health` under fixed names',
+        lambda cls: (cls(), cls()),
+    ),
+    'CodeMode': Collides('`run_code` is reserved, so a second one is rejected by name'),
+    'BrowserUse': Collides('its toolset registers its browser tools under fixed names'),
+    'PlaywrightBrowser': Collides('its toolset registers `click` and friends under fixed names'),
+    'ModalSandbox': Collides('its toolset registers `run_command` and friends under fixed names'),
+    'ConversationSearch': Collides('its toolset registers `search_conversation_history` under a fixed name'),
+    'ExaAgent': Collides('its toolset registers `web_search` and friends under fixed names'),
+    'ExaSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
+    'YouResearch': Collides('its toolset registers `research` and friends under fixed names'),
+    'YouSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
 }
 
 
@@ -249,24 +305,6 @@ def _shipped_capability_types() -> tuple[dict[str, type[AbstractCapability[Any]]
     return found, skipped
 
 
-def _default_id(capability_type: type[AbstractCapability[Any]]) -> str | None:
-    """The `id` an instance gets when the caller names none.
-
-    Read from the class attribute *and* from `__init__`'s signature: a dataclass declares the
-    default as a field, but a capability with a hand-written `__init__` (`Advisor`, the
-    `NativeOrLocalTool` subclasses) passes it to `super().__init__` instead, where a class-attribute
-    check would not see it.
-    """
-    class_default = getattr(capability_type, 'id', None)
-    if isinstance(class_default, str):
-        return class_default
-    try:
-        init_default = inspect.signature(capability_type.__init__).parameters['id'].default
-    except (ValueError, TypeError, KeyError):  # pragma: no cover
-        return None
-    return init_default if isinstance(init_default, str) else None
-
-
 def test_every_capability_declares_a_combine_policy() -> None:
     """A new capability must say what two of it mean before it can ship.
 
@@ -298,26 +336,48 @@ def test_capability_combine_policy_holds(name: str) -> None:
         pytest.skip(f'{name} needs an optional dependency group that is not installed')
     capability_type = shipped[name]
 
-    if isinstance(policy, Rejects):
-        assert _default_id(capability_type) is not None, (
-            f'{name} is declared `Rejects` but carries no default id, so `combine` is never reached'
-        )
-        assert 'combine' not in vars(capability_type), (
-            f'{name} is declared `Rejects` but overrides `combine`, which resolves duplicates'
-        )
-        return
-
-    if isinstance(policy, Anonymous):
-        assert _default_id(capability_type) is None, (
-            f'{name} is declared `Anonymous` but carries a default id {_default_id(capability_type)!r}'
+    if isinstance(policy, (Anonymous, Collides)):
+        # `declares_default_id` is the function the resolver itself uses, so this asks the same
+        # question rather than a lookalike: a default `id` written in the class body, and nothing
+        # else, is what makes two of a capability merge.
+        assert not declares_default_id(capability_type), (
+            f'{name} is declared `{type(policy).__name__}` but its class declares a default id '
+            f'{getattr(capability_type, "id", None)!r}, so two of them would merge'
         )
         return
 
+    assert declares_default_id(capability_type), (
+        f'{name} is declared `Combines` but its class declares no default id, so two never meet'
+    )
     first, second = policy.make()
     assert first.id is not None and first.id == second.id, (
         f'{name} is declared `Combines` but two instances do not share an id'
     )
     policy.check(type(first).combine([first, second]))
+
+
+# Asyncio only: `Agent.run` reaches `asyncio.create_task` for its lifecycle hooks.
+@pytest.mark.parametrize('anyio_backend', ['asyncio'])
+@pytest.mark.parametrize(
+    'name', sorted(n for n, p in COMBINE_POLICY.items() if isinstance(p, Collides) and p.make is not None)
+)
+async def test_two_of_a_colliding_capability_still_raise(name: str, anyio_backend: str) -> None:
+    """A `Collides` entry states a fact about the capability, so the fact is checked.
+
+    Each pair here is built with *different* configuration -- two roots, two working directories --
+    because that is exactly the shape the reasons in this table used to claim was supported. It is
+    not: the toolset's tool names are fixed, so the second registration conflicts with the first.
+    """
+    shipped, _ = _shipped_capability_types()
+    if name not in shipped:  # pragma: no cover
+        pytest.skip(f'{name} needs an optional dependency group that is not installed')
+    policy = COMBINE_POLICY[name]
+    assert isinstance(policy, Collides) and policy.make is not None
+
+    first, second = policy.make(shipped[name])
+    agent = Agent(TestModel(), capabilities=[first, second])
+    with pytest.raises(UserError, match='conflicts with existing tool'):
+        await agent.run('hello')
 
 
 @pytest.mark.skipif(

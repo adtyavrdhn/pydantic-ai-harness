@@ -99,7 +99,6 @@ class Advisor(NativeOrLocalTool[AgentDepsT]):
         max_tokens: int | None = None,
         caching: Literal['5m', '1h'] | None = None,
         forward_history: bool = False,
-        id: str | None = 'advisor',
     ) -> None:
         if mode not in {'auto', 'native', 'local'}:
             raise ValueError("Advisor.mode must be 'auto', 'native', or 'local'")
@@ -167,7 +166,7 @@ class Advisor(NativeOrLocalTool[AgentDepsT]):
         super().__init__(
             native=native,
             local=local,
-            id=id,
+            id='advisor',
         )
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> Advisor[AgentDepsT]:
@@ -181,7 +180,6 @@ class Advisor(NativeOrLocalTool[AgentDepsT]):
             max_tokens=self.max_tokens,
             caching=self.caching,
             forward_history=self.forward_history,
-            id=self.id,
         )
 
     async def after_model_request(

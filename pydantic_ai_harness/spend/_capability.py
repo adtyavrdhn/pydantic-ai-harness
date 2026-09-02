@@ -25,7 +25,6 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, durable_operation
-from pydantic_ai.capabilities.abstract import merge_capability_fields
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelResponse
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -677,11 +676,6 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
                 # escape would skip `on_unpriced` and drop the accrual with it.
                 pass
         return Decimal(0), False, None
-
-    @classmethod
-    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
-        """One spend authority per agent: budgets merge, and a key stated on both takes the later."""
-        return merge_capability_fields(capabilities)
 
 
 def _status(budget: Budget[Any], key: str, spent: Spent) -> BudgetStatus:

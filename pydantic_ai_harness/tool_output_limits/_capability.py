@@ -9,7 +9,6 @@ from typing import Any, TypeGuard
 
 from pydantic_ai import FunctionToolset
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
-from pydantic_ai.capabilities.abstract import merge_capability_fields
 from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnContent, UserContent
 from pydantic_ai.models import AbstractModel, Model
@@ -495,15 +494,6 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         if not isinstance(action, Summarize):  # pragma: no cover - durable inputs originate from `_summarize_path`
             raise RuntimeError(f'Durable summarize path no longer identifies a Summarize action: {path!r}.')
         return action
-
-    @classmethod
-    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
-        """One output-limit policy per agent: the merged configuration is what the run uses.
-
-        Its toolset registers `read_tool_result` under a fixed name, so two of these collided
-        before ids existed. `tool_filter` and `per_tool` are how one instance varies by tool.
-        """
-        return merge_capability_fields(capabilities)
 
 
 def _next_action(action: Action) -> Action | None:

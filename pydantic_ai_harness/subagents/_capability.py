@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.agent import Agent, AgentRunResult, EventStreamHandler
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability, WrapRunHandler
-from pydantic_ai.capabilities.abstract import merge_capability_fields
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -167,11 +166,11 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     _: KW_ONLY
 
     id: str | None = 'sub_agents'
-    """One-off: an agent exposes a single delegate tool, so the id is fixed by default.
+    """One-off: an agent exposes a single delegate tool, so the id is fixed.
 
     `tool_name` is one name, so two `SubAgents` capabilities register the same tool and collide.
-    Two of them resolve to one via
-    [`combine`][pydantic_ai.capabilities.AbstractCapability.combine], which unions their rosters.
+    Declaring the id here is what makes two of them merge instead, unioning their rosters -- which
+    is what lets a packaged harness that delegates compose with another that does the same.
     """
 
     tool_retries: int | None = 2
@@ -349,15 +348,3 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     def get_serialization_name(cls) -> str | None:
         """Not spec-serializable -- the capability holds live `Agent` instances."""
         return None
-
-    @classmethod
-    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
-        """Rosters accumulate: an agent both sides can reach stays reachable.
-
-        A packaged harness that delegates carries its own `SubAgents`, so composing two of them --
-        `Coder()` beside `Researcher()` -- brings two. Keeping only one would silently drop a
-        harness's delegates; keeping both registers `delegate_task` twice and fails on the name.
-        The merge unions `agents` instead, so one delegate tool lists every sub-agent, and a name
-        defined on both sides resolves to the later.
-        """
-        return merge_capability_fields(capabilities)
