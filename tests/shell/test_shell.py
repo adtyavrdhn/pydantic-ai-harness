@@ -448,12 +448,9 @@ class TestCodeModeInterop:
 class _ControllableFilesystem:
     def __init__(self, filesystem: SandboxFilesystem) -> None:
         self.filesystem = filesystem
-        self.read_error: RuntimeError | None = None
         self.remove_error: RuntimeError | None = None
 
     async def read_bytes(self, path: str) -> bytes:
-        if self.read_error is not None:
-            raise self.read_error
         return await self.filesystem.read_bytes(path)
 
     async def remove(self, path: str) -> None:
@@ -671,7 +668,7 @@ class TestBackgroundCommands:
                 result = await call_tool(toolset, ctx, 'check_command', command_id=started_id)
                 if '[stderr]\nproblem' in result:
                     break
-                await anyio.sleep(0.02)
+                await anyio.sleep(0.02)  # pragma: no cover - retry timing is race-dependent
         assert result == '[stderr]\nproblem\n[status: running]'
         await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
 
@@ -819,6 +816,16 @@ class TestBackgroundCommands:
             assert '[status: running]' in await call_tool(toolset, ctx, 'check_command', command_id=started_id)
             backend.kill_failure = None
             await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+    async def test_stop_passes_through_term_when_kill_failure_is_configured(self, tmp_path: Path) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = background_toolset(tmp_path)
+            ctx = run_context(Sandbox.wrap(backend))
+            started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+            backend.kill_failure = '-KILL'
+
+            assert await call_tool(toolset, ctx, 'stop_command', command_id=started_id) == '(no output)\n[stopped]'
 
     async def test_stop_accepts_successful_kill(self, tmp_path: Path) -> None:
         async with LocalSandbox(root=tmp_path) as local:
