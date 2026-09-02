@@ -240,9 +240,10 @@ State persists between `run_code` calls within the same agent run -- variables, 
 
 ## Eager execution
 
-`CodeMode(eager=True)` starts executing complete top-level statements from a streamed
-`run_code` call before the model finishes generating the rest of the code. This overlaps
-model generation with sandbox execution and nested tool calls.
+`CodeMode(eager=True)` runs each complete top-level statement as soon as it arrives in a
+streamed `run_code` call. It does not wait for the model to finish writing the entire
+snippet, so earlier statements and their tool calls can finish while later code is still
+being generated.
 
 ```python
 from pydantic_ai import Agent
