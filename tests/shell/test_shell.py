@@ -180,7 +180,8 @@ class TestOutputCap:
         # The ID line is the tail, so a truncated echo still leaves the process stoppable.
         toolset = background_toolset(tmp_path, max_output_chars=80)
         ctx = run_context(sandbox)
-        result = await call_tool(toolset, ctx, 'start_command', command='true ' + 'x' * 200)
+        # `sleep` keeps it running, so stopping it is what is being tested, not a race with its exit.
+        result = await call_tool(toolset, ctx, 'start_command', command='sleep 30 #' + 'x' * 200)
         assert len(result) == 80
         assert await call_tool(toolset, ctx, 'stop_command', command_id=command_id(result)) == '(no output)\n[stopped]'
 
