@@ -41,15 +41,9 @@ class TestLifecycle:
 
     async def test_get_sandbox_reconnects_by_ref(self, fake_daytona: FakeDaytona) -> None:
         sandbox = fake_daytona.sandbox()
-        backend = await DaytonaSandbox[None]().get_sandbox(
-            _ctx(), SandboxRef(provider='daytona', sandbox_id=sandbox.id)
-        )
+        backend = await DaytonaSandbox[None]().get_sandbox(_ctx(), SandboxRef(sandbox_id=sandbox.id))
         assert isinstance(backend, DaytonaSandboxBackend)
         assert backend.sandbox_id == sandbox.id
-
-    async def test_get_sandbox_declines_other_providers(self, fake_daytona: FakeDaytona) -> None:
-        backend = await DaytonaSandbox[None]().get_sandbox(_ctx(), SandboxRef(provider='modal', sandbox_id='x'))
-        assert backend is None
 
     async def test_release_deletes_without_starting(self, fake_daytona: FakeDaytona) -> None:
         capability = DaytonaSandbox[None]()
@@ -63,7 +57,7 @@ class TestLifecycle:
         capability = DaytonaSandbox[None](sandbox_id='existing')
         ref = await capability.acquire_sandbox(_ctx())
         await capability.release_sandbox(_ctx(), ref)
-        assert ref == SandboxRef(provider='daytona', sandbox_id='existing')
+        assert ref == SandboxRef(sandbox_id='existing')
         assert fake_daytona.sandboxes == []
 
     async def test_failed_acquisition_close_does_not_delete(self, fake_daytona: FakeDaytona) -> None:

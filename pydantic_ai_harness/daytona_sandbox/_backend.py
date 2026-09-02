@@ -65,7 +65,6 @@ __all__ = (
 )
 
 DEFAULT_AUTO_STOP_MINUTES = 60
-PROVIDER = 'daytona'
 
 _MISSING_DAYTONA = (
     'The `daytona` package is required for DaytonaSandbox. Install it with `uv add "pydantic-ai-harness[daytona]"`.'
@@ -324,10 +323,6 @@ class DaytonaSandboxBackend(SandboxBackend):
 
     sandbox: AsyncSandbox
     """The underlying Daytona sandbox, for provider-specific functionality."""
-
-    @property
-    def provider(self) -> str:
-        return PROVIDER
 
     def __init__(
         self,

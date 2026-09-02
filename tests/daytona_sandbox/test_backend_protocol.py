@@ -58,7 +58,6 @@ class TestConformance:
         assert isinstance(backend, SupportsFilesystem)
         assert isinstance(backend, SupportsStart)
         assert not isinstance(await backend.start(['true']), SupportsStream)
-        assert backend.provider == 'daytona'
 
     async def test_shared_command_validation(self, fake_daytona: FakeDaytona) -> None:
         await check_command_validation(DaytonaSandboxBackend.create)

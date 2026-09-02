@@ -13,7 +13,6 @@ from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai_harness._sandbox_provider import absolute_path
 from pydantic_ai_harness.daytona_sandbox._backend import (
     DEFAULT_AUTO_STOP_MINUTES,
-    PROVIDER,
     DaytonaSandboxBackend,
 )
 
@@ -75,7 +74,7 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
 
     async def acquire_sandbox(self, ctx: RunContext[AgentDepsT]) -> SandboxRef:
         if self.sandbox_id is not None:
-            return SandboxRef(provider=PROVIDER, sandbox_id=self.sandbox_id)
+            return SandboxRef(sandbox_id=self.sandbox_id)
         if ctx.run_id is None:  # pragma: no cover - core assigns it before acquisition
             raise RuntimeError('Daytona sandbox acquisition requires a run ID.')
         backend = await DaytonaSandboxBackend.create_or_connect(
@@ -86,16 +85,14 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
             env=self.env,
             network_block_all=self.network_block_all,
         )
-        ref = SandboxRef(provider=PROVIDER, sandbox_id=backend.sandbox_id)
+        ref = SandboxRef(sandbox_id=backend.sandbox_id)
         await backend.close(terminate=False)
         return ref
 
-    async def get_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef | None) -> SandboxBackend | None:
-        if ref is None or ref.provider != PROVIDER:
-            return None
+    async def get_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> SandboxBackend | None:
         return await DaytonaSandboxBackend.connect(ref.sandbox_id, working_dir=self.workdir)
 
     async def release_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> None:
-        if self.sandbox_id is not None or ref.provider != PROVIDER:
+        if self.sandbox_id is not None:
             return
         await DaytonaSandboxBackend.delete_by_id(ref.sandbox_id)
