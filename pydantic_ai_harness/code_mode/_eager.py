@@ -197,9 +197,6 @@ class EagerCoordinator(Generic[AgentDepsT]):
         code = args.get('code')
         if not isinstance(code, str):
             return
-        if len(code) > MAX_SCAN_CHARS:
-            call.halted = True
-            return
         if call.args_dict is not None:
             if len(code) > MAX_SCAN_WORK_CHARS - call.scan_work_chars:
                 call.halted = True

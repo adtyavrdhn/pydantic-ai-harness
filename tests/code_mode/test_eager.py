@@ -969,8 +969,19 @@ class TestEagerCodeMode:
         assert calls == ['probe']
         assert result.return_value == 'done'
 
-    @pytest.mark.parametrize('invalid_args', ['diverged', 'restart', 'null_code', 'missing_code'])
-    async def test_halted_scan_cancels_invalidated_queued_statements(self, invalid_args: str):
+    @pytest.mark.parametrize(
+        ('invalid_args', 'halt_before_invalid'),
+        [
+            ('diverged', True),
+            ('restart', True),
+            ('null_code', True),
+            ('missing_code', True),
+            ('oversized_diverged', False),
+            ('null_code', False),
+            ('missing_code', False),
+        ],
+    )
+    async def test_invalidated_queued_statements_are_cancelled(self, invalid_args: str, halt_before_invalid: bool):
         started = asyncio.Event()
         cancelled = asyncio.Event()
         stale_calls: list[str] = []
@@ -999,17 +1010,18 @@ class TestEagerCodeMode:
                 ],
             )
             await asyncio.wait_for(started.wait(), timeout=5)
-            await observe(
-                capability,
-                ctx,
-                [
-                    PartDeltaEvent(
-                        index=0,
-                        delta=ToolCallPartDelta(args_delta={'code': same_prefix}, tool_call_id='c1'),
-                    )
-                    for _ in range(11)
-                ],
-            )
+            if halt_before_invalid:
+                await observe(
+                    capability,
+                    ctx,
+                    [
+                        PartDeltaEvent(
+                            index=0,
+                            delta=ToolCallPartDelta(args_delta={'code': same_prefix}, tool_call_id='c1'),
+                        )
+                        for _ in range(11)
+                    ],
+                )
             if invalid_args == 'diverged':
                 event: AgentStreamEvent = PartDeltaEvent(
                     index=0,
@@ -1020,11 +1032,22 @@ class TestEagerCodeMode:
                     index=0,
                     delta=ToolCallPartDelta(args_delta={'restart': True}, tool_call_id='c1'),
                 )
-            elif invalid_args == 'null_code':
+            elif invalid_args == 'oversized_diverged':
                 event = PartDeltaEvent(
                     index=0,
-                    delta=ToolCallPartDelta(args_delta={'code': None}, tool_call_id='c1'),
+                    delta=ToolCallPartDelta(args_delta={'code': 'replacement\n' * 30_000}, tool_call_id='c1'),
                 )
+            elif invalid_args == 'null_code':
+                if halt_before_invalid:
+                    event = PartDeltaEvent(
+                        index=0,
+                        delta=ToolCallPartDelta(args_delta={'code': None}, tool_call_id='c1'),
+                    )
+                else:
+                    event = PartStartEvent(
+                        index=0,
+                        part=ToolCallPart(tool_name='run_code', args={'code': None}, tool_call_id='c1'),
+                    )
             else:
                 event = PartStartEvent(
                     index=0,
