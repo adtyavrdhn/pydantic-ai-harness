@@ -19,7 +19,7 @@ from ._streaming import MAX_SCAN_CHARS, closed_statements, decode_partial_args
 from ._toolset import CodeModeToolset, RunCodeExecution
 
 MAX_SCAN_WORK_CHARS = 1 << 20
-"""Cumulative characters one streamed call may hand to `ast.parse` before eager scanning stops."""
+"""Cumulative characters one streamed call may hand to host parsers before eager scanning stops."""
 
 
 def in_durable_execution(ctx: RunContext[object]) -> bool:
@@ -98,25 +98,41 @@ class EagerCoordinator(Generic[AgentDepsT]):
                     )
                     self.calls[part.tool_call_id] = call
                     self.call_ids_by_part_index[event.index] = part.tool_call_id
-                if self.receive_args(call, part.args, replace_dict=True):
+                if await self.receive_args(call, part.args, replace_dict=True):
                     await self.scan(call, ctx, executor)
 
             case PartDeltaEvent(delta=ToolCallPartDelta() as delta):
                 call = self.find_call(event.index, delta.tool_call_id)
-                if call is not None and self.receive_args(call, delta.args_delta, replace_dict=False):
+                if call is not None and await self.receive_args(call, delta.args_delta, replace_dict=False):
                     await self.scan(call, ctx, executor)
 
             case _:
                 return
 
-    @staticmethod
-    def receive_args(call: StreamedCodeCall, args: str | dict[str, Any] | None, *, replace_dict: bool) -> bool:
+    async def receive_args(
+        self,
+        call: StreamedCodeCall,
+        args: str | dict[str, Any] | None,
+        *,
+        replace_dict: bool,
+    ) -> bool:
         """Retain arguments while eager scanning is active; report whether a scan is worthwhile.
 
-        Once halted, later arguments are dropped: dispatch re-validates the executed prefix and
-        handles `restart` itself, so nothing here needs to keep watching the stream.
+        Once scanning halts, dict updates still receive exact checks for signals that make
+        queued work stale. String deltas are append-only, so dispatch can reconcile those.
         """
         if call.halted:
+            if isinstance(args, dict):
+                code = args.get('code')
+                invalid_prefix = 'code' in args and (
+                    not isinstance(code, str) or code != call.fed_prefix and not code.startswith(f'{call.fed_prefix}\n')
+                )
+                if (
+                    args.get('restart')
+                    or call.fed_prefix
+                    and (invalid_prefix or replace_dict and not isinstance(code, str))
+                ):
+                    await self.discard(call)
             return False
         if isinstance(args, str):
             if len(args) > MAX_SCAN_CHARS - len(call.args_text):
@@ -126,7 +142,22 @@ class EagerCoordinator(Generic[AgentDepsT]):
             # A statement can only close on a newline, so deltas without one need no decoding.
             return '\\n' in args
         if isinstance(args, dict):
-            call.args_dict = args if replace_dict else {**(call.args_dict or {}), **args}
+            code = args.get('code')
+            if isinstance(code, str) and len(code) > MAX_SCAN_CHARS:
+                call.halted = True
+                if call.fed_prefix and code != call.fed_prefix and not code.startswith(f'{call.fed_prefix}\n'):
+                    await self.discard(call)
+                return False
+            if replace_dict and call.fed_prefix and not isinstance(code, str):
+                call.halted = True
+                await self.discard(call)
+                return False
+            relevant: dict[str, object] = {}
+            if isinstance(code, str):
+                relevant['code'] = code
+            if args.get('restart'):
+                relevant['restart'] = True
+            call.args_dict = relevant if replace_dict else {**(call.args_dict or {}), **relevant}
             return True
         return False
 
@@ -152,6 +183,10 @@ class EagerCoordinator(Generic[AgentDepsT]):
         """Queue top-level statements that have become stable in the stream."""
         args: Mapping[str, object] | None = call.args_dict
         if args is None:
+            if len(call.args_text) > MAX_SCAN_WORK_CHARS - call.scan_work_chars:
+                call.halted = True
+                return
+            call.scan_work_chars += len(call.args_text)
             args = decode_partial_args(call.args_text)
             if args is None:
                 return
@@ -165,6 +200,11 @@ class EagerCoordinator(Generic[AgentDepsT]):
         if len(code) > MAX_SCAN_CHARS:
             call.halted = True
             return
+        if call.args_dict is not None:
+            if len(code) > MAX_SCAN_WORK_CHARS - call.scan_work_chars:
+                call.halted = True
+                return
+            call.scan_work_chars += len(code)
 
         lines = code.split('\n')
         if call.fed_line_count and '\n'.join(lines[: call.fed_line_count]) != call.fed_prefix:
@@ -175,10 +215,6 @@ class EagerCoordinator(Generic[AgentDepsT]):
         # Fed statements are closed top-level statements, so the unfed suffix parses on its own.
         # Parsing only that suffix keeps each scan proportional to what is still open.
         unfed = '\n'.join(lines[call.fed_line_count :])
-        if len(unfed) > MAX_SCAN_WORK_CHARS - call.scan_work_chars:
-            call.halted = True
-            return
-        call.scan_work_chars += len(unfed)
 
         for statement in closed_statements(unfed):
             end = call.fed_line_count + (statement.end_lineno or statement.lineno)

@@ -933,6 +933,108 @@ class TestEagerCodeMode:
         assert calls == ['probe']
         assert result.return_value == 'done'
 
+    async def test_string_stream_decode_work_is_cumulative(self):
+        calls: list[str] = []
+
+        def probe() -> str:
+            calls.append('probe')
+            return 'done'
+
+        line = 'x = 0\n'
+        encoded_line = json.dumps(line)[1:-1]
+        prefix = line * 600
+        tail = 'answer = await probe()\ny = 1\nanswer'
+        async with prepared_eager_toolset([Tool(probe)]) as (capability, toolset, ctx, run_code):
+            events: list[AgentStreamEvent] = [
+                PartStartEvent(index=0, part=ToolCallPart(tool_name='run_code', args='{"code":"', tool_call_id='c1'))
+            ]
+            events.extend(
+                PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=encoded_line, tool_call_id='c1'))
+                for _ in range(600)
+            )
+            events.append(
+                PartDeltaEvent(
+                    index=0,
+                    delta=ToolCallPartDelta(args_delta=json.dumps(tail)[1:-1] + '"}', tool_call_id='c1'),
+                )
+            )
+            await observe(capability, ctx, events)
+            await asyncio.sleep(0)
+            assert calls == []
+
+            code = prefix + tail
+            exec_ctx = dataclasses.replace(ctx, tool_call_id='c1', tool_name='run_code')
+            result = await toolset.call_tool('run_code', {'code': code}, exec_ctx, run_code)
+
+        assert calls == ['probe']
+        assert result.return_value == 'done'
+
+    @pytest.mark.parametrize('invalid_args', ['diverged', 'restart', 'null_code', 'missing_code'])
+    async def test_halted_scan_cancels_invalidated_queued_statements(self, invalid_args: str):
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        stale_calls: list[str] = []
+
+        async def slow() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        def stale() -> None:
+            stale_calls.append('stale')  # pragma: no cover - reaching this line fails the assertion below
+
+        initial = 'await slow()\nawait stale()\n"done"'
+        same_prefix = initial + '\n' + '# padding\n' * 10_000
+        async with prepared_eager_toolset([Tool(slow), Tool(stale)]) as (capability, _, ctx, _):
+            await observe(
+                capability,
+                ctx,
+                [
+                    PartStartEvent(
+                        index=0, part=ToolCallPart(tool_name='run_code', args={'code': initial}, tool_call_id='c1')
+                    )
+                ],
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            await observe(
+                capability,
+                ctx,
+                [
+                    PartDeltaEvent(
+                        index=0,
+                        delta=ToolCallPartDelta(args_delta={'code': same_prefix}, tool_call_id='c1'),
+                    )
+                    for _ in range(11)
+                ],
+            )
+            if invalid_args == 'diverged':
+                event: AgentStreamEvent = PartDeltaEvent(
+                    index=0,
+                    delta=ToolCallPartDelta(args_delta={'code': 'replacement = 1\nreplacement'}, tool_call_id='c1'),
+                )
+            elif invalid_args == 'restart':
+                event = PartDeltaEvent(
+                    index=0,
+                    delta=ToolCallPartDelta(args_delta={'restart': True}, tool_call_id='c1'),
+                )
+            elif invalid_args == 'null_code':
+                event = PartDeltaEvent(
+                    index=0,
+                    delta=ToolCallPartDelta(args_delta={'code': None}, tool_call_id='c1'),
+                )
+            else:
+                event = PartStartEvent(
+                    index=0,
+                    part=ToolCallPart(tool_name='run_code', args={'wrong': True}, tool_call_id='c1'),
+                )
+            await observe(capability, ctx, [event])
+
+            assert cancelled.is_set()
+            assert stale_calls == []
+
     async def test_interrupted_statement_restarts_the_session(self):
         started = asyncio.Event()
         cancelled = asyncio.Event()
