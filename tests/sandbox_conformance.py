@@ -5,10 +5,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 import pytest
-from pydantic_ai.sandboxes import Sandbox, SandboxBackend, SandboxTimeoutError, SupportsStart
+from pydantic_ai.sandboxes import Sandbox, SandboxBackend, SandboxError, SandboxTimeoutError
 
 BackendFactory = Callable[[], Awaitable[SandboxBackend]]
-StartFactory = Callable[[], Awaitable[SupportsStart]]
 
 
 async def check_command_validation(factory: BackendFactory) -> None:
@@ -34,12 +33,4 @@ async def check_timeout(factory: BackendFactory) -> None:
     with pytest.raises(SandboxTimeoutError) as exc_info:
         await backend.run(['sleep', '10'], timeout=1)
     assert isinstance(exc_info.value, TimeoutError)
-
-
-async def check_process_results(factory: StartFactory) -> None:
-    backend = await factory()
-    process = await backend.start(['false'])
-    first = await process.wait()
-    second = await process.wait()
-    assert first is second
-    assert first.exit_code != 0
+    assert isinstance(exc_info.value, SandboxError)

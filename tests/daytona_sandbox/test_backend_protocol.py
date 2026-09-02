@@ -13,11 +13,10 @@ from daytona import DaytonaAuthenticationError, DaytonaConnectionError, DaytonaN
 from pydantic_ai.sandboxes import (
     Sandbox,
     SandboxBackend,
+    SandboxError,
     SandboxTimeoutError,
     SandboxUnavailableError,
     SupportsFilesystem,
-    SupportsStart,
-    SupportsStream,
 )
 
 from pydantic_ai_harness.daytona_sandbox import (
@@ -31,7 +30,6 @@ from pydantic_ai_harness.daytona_sandbox._backend import _command_context, _comm
 from ..sandbox_conformance import (
     check_command_validation,
     check_missing_file,
-    check_process_results,
     check_timeout,
 )
 from .fake_daytona import FakeDaytona
@@ -52,12 +50,10 @@ def _hide_daytona(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestConformance:
-    async def test_protocol_opt_ins(self, fake_daytona: FakeDaytona) -> None:
+    async def test_run_and_filesystem_protocols(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
         assert isinstance(backend, SandboxBackend)
         assert isinstance(backend, SupportsFilesystem)
-        assert isinstance(backend, SupportsStart)
-        assert not isinstance(await backend.start(['true']), SupportsStream)
 
     async def test_shared_command_validation(self, fake_daytona: FakeDaytona) -> None:
         await check_command_validation(DaytonaSandboxBackend.create)
@@ -73,13 +69,11 @@ class TestConformance:
 
         await check_timeout(factory)
 
-    async def test_shared_wait_and_nonzero_result(self, fake_daytona: FakeDaytona) -> None:
-        async def factory() -> DaytonaSandboxBackend:
-            backend = await DaytonaSandboxBackend.create()
-            fake_daytona.sandboxes[-1].responder = lambda command, timeout: ('', 2)
-            return backend
-
-        await check_process_results(factory)
+    async def test_shared_run_and_nonzero_result(self, fake_daytona: FakeDaytona) -> None:
+        backend = await DaytonaSandboxBackend.create()
+        fake_daytona.sandboxes[-1].responder = lambda command, timeout: ('', 2)
+        result = await backend.run(['false'])
+        assert result.exit_code != 0
 
 
 class TestCommands:
@@ -99,49 +93,12 @@ class TestCommands:
         assert sandbox.process_command == ("cd -- '/work dir' && env -- 'A=x y' sh -c 'printf '\"'\"'a b'\"'\"''")
         assert sandbox.process_sessions == set()
 
-    async def test_wait_caches_success(self, fake_daytona: FakeDaytona) -> None:
-        backend = await DaytonaSandboxBackend.create()
-        process = await backend.start(['true'])
-        first = await process.wait()
-        assert process.pid is None
-        assert await process.wait() is first
-
-    async def test_log_failure_is_translated_and_cached(self, fake_daytona: FakeDaytona) -> None:
-        backend = await DaytonaSandboxBackend.create()
-        fake_daytona.sandboxes[0].process_logs_error = RuntimeError('logs failed')
-        process = await backend.start(['true'])
-        with pytest.raises(DaytonaSandboxError, match='logs failed') as first:
-            await process.wait()
-        with pytest.raises(DaytonaSandboxError) as second:
-            await process.wait()
-        assert second.value is first.value
-
     async def test_missing_exit_status_is_provider_error(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
         fake_daytona.sandboxes[0].process_stdout = ['']
         fake_daytona.sandboxes[0].process_exit_code = None
         with pytest.raises(DaytonaSandboxError, match='before reporting an exit status'):
             await backend.run(['true'])
-
-    async def test_explicit_kill_is_bounded_and_translated(self, fake_daytona: FakeDaytona) -> None:
-        backend = await DaytonaSandboxBackend.create()
-        sandbox = fake_daytona.sandboxes[0]
-        sandbox.process_hangs = True
-        process = await backend.start(['sleep', '30'])
-        await sandbox.process_logs_started.wait()
-        await process.kill()
-        assert sandbox.process_sessions == set()
-        sandbox.process_delete_error = RuntimeError('delete failed')
-        process = await backend.start(['sleep', '30'])
-        with pytest.raises(DaytonaSandboxError, match='delete failed'):
-            await process.kill()
-
-    async def test_missing_process_session_counts_as_killed(self, fake_daytona: FakeDaytona) -> None:
-        backend = await DaytonaSandboxBackend.create()
-        sandbox = fake_daytona.sandboxes[0]
-        sandbox.process_delete_error = DaytonaNotFoundError('gone')
-        process = await backend.start(['true'])
-        await process.kill()
 
     async def test_deadline_carries_partial_output_and_kills(self, fake_daytona: FakeDaytona) -> None:
         backend = await DaytonaSandboxBackend.create()
@@ -194,7 +151,7 @@ class TestCommands:
         fake_daytona.sandboxes[0].process_create_gate = asyncio.Event()
         monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._REQUEST_TIMEOUT', 0.01)
         with pytest.raises(DaytonaSandboxError, match='session setup timed out') as exc_info:
-            await backend.start(['true'])
+            await backend.run(['true'])
         assert not isinstance(exc_info.value, SandboxTimeoutError)
 
     async def test_session_execution_failure_cleans_up(self, fake_daytona: FakeDaytona) -> None:
@@ -202,14 +159,14 @@ class TestCommands:
         sandbox = fake_daytona.sandboxes[0]
         sandbox.exec_error = DaytonaConnectionError('offline')
         with pytest.raises(DaytonaSandboxError, match='offline'):
-            await backend.start(['true'])
+            await backend.run(['true'])
         assert sandbox.process_sessions == set()
 
     @pytest.mark.parametrize('timeout', [0, -1, float('inf'), float('nan')])
     async def test_invalid_deadline(self, fake_daytona: FakeDaytona, timeout: float) -> None:
         backend = await DaytonaSandboxBackend.create()
         with pytest.raises(ValueError, match='positive finite'):
-            await backend.start(['true'], timeout=timeout)
+            await backend.run(['true'], timeout=timeout)
 
 
 class TestLifecycle:
@@ -350,6 +307,7 @@ class TestErrorsAndFilesystem:
         fake_daytona.create_error = DaytonaConnectionError('offline')
         with pytest.raises(DaytonaSandboxError) as recoverable:
             await DaytonaSandboxBackend.create()
+        assert isinstance(recoverable.value, SandboxError)
         assert not isinstance(recoverable.value, SandboxUnavailableError)
 
     async def test_concurrent_waits_share_one_outcome(self, fake_daytona: FakeDaytona) -> None:
@@ -359,14 +317,13 @@ class TestErrorsAndFilesystem:
         backend = await DaytonaSandboxBackend.create()
         sandbox = fake_daytona.sandboxes[0]
         sandbox.process_status_gate = asyncio.Event()
-        process = await backend.start(['true'])
-        first = asyncio.create_task(process.wait())
+        first = asyncio.create_task(backend.run(['true']))
         await anyio.wait_all_tasks_blocked()  # first is suspended at the status poll, mid-settle
-        second = asyncio.create_task(process.wait())
-        await anyio.wait_all_tasks_blocked()  # second is parked on the wait lock
+        second = asyncio.create_task(backend.run(['true']))
+        await anyio.wait_all_tasks_blocked()
         sandbox.process_status_gate.set()
         one, two = await asyncio.gather(first, second)
-        assert one is two
+        assert one == two
 
     async def test_concurrent_first_probes_converge(self, fake_daytona: FakeDaytona) -> None:
         # The probe is an idempotent read, so overlapping first calls are allowed to
@@ -433,8 +390,9 @@ class TestErrorsAndFilesystem:
         backend = await DaytonaSandboxBackend.create()
         sandbox = fake_daytona.sandboxes[0]
         sandbox.mkdir_exit_code = 1
-        with pytest.raises(DaytonaSandboxError, match='Could not create'):
+        with pytest.raises(DaytonaSandboxError, match='Could not create') as exc:
             await backend.fs.write_bytes('/pkg/a.py', b'x')
+        assert isinstance(exc.value, SandboxError)
         sandbox.mkdir_exit_code = 0
         sandbox.fs_error = DaytonaAuthenticationError('denied')
         with pytest.raises(DaytonaSandboxAuthError):

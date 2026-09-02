@@ -37,6 +37,7 @@ from pydantic_ai.sandboxes import (
     CommandResult,
     FileEntry,
     SandboxBackend,
+    SandboxError,
     SandboxTimeoutError,
     SandboxUnavailableError,
 )
@@ -52,9 +53,7 @@ if TYPE_CHECKING:
     from pydantic_ai.sandboxes import (
         SandboxCommand,
         SandboxFilesystem,
-        SandboxProcess,
         SupportsFilesystem,
-        SupportsStart,
     )
 
 __all__ = (
@@ -80,7 +79,7 @@ _LIFECYCLE_TIMEOUT = 60.0
 _TEARDOWN_TIMEOUT = 30.0
 
 
-class DaytonaSandboxError(RuntimeError):
+class DaytonaSandboxError(SandboxError):
     """A recoverable Daytona provider operation failed."""
 
 
@@ -141,10 +140,6 @@ class _DaytonaProcess:
         self._started = started
         self._lock = anyio.Lock()
         self._outcome: CommandResult | Exception | None = None
-
-    @property
-    def pid(self) -> int | None:
-        return None
 
     async def wait(self) -> CommandResult:
         """Wait for the command and return the same outcome on every call."""
@@ -314,8 +309,8 @@ class DaytonaSandboxBackend(SandboxBackend):
     """A Daytona sandbox behind Pydantic AI's `SandboxBackend` protocol.
 
     The backend owns its `AsyncDaytona` client and implements filesystem and background
-    process support. Daytona delivers output through callbacks, so complete command results
-    are buffered while a command runs; live `SupportsStream` output is not exposed.
+    private process support. Daytona delivers output through callbacks, so complete command
+    results are buffered while a command runs.
 
     The protocol is structural, but subclassing it here makes a signature drift fail the type
     check on this class instead of at a distant `Sandbox.wrap` call.
@@ -516,7 +511,7 @@ class DaytonaSandboxBackend(SandboxBackend):
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
     ) -> CommandResult:
-        process = await self.start(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
+        process = await self._start(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
         try:
             return await process.wait()
         except SandboxTimeoutError:
@@ -526,7 +521,7 @@ class DaytonaSandboxBackend(SandboxBackend):
             await _kill_quietly(process)
             raise
 
-    async def start(
+    async def _start(
         self,
         command: SandboxCommand,
         *,
@@ -609,9 +604,6 @@ if TYPE_CHECKING:
     _client = AsyncDaytona.__new__(AsyncDaytona)
     _sandbox = AsyncSandbox.__new__(AsyncSandbox)
     _backend = DaytonaSandboxBackend(_client, _sandbox, owned=False)
-    _process = _DaytonaProcess.__new__(_DaytonaProcess)
     _backend_conforms: SandboxBackend = _backend
     _filesystem_backend_conforms: SupportsFilesystem = _backend
-    _start_conforms: SupportsStart = _backend
     _filesystem_conforms: SandboxFilesystem = _backend.fs
-    _process_conforms: SandboxProcess = _process

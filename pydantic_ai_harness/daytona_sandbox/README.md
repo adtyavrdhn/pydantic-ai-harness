@@ -111,11 +111,10 @@ it at the source.
 
 The public error surface is deliberately narrow:
 
-- `DaytonaSandboxError` for provider operations that fail.
-- `DaytonaSandboxAuthError` when credentials are rejected, also a
-  `pydantic_ai.sandboxes.SandboxUnavailableError`.
-- `DaytonaSandboxUnavailableError` when the referenced sandbox is missing, also a
-  `pydantic_ai.sandboxes.SandboxUnavailableError`.
+- `DaytonaSandboxError` reports transient Daytona operation failures and is a core
+  `pydantic_ai.sandboxes.SandboxError`.
+- `DaytonaSandboxAuthError` and `DaytonaSandboxUnavailableError` report dead or unauthorized
+  Daytona environments and are core `pydantic_ai.sandboxes.SandboxUnavailableError` instances.
 - `pydantic_ai.sandboxes.SandboxTimeoutError` for command deadlines, with the partial
   `stdout`, `stderr`, and enforced `timeout`.
 
