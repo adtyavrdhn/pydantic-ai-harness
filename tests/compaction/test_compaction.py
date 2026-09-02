@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 from typing import Any
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
 from opentelemetry.trace import NoOpTracer, Tracer, get_tracer
@@ -115,6 +116,9 @@ def _make_ctx(
     @dataclasses.dataclass
     class _FakeCtx:
         usage: RunUsage
+        # A distinct run per call: the reclaim correction is keyed by (run_id, run_step).
+        run_id: str = dataclasses.field(default_factory=lambda: str(uuid4()))
+        run_step: int = 1
         messages: list[ModelMessage] = dataclasses.field(default_factory=list[ModelMessage])
         usage_limits: UsageLimits | None = None
         model: Model = dataclasses.field(default_factory=TestModel)

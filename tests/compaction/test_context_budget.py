@@ -6,6 +6,7 @@ import dataclasses
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
 from opentelemetry.trace import NoOpTracer, Tracer, get_tracer
@@ -89,6 +90,9 @@ def _ctx(model: Any = None, *, messages: list[ModelMessage] | None = None) -> An
 
     @dataclasses.dataclass
     class _FakeCtx:
+        # A distinct run per _ctx() call: the reclaim correction is keyed by (run_id, run_step).
+        run_id: str = dataclasses.field(default_factory=lambda: str(uuid4()))
+        run_step: int = 1
         usage: RunUsage = dataclasses.field(default_factory=RunUsage)
         messages: list[ModelMessage] = dataclasses.field(default_factory=list[ModelMessage])
         usage_limits: UsageLimits | None = None

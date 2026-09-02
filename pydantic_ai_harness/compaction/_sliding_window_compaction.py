@@ -244,11 +244,9 @@ class SlidingWindowCompaction(AbstractCapability[AgentDepsT]):
             tokenizer=self.tokenizer,
         )
         ctx.messages[:] = compacted
-        compacted_context = replace(request_context, messages=list(ctx.messages))
         record_compaction_reclaim(
-            request_context,
-            compacted_context,
+            ctx,
             estimate_token_count(messages, self.tokenizer),
             estimate_token_count(compacted, self.tokenizer),
         )
-        return compacted_context
+        return replace(request_context, messages=compacted)

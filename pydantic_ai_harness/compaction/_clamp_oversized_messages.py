@@ -18,7 +18,6 @@ from pydantic_ai.messages import (
 from pydantic_ai.tools import RunContext
 
 from pydantic_ai_harness.compaction._shared import (
-    carry_compaction_reclaim,
     compact_with_span,
     context_for_request,
     estimate_text_tokens,
@@ -192,8 +191,5 @@ class ClampOversizedMessages(AbstractCapability[AgentDepsT]):
             tokenizer=self.tokenizer,
         )
         ctx.messages[:] = compacted
-        compacted_context = replace(request_context, messages=list(ctx.messages))
-        # Carried, not recorded: clamping's own reclaim has never fed the usage-reporter
-        # correction, but an earlier strategy's must survive this replacement view.
-        carry_compaction_reclaim(request_context, compacted_context)
-        return compacted_context
+        # Not recorded: clamping's own reclaim has never fed the usage-reporter correction.
+        return replace(request_context, messages=compacted)
