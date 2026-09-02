@@ -107,11 +107,10 @@ commands that may produce very large output should bound it at the source.
 
 The public error surface is deliberately narrow:
 
-- `E2BSandboxError` for provider operations that fail.
-- `E2BSandboxAuthError` when credentials are rejected, also a
-  `pydantic_ai.sandboxes.SandboxUnavailableError`.
-- `E2BSandboxUnavailableError` when the referenced sandbox is not running, also a
-  `pydantic_ai.sandboxes.SandboxUnavailableError`.
+- `E2BSandboxError` reports transient E2B operation failures and is a core
+  `pydantic_ai.sandboxes.SandboxError`.
+- `E2BSandboxAuthError` and `E2BSandboxUnavailableError` report dead or unauthorized
+  E2B environments and are core `pydantic_ai.sandboxes.SandboxUnavailableError` instances.
 - `pydantic_ai.sandboxes.SandboxTimeoutError` for command deadlines, with the partial
   `stdout`, `stderr`, and enforced `timeout`.
 

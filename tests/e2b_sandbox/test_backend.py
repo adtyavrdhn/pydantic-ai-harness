@@ -12,11 +12,10 @@ import pytest
 from pydantic_ai.sandboxes import (
     Sandbox,
     SandboxBackend,
+    SandboxError,
     SandboxTimeoutError,
     SandboxUnavailableError,
     SupportsFilesystem,
-    SupportsStart,
-    SupportsStream,
 )
 
 from pydantic_ai_harness.e2b_sandbox import (
@@ -29,7 +28,6 @@ from pydantic_ai_harness.e2b_sandbox import (
 from ..sandbox_conformance import (
     check_command_validation,
     check_missing_file,
-    check_process_results,
     check_timeout,
 )
 from .fake_e2b import FakeE2B
@@ -55,18 +53,12 @@ def _hide_e2b(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestConformance:
-    async def test_backend_implements_the_protocol_opt_ins(self, fake_e2b: FakeE2B) -> None:
+    async def test_backend_implements_run_and_filesystem_protocols(self, fake_e2b: FakeE2B) -> None:
         # `isinstance` is shallow (member presence only); the signature half is pinned
         # statically by the `if TYPE_CHECKING` block in `_backend.py`.
         backend = await E2BSandboxBackend.create()
         assert isinstance(backend, SandboxBackend)
         assert isinstance(backend, SupportsFilesystem)
-        assert isinstance(backend, SupportsStart)
-
-    async def test_live_output_is_not_offered(self, fake_e2b: FakeE2B) -> None:
-        # E2B processes intentionally omit the optional streaming protocol.
-        backend = await E2BSandboxBackend.create()
-        assert not isinstance(await backend.start(['echo', 'hi']), SupportsStream)
 
     async def test_identity_is_e2b_sandbox_id(self, fake_e2b: FakeE2B) -> None:
         backend = await E2BSandboxBackend.create()
@@ -83,9 +75,11 @@ class TestConformance:
         fake_e2b.command_hangs = True
         await check_timeout(E2BSandboxBackend.create)
 
-    async def test_shared_wait_and_nonzero_result(self, fake_e2b: FakeE2B) -> None:
+    async def test_shared_run_and_nonzero_result(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.responder = lambda command, timeout: ('', '', 2)
-        await check_process_results(E2BSandboxBackend.create)
+        backend = await E2BSandboxBackend.create()
+        result = await backend.run(['false'])
+        assert result.exit_code != 0
 
 
 class TestCreate:
@@ -318,6 +312,7 @@ class TestRun:
         backend = await E2BSandboxBackend.create()
         with pytest.raises(E2BSandboxError, match='Command could not run in the sandbox: transient blip') as exc:
             await backend.run(['x'])
+        assert isinstance(exc.value, SandboxError)
         assert not isinstance(exc.value, SandboxUnavailableError)
 
     async def test_a_non_e2b_failure_names_its_type(self, fake_e2b: FakeE2B) -> None:
@@ -357,6 +352,7 @@ class TestRun:
         backend = await E2BSandboxBackend.create()
         with pytest.raises(E2BSandboxError, match='slow') as exc:
             await backend.run(['x'])
+        assert isinstance(exc.value, SandboxError)
         assert not isinstance(exc.value, SandboxUnavailableError)
 
     async def test_a_failing_health_probe_preserves_the_original_error(self, fake_e2b: FakeE2B) -> None:
@@ -376,7 +372,7 @@ class TestRun:
         with pytest.raises(E2BSandboxUnavailableError, match="'sbx-keep' is no longer running"):
             await backend.run(['x'])
 
-    async def test_wait_failure_becomes_a_sandbox_error(self, fake_e2b: FakeE2B) -> None:
+    async def test_run_wait_failure_is_a_sandbox_error(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.wait_error = fake_e2b.error_type('stream broke')
         backend = await E2BSandboxBackend.create()
         with pytest.raises(E2BSandboxError, match='stream broke') as exc:
@@ -384,57 +380,6 @@ class TestRun:
         assert 'the command may still be running' in str(exc.value)
         # The command may still be running, so it is killed on the way out.
         assert fake_e2b.sandboxes[0].commands.killed_pids == [4242]
-
-
-class TestProcess:
-    async def test_wait_returns_the_same_result_every_time(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.responder = lambda command, timeout: ('out', '', 3)
-        backend = await E2BSandboxBackend.create()
-        process = await backend.start(['x'])
-        first = await process.wait()
-        assert await process.wait() == first
-
-    async def test_wait_re_raises_the_same_failure(self, fake_e2b: FakeE2B) -> None:
-        # The deadline verdict can only be reached once, so it is cached: a second wait must
-        # agree with the first rather than reporting a plain exit.
-        fake_e2b.command_hangs = True
-        backend = await E2BSandboxBackend.create()
-        process = await backend.start(['x'], timeout=0.05)
-        with pytest.raises(SandboxTimeoutError) as first:
-            await process.wait()
-        with pytest.raises(SandboxTimeoutError) as second:
-            await process.wait()
-        assert first.value is second.value
-
-    async def test_the_deadline_runs_from_start_not_from_wait(self, fake_e2b: FakeE2B) -> None:
-        # The protocol measures a started command's deadline from `start()`, so a caller that
-        # waits late gets what is left of the window, not a fresh one.
-        fake_e2b.command_hangs = True
-        backend = await E2BSandboxBackend.create()
-        process = await backend.start(['x'], timeout=0.05)
-        await anyio.sleep(0.1)
-        with anyio.fail_after(1):
-            with pytest.raises(SandboxTimeoutError):
-                await process.wait()
-
-    async def test_the_pid_is_reported(self, fake_e2b: FakeE2B) -> None:
-        backend = await E2BSandboxBackend.create()
-        assert (await backend.start(['x'])).pid == 4242
-
-    async def test_kill_signals_the_command(self, fake_e2b: FakeE2B) -> None:
-        backend = await E2BSandboxBackend.create()
-        process = await backend.start(['x'])
-        await process.kill()
-        assert fake_e2b.sandboxes[0].commands.killed_pids == [4242]
-
-    async def test_a_failing_kill_is_reported(self, fake_e2b: FakeE2B) -> None:
-        # `kill()` is a public operation, so a real failure is raised rather than swallowed;
-        # only the internal cleanup paths ignore it.
-        fake_e2b.kill_command_error = fake_e2b.error_type('kill refused')
-        backend = await E2BSandboxBackend.create()
-        process = await backend.start(['x'])
-        with pytest.raises(E2BSandboxError, match='Could not kill command 4242'):
-            await process.kill()
 
 
 class TestWorkingDir:
@@ -535,6 +480,7 @@ class TestFilesystem:
         fake_e2b.fs_error = fake_e2b.error_type('Permission denied')
         with pytest.raises(E2BSandboxError, match='Permission denied') as exc:
             await backend.fs.write_bytes('/root/x', b'data')
+        assert isinstance(exc.value, SandboxError)
         assert not isinstance(exc.value, SandboxUnavailableError)
 
     async def test_a_filesystem_error_on_a_dead_sandbox_is_terminal(self, fake_e2b: FakeE2B) -> None:
