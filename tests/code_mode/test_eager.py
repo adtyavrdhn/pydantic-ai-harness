@@ -914,7 +914,8 @@ class TestEagerCodeMode:
         assert calls == ['probe']
         assert result.return_value == 'done'
 
-    async def test_cumulative_scan_limit_cancels_a_diverged_prefix(self):
+    @pytest.mark.parametrize('invalid_args', ['diverged', 'restart', 'missing_code'])
+    async def test_scan_limit_cancels_when_later_args_invalidate_the_prefix(self, invalid_args: str):
         started = asyncio.Event()
         cancelled = asyncio.Event()
         stale_calls: list[str] = []
@@ -932,7 +933,6 @@ class TestEagerCodeMode:
 
         initial = 'await slow()\nawait stale()\n"done"'
         same_prefix = initial + '\n' + '# padding\n' * 10_000
-        diverged = 'replacement = 1\nreplacement'
         async with prepared_eager_toolset([Tool(slow), Tool(stale)]) as (capability, _, ctx, _):
             await observe(
                 capability,
@@ -948,22 +948,69 @@ class TestEagerCodeMode:
                 capability,
                 ctx,
                 [
-                    *(
-                        PartDeltaEvent(
-                            index=0,
-                            delta=ToolCallPartDelta(args_delta={'code': same_prefix}, tool_call_id='c1'),
-                        )
-                        for _ in range(9)
-                    ),
                     PartDeltaEvent(
                         index=0,
-                        delta=ToolCallPartDelta(args_delta={'code': diverged}, tool_call_id='c1'),
-                    ),
+                        delta=ToolCallPartDelta(args_delta={'code': same_prefix}, tool_call_id='c1'),
+                    )
+                    for _ in range(11)
+                ],
+            )
+            if invalid_args == 'diverged':
+                event: AgentStreamEvent = PartDeltaEvent(
+                    index=0,
+                    delta=ToolCallPartDelta(args_delta={'code': 'replacement = 1\nreplacement'}, tool_call_id='c1'),
+                )
+            elif invalid_args == 'restart':
+                event = PartDeltaEvent(
+                    index=0,
+                    delta=ToolCallPartDelta(args_delta={'restart': True}, tool_call_id='c1'),
+                )
+            else:
+                event = PartStartEvent(
+                    index=0,
+                    part=ToolCallPart(tool_name='run_code', args={'wrong': True}, tool_call_id='c1'),
+                )
+            await observe(capability, ctx, [event])
+
+            assert cancelled.is_set()
+            assert stale_calls == []
+
+    async def test_halted_string_stream_keeps_only_restart_reconciliation(self):
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def slow() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        code = 'await slow()\nx = 1\n"done"'
+        initial_args = '{"code": ' + json.dumps(code)
+        async with prepared_eager_toolset([Tool(slow)]) as (capability, _, ctx, _):
+            await observe(
+                capability,
+                ctx,
+                [
+                    PartStartEvent(
+                        index=0, part=ToolCallPart(tool_name='run_code', args=initial_args, tool_call_id='c1')
+                    )
+                ],
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            await observe(
+                capability,
+                ctx,
+                [
+                    PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=', "padding": "' + 'x' * 300_000)),
+                    PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta='", "res')),
+                    PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta='tart": true}')),
                 ],
             )
 
             assert cancelled.is_set()
-            assert stale_calls == []
 
     async def test_inactive_during_durable_execution(self):
         class DurableExecution(AbstractCapability[None]):
