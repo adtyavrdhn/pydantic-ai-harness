@@ -115,10 +115,7 @@ Three consequences are worth knowing:
   explanatory error rather than deadlocking.
 
 The loop is reused across invocations of a warm execution environment, so loop-bound resources like
-a provider's cached HTTP client stay valid between them. Do not detach background work from a tool
-with `asyncio.create_task()` or by leaving executor work unawaited. It is not checkpointed or covered
-by durable execution's guarantees, and loop reuse means it can outlive the invocation that started it.
-A run abandoned by a suspension or an error
+a provider's cached HTTP client stay valid between them. A run abandoned by a suspension or an error
 is therefore cancelled before the handler returns, and `run_durable` waits `cancel_timeout` seconds
 (5 by default) for it to unwind. Raise that for a workload whose cleanup is genuinely slow. If the
 timeout expires, the abandoned cleanup keeps running on a retired loop for at most the retired
@@ -127,6 +124,10 @@ state between the agent run and the handler. An external side effect from cleanu
 to a store, releasing a shared lock, or emitting a metric, can also land during a later invocation.
 Loop-bound resources are isolated: the next invocation gets a fresh loop, so the abandoned cleanup
 cannot touch resources such as that invocation's provider HTTP client.
+
+Loop reuse has one more consequence: do not detach background work from a tool with
+`asyncio.create_task()` or by leaving executor work unawaited. Detached work is not checkpointed and
+is not covered by durable execution's guarantees, and it can outlive the invocation that started it.
 
 ## What gets checkpointed
 
