@@ -73,8 +73,6 @@ DEFAULT_IMAGE = 'python:3.12-slim'
 DEFAULT_APP_NAME = 'pydantic-ai-harness'
 DEFAULT_SANDBOX_TIMEOUT = 300
 
-PROVIDER = 'modal'
-"""The `provider` half of a `SandboxRef` this backend answers to."""
 
 _Stream = Literal['stdout', 'stderr']
 
@@ -434,10 +432,6 @@ class ModalSandboxBackend(SandboxBackend):
 
     sandbox: modal.Sandbox
     """The underlying `modal.Sandbox`, for provider-specific functionality."""
-
-    @property
-    def provider(self) -> str:
-        return PROVIDER
 
     def __init__(
         self,
