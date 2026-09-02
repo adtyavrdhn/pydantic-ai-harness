@@ -470,6 +470,7 @@ class _RecordingLocalBackend:
         self.run_error: Exception | None = None
         self.raise_after_kill = False
         self.kill_failure: str | None = None
+        self.kill_failure_stderr = 'kill failed'
         self.hold_on_term = False
         self.tail_failure = False
         self.sandbox_id = backend.sandbox_id
@@ -491,10 +492,10 @@ class _RecordingLocalBackend:
         if self.run_error is not None:
             raise self.run_error
         if self.kill_failure is not None and not isinstance(command, str) and command[0] == 'kill':
-            if command[1] == self.kill_failure:
-                return CommandResult(exit_code=1, stdout='', stderr='kill failed')
+            # A held TERM reports success without signalling, so the escalation to KILL is reached.
             if self.hold_on_term and command[1] == '-TERM':
                 return CommandResult(exit_code=0, stdout='', stderr='')
+            return CommandResult(exit_code=1, stdout='', stderr=self.kill_failure_stderr)
         if self.tail_failure and not isinstance(command, str) and command[0] == 'tail':
             return CommandResult(exit_code=1, stdout='', stderr='tail failed')
         result = await self.backend.run(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
@@ -817,13 +818,16 @@ class TestBackgroundCommands:
             backend.kill_failure = None
             await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
 
-    async def test_stop_passes_through_term_when_kill_failure_is_configured(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize('signal', ['-TERM', '-KILL'])
+    async def test_stop_accepts_a_kill_that_failed_because_the_group_is_gone(self, tmp_path: Path, signal: str) -> None:
         async with LocalSandbox(root=tmp_path) as local:
             backend = _RecordingLocalBackend(local)
             toolset = background_toolset(tmp_path)
             ctx = run_context(Sandbox.wrap(backend))
             started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
-            backend.kill_failure = '-KILL'
+            backend.kill_failure = signal
+            backend.kill_failure_stderr = 'kill: No such process'
+            backend.hold_on_term = signal == '-KILL'
 
             assert await call_tool(toolset, ctx, 'stop_command', command_id=started_id) == '(no output)\n[stopped]'
 
