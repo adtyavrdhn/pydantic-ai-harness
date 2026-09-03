@@ -256,11 +256,13 @@ async def _restore_as_pre_escaping_reader(node: dict[str, object], store: MediaS
     `_URI_KEY`, drops the `uri` mirror, re-inlines a text marker's payload as
     `content`, and keeps every key it does not recognize, so a marker written by
     the escaping format restores with the stash and the stamp still in the
-    payload. Three of its branches are left out because no marker under test
-    reaches them: the plain-`uri` fallback, since the writer always emits
-    `_URI_KEY`; the caller-owned `uri` that is not a mirror, since these source
-    nodes carry no `uri`; and the recursion into preserved fields, since none of
-    these markers nests another.
+    payload. It reads the blob under the same `MediaContext` that reader built,
+    so a context-dependent `key_strategy` resolves the same key on the way back.
+    Three of its branches are left out because no marker under test reaches
+    them: the plain-`uri` fallback, since the writer always emits `_URI_KEY`;
+    the caller-owned `uri` that is not a mirror, since these source nodes carry
+    no `uri`; and the recursion into preserved fields, since none of these
+    markers nests another.
     """
     dropped = {
         '__harness_external_media__',
@@ -270,9 +272,16 @@ async def _restore_as_pre_escaping_reader(node: dict[str, object], store: MediaS
     }
     uri_value = node['__harness_external_uri__']
     assert isinstance(uri_value, str)
-    raw = await store.get(uri_value)
+    is_text = node.get('__harness_external_text__') is True
+    if is_text:
+        context = MediaContext(media_type='text/plain')
+    else:
+        media_type = node.get('media_type')
+        assert media_type is None or isinstance(media_type, str)
+        context = MediaContext(media_type=media_type)
+    raw = await store.get(uri_value, context=context)
     restored = {key: value for key, value in node.items() if key not in dropped}
-    if node.get('__harness_external_text__') is True:
+    if is_text:
         restored['content'] = raw.decode('utf-8', errors='surrogatepass')
     else:
         restored['data'] = base64.b64encode(raw).decode('ascii')
@@ -692,6 +701,7 @@ class TestExternalizeRestoreWalker:
         b64_payload = base64.b64encode(b'\x04' * 70_000).decode('ascii')
         node: dict[str, object] = {
             'kind': 'binary',
+            'media_type': 'image/png',
             'data': b64_payload,
             '__harness_external_uri__': 'caller-uri',
         }
