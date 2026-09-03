@@ -260,8 +260,6 @@ async def _restore_as_pre_escaping_reader(node: dict[str, object], store: MediaS
     recursion into preserved fields is left out because the markers under test
     carry no nested marker.
     """
-    import base64
-
     dropped = {'__harness_external_media__', '__harness_external_text__'}
     if '__harness_external_uri__' in node:
         uri_value = node['__harness_external_uri__']
@@ -561,8 +559,6 @@ class TestExternalizeRestoreWalker:
 
     async def test_namespaced_marker_fields_round_trip(self, tmp_path: Path) -> None:
         """Caller-owned marker metadata is escaped before the marker writes its values."""
-        import base64
-
         store = DiskMediaStore(tmp_path)
         node = {
             'kind': 'binary',
@@ -646,8 +642,6 @@ class TestExternalizeRestoreWalker:
         stash's shape and a version stamp from the format's own namespace
         together; short of both, it leaves them alone.
         """
-        import base64
-
         store = DiskMediaStore(tmp_path)
         payload = b'\x03' * 16
         uri = await store.put(payload)
@@ -694,8 +688,6 @@ class TestExternalizeRestoreWalker:
         intact, the caller's escaped value still sitting in the stash rather
         than back under its own key.
         """
-        import base64
-
         store = DiskMediaStore(tmp_path)
         b64_payload = base64.b64encode(b'\x04' * 70_000).decode('ascii')
         node: dict[str, object] = {
