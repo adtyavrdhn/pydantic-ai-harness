@@ -31,7 +31,7 @@ print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-Every run needs a sandbox attached: `LocalSandbox(root=...)` works on the checkout itself, and a container- or VM-backed sandbox runs the same agent somewhere isolated. Interfaces that start runs for you, including CLI and web surfaces, cannot attach one yet.
+Every run needs a sandbox attached: `LocalSandbox(root=...)` works on the checkout itself, and a container- or VM-backed sandbox runs the same agent somewhere isolated. Interfaces that start runs for you accept `sandbox=` too, so pass it to `agent.to_cli_sync(sandbox=...)` or `agent.to_web(sandbox=...)` the same way you pass it to `run()`.
 
 ## What's inside
 

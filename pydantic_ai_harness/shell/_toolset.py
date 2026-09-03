@@ -388,8 +388,8 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         exit_code_path = f'/tmp/harness_{command_id}_ec'
         inner = f'sh -c {shlex.quote(command)}; __harness_ec=$?; echo $__harness_ec > {exit_code_path}'
         # `setsid` + output files + `kill` through `run()` is the one background path that
-        # works on every provider: `SandboxProcess.kill()` is unavailable on some, and the
-        # protocol handle cannot report output-so-far.
+        # works on every provider: the protocol has no background-process API, and Modal has
+        # no per-process kill operation or output-so-far handle.
         wrapped = f'setsid sh -c {shlex.quote(inner)} < /dev/null > {stdout_path} 2> {stderr_path} & echo $!'
         result = await ctx.sandbox.run(
             wrapped,

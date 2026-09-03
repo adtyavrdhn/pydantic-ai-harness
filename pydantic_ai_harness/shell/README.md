@@ -111,10 +111,10 @@ names from it by glob before it is handed to the sandbox.
 
 `denied_env_patterns` requires an explicit `env` mapping and filters that mapping
 only; it cannot remove a variable the sandbox itself provides.
-`LocalSandbox` runs commands on the agent process's own machine, so local
-secrets reach them whatever you pass; a container- or VM-backed sandbox starts
-from its own image instead. If a command must not see a credential, that is a
-choice of sandbox, not of `env`.
+`LocalSandbox` runs commands on the agent process's own machine, but passes only
+its fixed `PATH`, `HOME`, `LANG`, and `TMPDIR` variables plus the explicit `env`.
+It is not an isolation boundary: commands can still access other host files.
+A container- or VM-backed sandbox starts from its own image instead.
 
 ```python
 import os

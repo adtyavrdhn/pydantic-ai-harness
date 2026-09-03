@@ -82,10 +82,9 @@ class Shell(AbstractCapability[AgentDepsT]):
     env: Mapping[str, str] | None = None
     """Explicit environment for commands.
 
-    When `None` (default) commands see the sandbox's own environment. Set this
-    to a fixed mapping to start commands with exactly these variables. The agent
-    process's environment is not selected by this capability; the sandbox backend
-    decides what environment commands receive.
+    Passes these variables explicitly to the sandbox. With `LocalSandbox`, they
+    are added to its fixed `PATH`, `HOME`, `LANG`, and `TMPDIR` environment. This
+    is not a security boundary: use OS-level isolation for untrusted commands.
     """
 
     denied_env_patterns: Sequence[str] = field(default_factory=list[str])
