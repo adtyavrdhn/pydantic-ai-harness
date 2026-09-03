@@ -29,13 +29,16 @@ print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-Every run needs a sandbox attached: `LocalSandbox('.')` works on the checkout itself, and a [`ModalSandbox`](modal-sandbox.md) capability supplies a remote one. Interfaces that start runs for you, such as [`agent.to_cli_sync()`](https://pydantic.dev/docs/ai/cli/) and [`agent.to_web()`](https://pydantic.dev/docs/ai/web/), cannot attach one yet.
+Every run needs a sandbox attached: `LocalSandbox('.')` works on the checkout itself, and a [`ModalSandbox`](modal-sandbox.md) capability supplies a remote one. Interfaces that start runs for you accept `sandbox=` too, so pass it to [`agent.to_cli_sync(sandbox=...)`](https://pydantic.dev/docs/ai/cli/) or [`agent.to_web(sandbox=...)`](https://pydantic.dev/docs/ai/web/) the same way you pass it to `run()`.
 
 Or skip the file entirely and run the exported [`coder_agent`](#api-reference) with [`clai`](https://pydantic.dev/docs/ai/cli/#custom-agents) (the Pydantic AI CLI), via [`uvx`](https://docs.astral.sh/uv/guides/tools/):
 
 ```bash
 uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
 ```
+
+The `clai` command does not currently expose a `sandbox` option; use
+`agent.to_cli_sync(sandbox=...)` when the CLI-launched run needs one.
 
 ## What's inside
 
