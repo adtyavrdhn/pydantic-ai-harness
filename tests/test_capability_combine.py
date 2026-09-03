@@ -90,6 +90,19 @@ class Anonymous:
 
 
 @dataclass
+class Rejected:
+    """No default `id`, and two never coexist because something else rejects them.
+
+    Distinct from `Collides`, which is about tool names. A durability capability is refused by the
+    engine's own `from_agent` lookup, which runs before an `id` would matter -- so the reason it
+    cannot repeat has nothing to do with this table's subject, and saying "tool names" would be
+    wrong.
+    """
+
+    reason: str
+
+
+@dataclass
 class Collides:
     """No default `id`, and two of them never coexist: their toolsets register the same tool names.
 
@@ -120,7 +133,7 @@ class Combines:
     check: Callable[[Any], None]
 
 
-Policy = Anonymous | Collides | Combines
+Policy = Anonymous | Collides | Combines | Rejected
 
 
 def _check_memory(merged: Any) -> None:
@@ -240,6 +253,10 @@ COMBINE_POLICY: dict[str, Policy] = {
     'TieredCompaction': Anonymous('drives other strategies; one per tier list'),
     'WarnNearLimits': Anonymous('a passive observer; several thresholds compose'),
     'WarnOnCacheBusts': Anonymous('a passive observer; several thresholds compose'),
+    'AWSLambdaDurability': Rejected(
+        'a durability engine is one per agent; `from_agent` rejects a second when the engine looks '
+        'itself up, before any id is consulted'
+    ),
     # -- No default `id`, but two never coexist anyway: their tool names collide. --
     'FileSystem': Collides(
         'its toolset registers `read_file` and friends under fixed names',
@@ -306,7 +323,12 @@ def _shipped_capability_types() -> tuple[dict[str, type[AbstractCapability[Any]]
         for module_info in pkgutil.walk_packages(pydantic_ai_harness.__path__, f'{pydantic_ai_harness.__name__}.'):
             try:
                 module = importlib.import_module(module_info.name)
-            except Exception:
+            except ModuleNotFoundError:
+                # An optional group that is not installed, which is the only import failure this
+                # test may ignore -- the capability could not have been used either. Anything else
+                # (a broken module, a bad constant) has to surface: swallowing it drops the
+                # capability from `found`, and the exhaustiveness check below then passes because
+                # the capability it should have caught is invisible rather than absent.
                 skipped.append(module_info.name)
                 continue
             for obj in vars(module).values():
@@ -346,7 +368,7 @@ def test_capability_combine_policy_holds(name: str) -> None:
         pytest.skip(f'{name} needs an optional dependency group that is not installed')
     capability_type = shipped[name]
 
-    if isinstance(policy, (Anonymous, Collides)):
+    if isinstance(policy, (Anonymous, Collides, Rejected)):
         # `declares_default_id` is the function the resolver itself uses, so this asks the same
         # question rather than a lookalike: a default `id` written in the class body, and nothing
         # else, is what makes two of a capability merge.
