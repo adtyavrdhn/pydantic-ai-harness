@@ -173,7 +173,7 @@ def test_callback_replacement_events_serialize() -> None:
                 'priced': True,
                 'budgets': [],
                 'event_kind': 'capability',
-                'kind': 'spend.recorded',
+                'kind': 'spend_limits.recorded',
             },
             {
                 'used_tokens': 25,
@@ -181,7 +181,7 @@ def test_callback_replacement_events_serialize() -> None:
                 'resolved': True,
                 'fraction': 0.25,
                 'event_kind': 'capability',
-                'kind': 'context_usage.measured',
+                'kind': 'report_context_usage.measured',
             },
             {'text': 'focus', 'event_kind': 'capability', 'kind': 'system_reminders.fired'},
             {
@@ -193,7 +193,7 @@ def test_callback_replacement_events_serialize() -> None:
                     'depends_on': [],
                 },
                 'event_kind': 'capability',
-                'kind': 'plan.created',
+                'kind': 'planning.created',
             },
         ]
     )

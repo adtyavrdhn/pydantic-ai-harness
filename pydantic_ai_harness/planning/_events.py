@@ -17,11 +17,11 @@ from pydantic_ai import CapabilityEvent
 from pydantic_ai_harness._warn import HarnessDeprecationWarning
 from pydantic_ai_harness.planning._types import PlanItem
 
-PLAN_EVENTS = 'plan'
+PLANNING_EVENTS = 'planning'
 
 
 @dataclass(kw_only=True)
-class PlanCreatedEvent(CapabilityEvent, namespace=PLAN_EVENTS, name='created'):
+class PlanCreatedEvent(CapabilityEvent, namespace=PLANNING_EVENTS, name='created'):
     """A plan step was created through a planning tool."""
 
     item: PlanItem
@@ -29,7 +29,7 @@ class PlanCreatedEvent(CapabilityEvent, namespace=PLAN_EVENTS, name='created'):
 
 
 @dataclass(kw_only=True)
-class PlanUpdatedEvent(CapabilityEvent, namespace=PLAN_EVENTS, name='updated'):
+class PlanUpdatedEvent(CapabilityEvent, namespace=PLANNING_EVENTS, name='updated'):
     """A plan step was updated through a planning tool."""
 
     item: PlanItem
@@ -37,7 +37,7 @@ class PlanUpdatedEvent(CapabilityEvent, namespace=PLAN_EVENTS, name='updated'):
 
 
 @dataclass(kw_only=True)
-class PlanStatusChangedEvent(CapabilityEvent, namespace=PLAN_EVENTS, name='status_changed'):
+class PlanStatusChangedEvent(CapabilityEvent, namespace=PLANNING_EVENTS, name='status_changed'):
     """A plan step changed status through a planning tool."""
 
     item: PlanItem
@@ -45,7 +45,7 @@ class PlanStatusChangedEvent(CapabilityEvent, namespace=PLAN_EVENTS, name='statu
 
 
 @dataclass(kw_only=True)
-class PlanCompletedEvent(CapabilityEvent, namespace=PLAN_EVENTS, name='completed'):
+class PlanCompletedEvent(CapabilityEvent, namespace=PLANNING_EVENTS, name='completed'):
     """A plan step transitioned to `completed` through a planning tool."""
 
     item: PlanItem
@@ -53,7 +53,7 @@ class PlanCompletedEvent(CapabilityEvent, namespace=PLAN_EVENTS, name='completed
 
 
 @dataclass(kw_only=True)
-class PlanDeletedEvent(CapabilityEvent, namespace=PLAN_EVENTS, name='deleted'):
+class PlanDeletedEvent(CapabilityEvent, namespace=PLANNING_EVENTS, name='deleted'):
     """A plan step was deleted through a planning tool."""
 
     item: PlanItem

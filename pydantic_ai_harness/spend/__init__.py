@@ -2,7 +2,7 @@
 
 from pydantic_ai_harness.spend._budget import Budget, BudgetSpec, Window
 from pydantic_ai_harness.spend._capability import PriceFunc, SpendCallback, SpendLimits
-from pydantic_ai_harness.spend._events import SPEND_EVENTS, SpendBudgetStatus, SpendRecordedEvent
+from pydantic_ai_harness.spend._events import SPEND_LIMITS_EVENTS, SpendBudgetStatus, SpendRecordedEvent
 from pydantic_ai_harness.spend._exceptions import (
     SpendCompositionWarning,
     SpendLimitExceeded,
@@ -32,7 +32,7 @@ __all__ = [
     'SpendSnapshot',
     'SpendStore',
     'Spent',
-    'SPEND_EVENTS',
+    'SPEND_LIMITS_EVENTS',
     'UnpricedModelError',
     'UnpricedModelWarning',
     'Window',

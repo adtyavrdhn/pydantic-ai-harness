@@ -2,7 +2,7 @@
 
 from pydantic_ai_harness.planning._capability import Planning
 from pydantic_ai_harness.planning._events import (
-    PLAN_EVENTS,
+    PLANNING_EVENTS,
     EventCallback,
     PlanCompletedEvent,
     PlanCreatedEvent,
@@ -22,7 +22,7 @@ from pydantic_ai_harness.planning._types import PlanItem, PlanStatusUpdate, Task
 __all__ = [
     'EventCallback',
     'InMemoryPlanStore',
-    'PLAN_EVENTS',
+    'PLANNING_EVENTS',
     'PlanCompletedEvent',
     'PlanCreatedEvent',
     'PlanDeletedEvent',

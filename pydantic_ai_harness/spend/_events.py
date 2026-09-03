@@ -6,7 +6,7 @@ from decimal import Decimal
 from pydantic_ai import CapabilityEvent
 from pydantic_ai.usage import RequestUsage
 
-SPEND_EVENTS = 'spend'
+SPEND_LIMITS_EVENTS = 'spend_limits'
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -29,7 +29,7 @@ class SpendBudgetStatus:
 
 
 @dataclass(kw_only=True)
-class SpendRecordedEvent(CapabilityEvent, namespace=SPEND_EVENTS, name='recorded'):
+class SpendRecordedEvent(CapabilityEvent, namespace=SPEND_LIMITS_EVENTS, name='recorded'):
     """A model response was recorded against the configured spend windows."""
 
     model: str | None
