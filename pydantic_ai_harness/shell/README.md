@@ -137,9 +137,9 @@ its prefixes are coarse, so `GOOGLE_*` also strips non-credential vars like
 patterns.
 
 How `env` combines with what the sandbox already provides is the sandbox backend's
-decision: `LocalSandbox` layers yours on top of the agent process's, others may
-replace it outright. Supply `PATH` and `HOME` yourself when a command needs
-them.
+decision: `LocalSandbox` adds yours to its own fixed `PATH`, `HOME`, `LANG` and
+`TMPDIR`, others may replace it outright. Supply what a command needs rather
+than assuming the agent process's environment reaches it.
 
 ## Background processes
 

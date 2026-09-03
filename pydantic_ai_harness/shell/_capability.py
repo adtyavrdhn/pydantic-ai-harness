@@ -37,9 +37,10 @@ LLM_API_KEY_ENV_PATTERNS: tuple[str, ...] = (
 """Glob patterns for common LLM provider credentials, for `denied_env_patterns`.
 
 Pass these to keep provider credentials in an explicit `env` out of commands.
-Covers provider prefixes only -- not other secrets, and the prefixes are coarse
-(`GOOGLE_*` also strips `GOOGLE_APPLICATION_CREDENTIALS`), so treat it as a
-starting point.
+With `LocalSandbox`, commands also receive its fixed `PATH`, `HOME`, `LANG` and
+`TMPDIR`. This is not an isolation boundary. Covers provider prefixes only --
+not other secrets, and the prefixes are coarse (`GOOGLE_*` also strips
+`GOOGLE_APPLICATION_CREDENTIALS`), so treat it as a starting point.
 """
 
 
