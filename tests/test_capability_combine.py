@@ -394,31 +394,62 @@ async def test_two_of_a_colliding_capability_still_raise(name: str, anyio_backen
     ('field_name', 'first_kwargs', 'second_kwargs'),
     [
         pytest.param(
-            'shared_capabilities',
-            {'shared_capabilities': [Thinking(effort='high')]},
-            {},
-            id='shared_capabilities',
+            'shared_capabilities', {'shared_capabilities': [Thinking(effort='high')]}, {}, id='shared_capabilities'
         ),
         pytest.param('inherit_tools', {'inherit_tools': True}, {'inherit_tools': False}, id='inherit_tools'),
         pytest.param('tool_name', {'tool_name': 'delegate_task'}, {'tool_name': 'ask_specialist'}, id='tool_name'),
+        pytest.param('forward_usage', {'forward_usage': False}, {'forward_usage': True}, id='forward_usage'),
+        pytest.param('tool_retries', {'tool_retries': 5}, {'tool_retries': 2}, id='tool_retries'),
+        pytest.param('contain_errors', {'contain_errors': True}, {'contain_errors': False}, id='contain_errors'),
+        # `None` disables disk loading entirely. The generic merge reads `None` as "not stated" and
+        # would take the other value, re-enabling it in *either* order -- so an explicit disable
+        # never survived. Composing only the roster is what makes that impossible.
+        pytest.param('agent_folders', {'agent_folders': None}, {'agent_folders': 'agents'}, id='agent_folders'),
     ],
 )
-def test_sub_agents_refuse_to_merge_a_policy_that_would_reach_the_other_roster(
+def test_sub_agents_compose_the_roster_and_nothing_else(
     field_name: str, first_kwargs: dict[str, Any], second_kwargs: dict[str, Any]
 ) -> None:
-    """Rosters merge; the policies that govern them do not.
+    """Only `agents` and `models` merge; every other field has to already agree.
 
-    Each of these decides what the *other* harness's delegates can do -- what capabilities they are
-    handed, whether they see the parent's tools, and what the delegate tool is called. Unioning
-    `shared_capabilities` would give one harness's sub-agents the reach the other's were granted,
-    which is a privilege change nobody wrote down; taking the later `tool_name` would retire a tool
-    a harness's own instructions tell the model to call.
+    `SubAgents` has fifteen public fields and all but those two say *how* the delegates run rather
+    than who they are, so merging one applies one harness's policy to the other's sub-agents. An
+    allow-list is what keeps that true for fields added later: they are refused until someone
+    decides, rather than merged by a default nobody chose.
     """
     first = SubAgents[Any](agents=[SubAgent(_child('alpha'), description='alpha')], **first_kwargs)
     second = SubAgents[Any](agents=[SubAgent(_child('beta'), description='beta')], **second_kwargs)
 
     with pytest.raises(UserError, match=f'disagree on {field_name!r}'):
         SubAgents.combine([first, second])
+
+
+def test_merging_reuses_the_delegates_already_loaded_from_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A merge must not re-read `agent_folders`, because it reads them relative to the *cwd*.
+
+    Both inputs resolved their disk delegates when they were constructed. Re-running
+    `__post_init__` to rebuild the roster would load them again from wherever the process happens
+    to be standing now -- so a merge after a `chdir` could hand the run a different set of
+    delegates than either capability was built with, and re-invoke `tool_resolver` besides.
+    """
+    project = tmp_path / 'project'
+    folder = project / '.agents' / 'agents'  # `<root>/.agents/<agent_folders>/`
+    folder.mkdir(parents=True)
+    (folder / 'helper.md').write_text('---\nname: helper\ndescription: helps\n---\n\nBe helpful.\n', encoding='utf-8')
+    monkeypatch.chdir(project)
+
+    first = SubAgents[Any](agents=[SubAgent(_child('alpha'), description='alpha')])
+    second = SubAgents[Any](agents=[SubAgent(_child('beta'), description='beta')])
+    assert 'helper' in first._by_name, 'the disk delegate is picked up at construction'  # pyright: ignore[reportPrivateUsage]
+
+    # The folder is gone by the time the two are combined, which is what a `chdir` amounts to.
+    monkeypatch.chdir(tmp_path)
+
+    merged = SubAgents.combine([first, second])
+    assert isinstance(merged, SubAgents)
+    assert set(merged._by_name) == {'alpha', 'beta', 'helper'}, (  # pyright: ignore[reportPrivateUsage]
+        'the disk delegate survives the merge because it is reused, not reloaded'
+    )
 
 
 def _child(name: str) -> Agent[Any, str]:
