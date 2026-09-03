@@ -106,6 +106,39 @@ StackOne(account_id='your-linked-account-id', defer_loading=True)
 Two capabilities on the *same* account share that id and are rejected at agent construction, which is what you want:
 one linked account is one connection. Pass an explicit `id=` if you need to override the derived one.
 
+### Two accounts on one agent
+
+Distinct ids keep the two capabilities apart, but they do not rename their tools. StackOne's server
+names the tools after the connector and action (`bamboohr_list_employees`), so two accounts on the
+same provider list the same names and the run fails on the tool name rather than the id:
+
+```
+UserError: StackOneToolset 'stackone-crm-account' defines a tool whose name conflicts with
+existing tool from StackOneToolset: 'bamboohr_list_employees'
+```
+
+Namespace them with [`PrefixTools`](https://pydantic.dev/docs/ai/capabilities/overview/), which is
+what it is for:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.capabilities import PrefixTools
+
+from pydantic_ai_harness import StackOne
+
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    capabilities=[
+        PrefixTools(StackOne(account_id='hr-account'), prefix='hr'),
+        PrefixTools(StackOne(account_id='crm-account'), prefix='crm'),
+    ],
+)
+```
+
+The model sees `hr_bamboohr_list_employees` and `crm_bamboohr_list_employees`, and each routes to
+its own linked account. Two accounts on *different* providers list different tool names already, so
+they need no prefix.
+
 ### Bound large tool results
 
 Provider actions can return large exports. Combine StackOne with the [Tool Output Limits](tool-output-limits.md)
