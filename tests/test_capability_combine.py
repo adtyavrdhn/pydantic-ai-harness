@@ -323,18 +323,58 @@ def _shipped_capability_types() -> tuple[dict[str, type[AbstractCapability[Any]]
         for module_info in pkgutil.walk_packages(pydantic_ai_harness.__path__, f'{pydantic_ai_harness.__name__}.'):
             try:
                 module = importlib.import_module(module_info.name)
-            except ModuleNotFoundError:
+            except ImportError:
                 # An optional group that is not installed, which is the only import failure this
-                # test may ignore -- the capability could not have been used either. Anything else
-                # (a broken module, a bad constant) has to surface: swallowing it drops the
-                # capability from `found`, and the exhaustiveness check below then passes because
-                # the capability it should have caught is invisible rather than absent.
+                # test may ignore -- the capability could not have been used either. `ImportError`
+                # rather than `ModuleNotFoundError`, because a module that guards its optional
+                # dependency re-raises install guidance as a plain `ImportError`.
+                #
+                # Anything else (a broken module, a bad constant) has to surface: swallowing it
+                # drops the capability from `found`, and the exhaustiveness check below then passes
+                # because the capability it should have caught is invisible rather than absent.
+                # That is not hypothetical -- it is how `AWSLambdaDurability` shipped without a
+                # policy entry while this test was green locally.
                 skipped.append(module_info.name)
                 continue
             for obj in vars(module).values():
                 if _is_capability_class(obj) and obj.__module__.startswith(pydantic_ai_harness.__name__):
                     found[obj.__name__] = obj
     return found, skipped
+
+
+def test_the_capability_walk_hides_a_missing_extra_and_nothing_else(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The walk may ignore an uninstalled optional group, and must not ignore anything else.
+
+    Both halves have been wrong. Catching every exception let `AWSLambdaDurability` vanish from the
+    discovered set, so the exhaustiveness check passed against a set that could not contain the
+    capability it existed to catch. Catching only `ModuleNotFoundError` then broke every slim lane,
+    because a module guarding its optional dependency re-raises install guidance as a plain
+    `ImportError`. `ImportError` covers both, and stops there.
+    """
+    real_import = importlib.import_module
+
+    def raise_for(target: str, exc: Exception) -> Callable[..., Any]:
+        def fake(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == target:
+                raise exc
+            return real_import(name, *args, **kwargs)
+
+        return fake
+
+    # Any module the walk visits will do; the class it defines is re-exported elsewhere, so what
+    # is under test is that the *import failure* is recorded as skipped rather than propagated.
+    a_capability_module = 'pydantic_ai_harness.subagents._capability'
+
+    # A missing optional group is skipped, whichever shape it arrives in.
+    for exc in (ModuleNotFoundError('no module'), ImportError('Please install the `x` package')):
+        monkeypatch.setattr(importlib, 'import_module', raise_for(a_capability_module, exc))
+        _, skipped = _shipped_capability_types()
+        assert a_capability_module in skipped, f'{type(exc).__name__} should be treated as a missing extra'
+
+    # Anything else is a real failure and has to surface rather than shrink the set.
+    monkeypatch.setattr(importlib, 'import_module', raise_for(a_capability_module, ValueError('bad constant')))
+    with pytest.raises(ValueError, match='bad constant'):
+        _shipped_capability_types()
 
 
 def test_every_capability_declares_a_combine_policy() -> None:
