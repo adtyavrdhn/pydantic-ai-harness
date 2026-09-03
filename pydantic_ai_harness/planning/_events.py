@@ -112,7 +112,11 @@ class PlanEventEmitter:
 
     def __init__(self) -> None:
         warnings.warn(
-            '`PlanEventEmitter` is deprecated; subscribe to typed plan events with `@on_event` instead.',
+            '`PlanEventEmitter` is deprecated; subscribe with `@on_event` to the events `Planning` emits '
+            'instead -- `PlanCreatedEvent`, `PlanUpdatedEvent`, `PlanStatusChangedEvent`, '
+            '`PlanCompletedEvent` and `PlanDeletedEvent`, from `pydantic_ai_harness.planning`, one per '
+            '`on_*` method here. They are emitted from the planning tools, so a mutation your own code '
+            'makes on the store directly has no run context and reaches no listener.',
             HarnessDeprecationWarning,
             stacklevel=2,
         )

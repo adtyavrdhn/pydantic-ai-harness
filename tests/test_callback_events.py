@@ -119,10 +119,10 @@ async def test_plan_event_and_legacy_emitter() -> None:
     async def record(ctx: RunContext[Any], event: PlanCreatedEvent) -> None:
         events.append(event)
 
-    with pytest.warns(HarnessDeprecationWarning, match=r'PlanEventEmitter.*typed plan events.*on_event'):
+    with pytest.warns(HarnessDeprecationWarning, match=r'PlanEventEmitter.*on_event.*PlanCreatedEvent'):
         emitter = PlanEventEmitter()
     emitter.on_created(legacy.append)
-    with pytest.warns(HarnessDeprecationWarning, match=r'event_emitter.*typed plan events.*on_event'):
+    with pytest.warns(HarnessDeprecationWarning, match=r'event_emitter.*on_event.*PlanCreatedEvent'):
         store = InMemoryPlanStore(event_emitter=emitter)
 
     await Agent(FunctionModel(stream_function=_add_then_text), capabilities=[Planning(store=store), hooks]).run('go')

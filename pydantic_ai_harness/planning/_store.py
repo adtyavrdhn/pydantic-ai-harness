@@ -30,7 +30,11 @@ def warn_event_emitter(event_emitter: PlanEventEmitter | None) -> None:
     """Warn when a store is configured with the deprecated emitter delivery path."""
     if event_emitter is not None:
         warnings.warn(
-            '`event_emitter` is deprecated; subscribe to typed plan events emitted by `Planning` with `@on_event` instead.',
+            '`event_emitter` is deprecated; subscribe with `@on_event` to the events `Planning` emits '
+            'instead -- `PlanCreatedEvent`, `PlanUpdatedEvent`, `PlanStatusChangedEvent`, '
+            '`PlanCompletedEvent` and `PlanDeletedEvent`, from `pydantic_ai_harness.planning`. They are '
+            'emitted from the planning tools rather than from the store, so a mutation your own code '
+            'makes on this store directly has no run context and reaches no listener.',
             HarnessDeprecationWarning,
             stacklevel=3,
         )
