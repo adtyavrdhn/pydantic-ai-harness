@@ -93,10 +93,12 @@ def _ctx(model: Any = None) -> Any:
         model: Model = dataclasses.field(default_factory=TestModel)
         deps: None = None
         tracer: Tracer = dataclasses.field(default_factory=NoOpTracer)
+        emitted: list[Any] = dataclasses.field(default_factory=list[Any])
 
         async def emit(self, event: Any) -> Any:
-            # Like the real `RunContext.emit` with no listeners: immediate dispatch
-            # returns the (unmutated) event for the emitter to inspect.
+            # Like the real `RunContext.emit` with no listeners: the event is recorded and
+            # returned unmutated, so an immediate-dispatch emitter can read its own decision.
+            self.emitted.append(event)
             return event
 
     return _FakeCtx(model=model) if model is not None else _FakeCtx()
