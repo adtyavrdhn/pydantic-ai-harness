@@ -97,6 +97,8 @@ def _ctx(model: Any = None) -> Any:
         emitted: list[Any] = dataclasses.field(default_factory=list[Any])
 
         async def emit(self, event: Any) -> Any:
+            # Like the real `RunContext.emit` with no listeners: the event is recorded and
+            # returned unmutated, so an immediate-dispatch emitter can read its own decision.
             self.emitted.append(event)
             return event
 
