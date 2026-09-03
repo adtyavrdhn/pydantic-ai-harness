@@ -309,6 +309,25 @@ def _is_capability_class(obj: object) -> TypeGuard[type[AbstractCapability[Any]]
         return False
 
 
+def _caused_by_missing_dependency(exc: BaseException) -> bool:
+    """Whether `exc` is an uninstalled optional group rather than a broken capability.
+
+    Follows the chain rather than matching a type, because the same condition reaches this walk in
+    three shapes: `ModuleNotFoundError` from the import itself, a plain `ImportError` from a module
+    that re-raises install guidance, and a `UserError` a capability raises while constructing
+    something at import time. The last two are raised inside an `except ImportError` block, so the
+    original is on `__cause__` or `__context__` either way.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ImportError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _shipped_capability_types() -> tuple[dict[str, type[AbstractCapability[Any]]], list[str]]:
     """Every capability class in `pydantic_ai_harness`, public or not.
 
@@ -323,17 +342,14 @@ def _shipped_capability_types() -> tuple[dict[str, type[AbstractCapability[Any]]
         for module_info in pkgutil.walk_packages(pydantic_ai_harness.__path__, f'{pydantic_ai_harness.__name__}.'):
             try:
                 module = importlib.import_module(module_info.name)
-            except ImportError:
-                # An optional group that is not installed, which is the only import failure this
-                # test may ignore -- the capability could not have been used either. `ImportError`
-                # rather than `ModuleNotFoundError`, because a module that guards its optional
-                # dependency re-raises install guidance as a plain `ImportError`.
-                #
-                # Anything else (a broken module, a bad constant) has to surface: swallowing it
-                # drops the capability from `found`, and the exhaustiveness check below then passes
-                # because the capability it should have caught is invisible rather than absent.
-                # That is not hypothetical -- it is how `AWSLambdaDurability` shipped without a
-                # policy entry while this test was green locally.
+            except Exception as exc:
+                if not _caused_by_missing_dependency(exc):
+                    # A real failure -- a broken module, a bad constant -- has to surface.
+                    # Swallowing it drops the capability from `found`, and the exhaustiveness check
+                    # below then passes because the capability it should have caught is invisible
+                    # rather than absent. That is not hypothetical: it is how `AWSLambdaDurability`
+                    # reached this branch with no policy entry while this test was green locally.
+                    raise
                 skipped.append(module_info.name)
                 continue
             for obj in vars(module).values():
@@ -365,8 +381,26 @@ def test_the_capability_walk_hides_a_missing_extra_and_nothing_else(monkeypatch:
     # is under test is that the *import failure* is recorded as skipped rather than propagated.
     a_capability_module = 'pydantic_ai_harness.subagents._capability'
 
-    # A missing optional group is skipped, whichever shape it arrives in.
-    for exc in (ModuleNotFoundError('no module'), ImportError('Please install the `x` package')):
+    def wrapped_in_user_error() -> Exception:
+        """What a capability raises when it builds something needing a missing extra at import.
+
+        Raised and caught rather than constructed, because `__context__` is attached by *raising*
+        inside an `except` block -- which is exactly the shape the walk has to recognise.
+        """
+        try:
+            try:
+                raise ImportError('No module named markdownify')
+            except ImportError:
+                raise UserError('WebFetch(local=True) requires the `web-fetch` optional group')
+        except UserError as user_error:
+            return user_error
+
+    # A missing optional group is skipped, in every shape it reaches the walk in.
+    for exc in (
+        ModuleNotFoundError('no module'),
+        ImportError('Please install the `x` package'),
+        wrapped_in_user_error(),
+    ):
         monkeypatch.setattr(importlib, 'import_module', raise_for(a_capability_module, exc))
         _, skipped = _shipped_capability_types()
         assert a_capability_module in skipped, f'{type(exc).__name__} should be treated as a missing extra'
