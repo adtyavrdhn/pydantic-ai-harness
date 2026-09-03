@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.agent import Agent, AgentRunResult, EventStreamHandler
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability, WrapRunHandler
+from pydantic_ai.capabilities._merge import merge_capability_fields  # pyright: ignore[reportPrivateUsage]
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -163,14 +164,16 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     tool_name: str = 'delegate_task'
     """Name of the delegate tool exposed to the model."""
 
-    _: KW_ONLY
-
-    id: str | None = 'sub_agents'
+    id: str | None = field(default='sub_agents', kw_only=True)
     """One-off: an agent exposes a single delegate tool, so the id is fixed.
 
     `tool_name` is one name, so two `SubAgents` capabilities register the same tool and collide.
     Declaring the id here is what makes two of them merge instead, unioning their rosters -- which
     is what lets a packaged harness that delegates compose with another that does the same.
+
+    Keyword-only on the field rather than through a `KW_ONLY` marker: a marker applies to every
+    field after it, which would take `tool_retries` and `contain_errors` off the positional
+    contract they already have.
     """
 
     tool_retries: int | None = 2
@@ -348,3 +351,21 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     def get_serialization_name(cls) -> str | None:
         """Not spec-serializable -- the capability holds live `Agent` instances."""
         return None
+
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """Merge the rosters, then rebuild what the delegate tool is actually built from.
+
+        The field-by-field default unions `agents` and `models`, but `_by_name` and `_menu` are
+        derived caches -- `compare=False`, built in `__post_init__` -- and nothing re-runs that.
+        Left alone they stay the *last* instance's, so `merged.agents` would list every sub-agent
+        while the delegate tool, its schema, and the instructions offered only the last harness's.
+        That is worse than not merging: the roster reads as composed and does not behave as it.
+
+        Re-running `__post_init__` also re-validates, so a pair the constructor would reject is
+        rejected here rather than assembled.
+        """
+        merged = merge_capability_fields(capabilities)
+        assert isinstance(merged, cls)
+        merged.__post_init__()
+        return merged

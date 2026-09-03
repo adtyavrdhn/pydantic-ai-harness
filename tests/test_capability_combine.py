@@ -416,3 +416,12 @@ async def test_coder_and_researcher_compose() -> None:
     # Neither harness loses a delegate: the rosters union under one `delegate_task` tool.
     sub_agents = next(leaf for leaf in leaves if isinstance(leaf, SubAgents))
     assert [entry.agent.name for entry in sub_agents.agents] == ['explorer', 'researcher']
+
+    # And what the model is told, not just what the field holds. `_by_name` is a `compare=False`
+    # cache built in `__post_init__`, so a merge that unions `agents` without rebuilding it leaves
+    # the roster reading as composed while the delegate tool offers only the last harness's agents.
+    instructions = sub_agents.get_instructions()
+    assert isinstance(instructions, str)
+    assert 'explorer' in instructions and 'researcher' in instructions, (
+        'the delegate tool is built from the derived roster, so merging has to rebuild it'
+    )
