@@ -1116,7 +1116,7 @@ class TestRuntimeToolsets:
         agent = build_agent(act)
         ctx = FakeDurableContext()
 
-        with pytest.raises(UserError, match=re.escape('cannot be passed to `run(toolsets=...)` at runtime')):
+        with pytest.raises(UserError, match=re.escape('cannot be added at runtime with AWS Lambda')):
             run_durable(lambda: agent.run('go', toolsets=[toolset]), context=ctx)
 
     def test_non_executing_runtime_toolsets_pass_through(self) -> None:
