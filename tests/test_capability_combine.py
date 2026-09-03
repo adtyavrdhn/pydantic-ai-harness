@@ -20,6 +20,12 @@ something the field-by-field default cannot express, such as a budget that shoul
 value. None of this package's capabilities needs one.
 
 The core half of this lives in `pydantic-ai`'s `tests/test_capability_combine.py`.
+
+Two of the names imported below are private to pydantic-ai, which is right: the duplicate-resolution
+pipeline is internal and no code in this package needs it. This file reaches in anyway rather than
+reimplementing the two questions the resolver asks -- a lookalike would drift from the real answer
+silently, which is the one thing the policy table exists to prevent. A rename surfaces in the
+harness-compat job, which is where a private-API dependency should surface.
 """
 
 from __future__ import annotations
@@ -40,9 +46,13 @@ from pydantic_ai import Agent
 from pydantic_ai.capabilities import CombinedCapability
 from pydantic_ai.capabilities.abstract import (
     AbstractCapability,
-    combine_duplicate_capabilities,
-    declares_default_id,
     leaf_capabilities,
+)
+from pydantic_ai.capabilities.abstract import (
+    _combine_duplicate_capabilities as combine_duplicate_capabilities,  # pyright: ignore[reportPrivateUsage]
+)
+from pydantic_ai.capabilities.abstract import (
+    _declares_default_id as declares_default_id,  # pyright: ignore[reportPrivateUsage]
 )
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.test import TestModel
@@ -395,7 +405,9 @@ async def test_coder_and_researcher_compose() -> None:
     assert counts['ToolOutputLimits'] == 2
     assert counts['SubAgents'] == 2
 
-    combined = combine_duplicate_capabilities(tree)
+    # One layer: both harnesses are on the same agent, which is what makes them merge rather
+    # than one replacing the other.
+    combined = combine_duplicate_capabilities(tree, [tree.capabilities])
 
     leaves = leaf_capabilities(combined)
     merged_counts = Counter(type(leaf).__name__ for leaf in leaves)
