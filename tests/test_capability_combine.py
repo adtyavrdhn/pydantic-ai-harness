@@ -43,7 +43,7 @@ from typing import Any, TypeGuard
 
 import pytest
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import CombinedCapability
+from pydantic_ai.capabilities import CombinedCapability, Thinking
 from pydantic_ai.capabilities.abstract import (
     AbstractCapability,
     leaf_capabilities,
@@ -388,6 +388,41 @@ async def test_two_of_a_colliding_capability_still_raise(name: str, anyio_backen
     agent = Agent(TestModel(), capabilities=[first, second])
     with pytest.raises(UserError, match='conflicts with existing tool'):
         await agent.run('hello')
+
+
+@pytest.mark.parametrize(
+    ('field_name', 'first_kwargs', 'second_kwargs'),
+    [
+        pytest.param(
+            'shared_capabilities',
+            {'shared_capabilities': [Thinking(effort='high')]},
+            {},
+            id='shared_capabilities',
+        ),
+        pytest.param('inherit_tools', {'inherit_tools': True}, {'inherit_tools': False}, id='inherit_tools'),
+        pytest.param('tool_name', {'tool_name': 'delegate_task'}, {'tool_name': 'ask_specialist'}, id='tool_name'),
+    ],
+)
+def test_sub_agents_refuse_to_merge_a_policy_that_would_reach_the_other_roster(
+    field_name: str, first_kwargs: dict[str, Any], second_kwargs: dict[str, Any]
+) -> None:
+    """Rosters merge; the policies that govern them do not.
+
+    Each of these decides what the *other* harness's delegates can do -- what capabilities they are
+    handed, whether they see the parent's tools, and what the delegate tool is called. Unioning
+    `shared_capabilities` would give one harness's sub-agents the reach the other's were granted,
+    which is a privilege change nobody wrote down; taking the later `tool_name` would retire a tool
+    a harness's own instructions tell the model to call.
+    """
+    first = SubAgents[Any](agents=[SubAgent(_child('alpha'), description='alpha')], **first_kwargs)
+    second = SubAgents[Any](agents=[SubAgent(_child('beta'), description='beta')], **second_kwargs)
+
+    with pytest.raises(UserError, match=f'disagree on {field_name!r}'):
+        SubAgents.combine([first, second])
+
+
+def _child(name: str) -> Agent[Any, str]:
+    return Agent(TestModel(), name=name)
 
 
 @pytest.mark.skipif(

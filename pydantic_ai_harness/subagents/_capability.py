@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic_ai.agent import Agent, AgentRunResult, EventStreamHandler
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability, WrapRunHandler
 from pydantic_ai.capabilities._merge import merge_capability_fields  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -38,6 +39,14 @@ def _option_line(key: str, option: ModelOption) -> str:
     """One model-menu line for the prompt listing: the key, its model, its hint."""
     label = f'- {key} ({model_label(option.model)})'
     return f'{label}: {option.description}' if option.description else label
+
+
+_INCOMPATIBLE_TO_MERGE = {
+    'shared_capabilities': 'Merging would grant one roster the capabilities the other was given.',
+    'inherit_tools': "Merging would change whether the other harness's delegates see the parent's tools.",
+    'tool_name': 'Merging would retire one of the two delegate tools the model was told about.',
+}
+"""Fields whose merge would change what the *other* capability's delegates can do."""
 
 
 @dataclass
@@ -364,7 +373,34 @@ class SubAgents(AbstractCapability[AgentDepsT]):
 
         Re-running `__post_init__` also re-validates, so a pair the constructor would reject is
         rejected here rather than assembled.
+
+        Three fields are refused rather than merged, because merging them changes what the *other*
+        harness's delegates can do:
+
+        - `shared_capabilities` is granted to every delegate in the merged roster, so unioning it
+          hands one harness's delegates the capabilities the other's were given. A harness that
+          deliberately shares a `Shell` or a `FileSystem` with its own sub-agents would be
+          extending that reach to sub-agents it has never seen.
+        - `inherit_tools` is the same question for the parent's tools.
+        - `tool_name` is one name, so a merge silently retires the other -- and a harness whose
+          instructions name its delegate tool would be telling the model to call a tool that is no
+          longer registered.
+
+        Two harnesses that leave these at their defaults compose, which is the case this exists
+        for. Two that disagree are stating different policies, and the honest answer is to say so.
         """
+        first = capabilities[0]
+        assert isinstance(first, cls)
+        for other in capabilities[1:]:
+            assert isinstance(other, cls)
+            for name, why in _INCOMPATIBLE_TO_MERGE.items():
+                mine, theirs = getattr(first, name), getattr(other, name)
+                if mine != theirs:
+                    raise UserError(
+                        f'Capability id {first.id!r} is used by multiple SubAgents capabilities that disagree '
+                        f'on {name!r} ({mine!r} and {theirs!r}). {why} Give them distinct `id`s to keep both, '
+                        f'or make {name!r} agree so the rosters can merge.'
+                    )
         merged = merge_capability_fields(capabilities)
         assert isinstance(merged, cls)
         merged.__post_init__()
