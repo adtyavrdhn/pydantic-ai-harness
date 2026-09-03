@@ -253,22 +253,22 @@ async def _restore_as_pre_escaping_reader(node: dict[str, object], store: MediaS
     """Behavior of `_restore_external` at the merge-base commit, before the escaping format.
 
     That reader knows `_URI_KEY` and text markers: it takes the reference from
-    `_URI_KEY` (falling back to a plain `uri`), drops a `uri` only when it
-    mirrors the reference, re-inlines a text marker's payload as `content`, and
-    keeps every key it does not recognize, so a marker written by the escaping
-    format restores with the stash and the stamp still in the payload. Its
-    recursion into preserved fields is left out because the markers under test
-    carry no nested marker.
+    `_URI_KEY`, drops the `uri` mirror, re-inlines a text marker's payload as
+    `content`, and keeps every key it does not recognize, so a marker written by
+    the escaping format restores with the stash and the stamp still in the
+    payload. Three of its branches are left out because no marker under test
+    reaches them: the plain-`uri` fallback, since the writer always emits
+    `_URI_KEY`; the caller-owned `uri` that is not a mirror, since these source
+    nodes carry no `uri`; and the recursion into preserved fields, since none of
+    these markers nests another.
     """
-    dropped = {'__harness_external_media__', '__harness_external_text__'}
-    if '__harness_external_uri__' in node:
-        uri_value = node['__harness_external_uri__']
-        dropped.add('__harness_external_uri__')
-        if node.get('uri') == uri_value:
-            dropped.add('uri')
-    else:
-        uri_value = node.get('uri')
-        dropped.add('uri')
+    dropped = {
+        '__harness_external_media__',
+        '__harness_external_text__',
+        '__harness_external_uri__',
+        'uri',
+    }
+    uri_value = node['__harness_external_uri__']
     assert isinstance(uri_value, str)
     raw = await store.get(uri_value)
     restored = {key: value for key, value in node.items() if key not in dropped}
