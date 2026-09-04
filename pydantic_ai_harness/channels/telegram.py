@@ -400,10 +400,11 @@ def _is_integer_id(value: object) -> TypeGuard[int]:
 
 def _redact_log_argument(value: object, replacements: tuple[tuple[str, str], ...]) -> object:
     if isinstance(value, (str, httpx.URL)):
-        text = str(value)
+        original_text = str(value)
+        text = original_text
         for token_url_prefix, redacted_url_prefix in replacements:
             text = text.replace(token_url_prefix, redacted_url_prefix)
-        return text
+        return text if text != original_text else value
     return value
 
 

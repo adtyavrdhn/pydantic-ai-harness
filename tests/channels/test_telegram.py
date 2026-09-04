@@ -848,6 +848,14 @@ class TestTelegramChannel:
 
     async def test_uses_custom_api_url(self, caplog: pytest.LogCaptureFixture) -> None:
         requests: list[httpx.Request] = []
+        unrelated_log_arguments: list[object] = []
+
+        class ObserveUnrelatedUrl(logging.Filter):
+            def filter(self, record: logging.LogRecord) -> bool:
+                args = record.args
+                if isinstance(args, tuple) and len(args) > 1:  # pragma: no branch - the test emits positional args
+                    unrelated_log_arguments.append(args[1])
+                return True
 
         def handler(request: httpx.Request) -> httpx.Response:
             requests.append(request)
@@ -867,21 +875,26 @@ class TestTelegramChannel:
 
         await channel.reply(event, 'answer')
 
+        observer = ObserveUnrelatedUrl()
+        logging.getLogger('httpx').addFilter(observer)
         with caplog.at_level(logging.INFO, logger='httpx'):
             await channel.reply(event, 'second')
+            unrelated_url = httpx.URL('https://example.com/botinventory/items')
             logging.getLogger('httpx').info(
                 'HTTP Request: %s %s "%s %d %s"',
                 'GET',
-                httpx.URL('https://example.com/botinventory/items'),
+                unrelated_url,
                 'HTTP/1.1',
                 200,
                 'OK',
             )
+        logging.getLogger('httpx').removeFilter(observer)
 
         assert str(requests[0].url) == 'https://telegram.test/bot-decoy/root/botbot-secret/sendMessage'
         assert 'bot-secret' not in caplog.text
         assert '<redacted>' in caplog.text
         assert 'https://example.com/botinventory/items' in caplog.text
+        assert unrelated_log_arguments[-1] is unrelated_url
         await client.aclose()
 
     async def test_redacts_overlapping_active_bot_tokens(self, caplog: pytest.LogCaptureFixture) -> None:
