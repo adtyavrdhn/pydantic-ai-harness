@@ -51,11 +51,7 @@ if TYPE_CHECKING:
 
     # Not re-exported at the package root; typing-only, so the private path never runs.
     from daytona._async.process import AsyncProcess
-    from pydantic_ai.sandboxes import (
-        SandboxCommand,
-        SandboxFilesystem,
-        SupportsFilesystem,
-    )
+    from pydantic_ai.sandboxes import SandboxCommand, SupportsFilesystem
 
 __all__ = (
     'DaytonaSandboxAuthError',
@@ -216,81 +212,6 @@ async def _kill_quietly(process: _DaytonaProcess) -> None:
         pass
 
 
-class _DaytonaFilesystem:
-    """Daytona's filesystem API behind the sandbox filesystem protocol."""
-
-    def __init__(self, backend: DaytonaSandboxBackend) -> None:
-        self._backend = backend
-
-    @asynccontextmanager
-    async def _translated(self, path: str) -> AsyncGenerator[None]:
-        from daytona import DaytonaNotFoundError
-
-        try:
-            yield
-        except DaytonaNotFoundError as error:
-            raise FileNotFoundError(f'No such file or directory in the Daytona sandbox: {path!r}') from error
-        except Exception as error:
-            raise self._backend.operation_error(error, f'Could not access {path!r} in the sandbox') from error
-
-    async def read_bytes(self, path: str) -> bytes:
-        async with self._translated(path):
-            return await (await self._backend.sandbox).fs.download_file(path, _REQUEST_TIMEOUT)
-
-    async def write_bytes(self, path: str, data: bytes) -> None:
-        parent = posixpath.dirname(path)
-        async with self._translated(path):
-            if parent not in ('', '.', '/'):
-                mkdir = await (await self._backend.sandbox).process.exec(
-                    f'mkdir -p -- {shlex.quote(parent)}', timeout=_REQUEST_TIMEOUT
-                )
-                if mkdir.exit_code != 0:
-                    raise DaytonaSandboxError(mkdir.result or f'Could not create {parent!r}.')
-            await (await self._backend.sandbox).fs.upload_file(data, path, timeout=_REQUEST_TIMEOUT)
-
-    async def stat(self, path: str) -> FileEntry:
-        async with self._translated(path):
-            entry = await (await self._backend.sandbox).fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
-        return FileEntry(
-            name=posixpath.basename(path.rstrip('/')),
-            path=path,
-            is_dir=entry.is_dir,
-            size=None if entry.is_dir else entry.size,
-        )
-
-    async def list_dir(self, path: str) -> Sequence[FileEntry]:
-        async with self._translated(path):
-            entries = await (await self._backend.sandbox).fs.list_files(path, request_timeout=_REQUEST_TIMEOUT)
-        return [
-            FileEntry(
-                name=entry.name,
-                path=posixpath.join(path, entry.name),
-                is_dir=entry.is_dir,
-                size=None if entry.is_dir else entry.size,
-            )
-            for entry in entries
-        ]
-
-    async def make_dir(self, path: str) -> None:
-        async with self._translated(path):
-            await (await self._backend.sandbox).fs.create_folder(path, '755', request_timeout=_REQUEST_TIMEOUT)
-
-    async def remove(self, path: str) -> None:
-        async with self._translated(path):
-            await (await self._backend.sandbox).fs.delete_file(path, recursive=True, request_timeout=_REQUEST_TIMEOUT)
-
-    async def exists(self, path: str) -> bool:
-        from daytona import DaytonaNotFoundError
-
-        try:
-            await (await self._backend.sandbox).fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
-        except DaytonaNotFoundError:
-            return False
-        except Exception as error:
-            raise self._backend.operation_error(error, f'Could not access {path!r} in the sandbox') from error
-        return True
-
-
 def _require_daytona() -> ModuleType:
     """Import the optional `daytona` package, or explain how to install it."""
     try:
@@ -356,7 +277,6 @@ class DaytonaSandboxBackend(SandboxBackend):
         self._owned = False
         self._closed = False
         self._lock = anyio.Lock()
-        self.fs = _DaytonaFilesystem(self)
 
     @property
     def sandbox(self) -> Awaitable[AsyncSandbox]:
@@ -385,6 +305,74 @@ class DaytonaSandboxBackend(SandboxBackend):
     def ref(self) -> SandboxRef | None:
         """Identity of the sandbox, or `None` before one has been created."""
         return self._ref
+
+    @asynccontextmanager
+    async def _translated_filesystem_error(self, path: str) -> AsyncGenerator[None]:
+        from daytona import DaytonaNotFoundError
+
+        try:
+            yield
+        except DaytonaNotFoundError as error:
+            raise FileNotFoundError(f'No such file or directory in the Daytona sandbox: {path!r}') from error
+        except Exception as error:
+            raise self.operation_error(error, f'Could not access {path!r} in the sandbox') from error
+
+    async def read_bytes(self, path: str) -> bytes:
+        async with self._translated_filesystem_error(path):
+            return await (await self.sandbox).fs.download_file(path, _REQUEST_TIMEOUT)
+
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        parent = posixpath.dirname(path)
+        async with self._translated_filesystem_error(path):
+            if parent not in ('', '.', '/'):
+                mkdir = await (await self.sandbox).process.exec(
+                    f'mkdir -p -- {shlex.quote(parent)}', timeout=_REQUEST_TIMEOUT
+                )
+                if mkdir.exit_code != 0:
+                    raise DaytonaSandboxError(mkdir.result or f'Could not create {parent!r}.')
+            await (await self.sandbox).fs.upload_file(data, path, timeout=_REQUEST_TIMEOUT)
+
+    async def stat(self, path: str) -> FileEntry:
+        async with self._translated_filesystem_error(path):
+            entry = await (await self.sandbox).fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
+        return FileEntry(
+            name=posixpath.basename(path.rstrip('/')),
+            path=path,
+            is_dir=entry.is_dir,
+            size=None if entry.is_dir else entry.size,
+        )
+
+    async def list_dir(self, path: str) -> Sequence[FileEntry]:
+        async with self._translated_filesystem_error(path):
+            entries = await (await self.sandbox).fs.list_files(path, request_timeout=_REQUEST_TIMEOUT)
+        return [
+            FileEntry(
+                name=entry.name,
+                path=posixpath.join(path, entry.name),
+                is_dir=entry.is_dir,
+                size=None if entry.is_dir else entry.size,
+            )
+            for entry in entries
+        ]
+
+    async def make_dir(self, path: str) -> None:
+        async with self._translated_filesystem_error(path):
+            await (await self.sandbox).fs.create_folder(path, '755', request_timeout=_REQUEST_TIMEOUT)
+
+    async def remove(self, path: str) -> None:
+        async with self._translated_filesystem_error(path):
+            await (await self.sandbox).fs.delete_file(path, recursive=True, request_timeout=_REQUEST_TIMEOUT)
+
+    async def exists(self, path: str) -> bool:
+        from daytona import DaytonaNotFoundError
+
+        try:
+            await (await self.sandbox).fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
+        except DaytonaNotFoundError:
+            return False
+        except Exception as error:
+            raise self.operation_error(error, f'Could not access {path!r} in the sandbox') from error
+        return True
 
     async def _new_client(self) -> AsyncDaytona:
         client = _require_daytona().AsyncDaytona()
@@ -644,4 +632,3 @@ if TYPE_CHECKING:
     _backend = DaytonaSandboxBackend()
     _backend_conforms: SandboxBackend = _backend
     _filesystem_backend_conforms: SupportsFilesystem = _backend
-    _filesystem_conforms: SandboxFilesystem = _backend.fs

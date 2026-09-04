@@ -419,16 +419,16 @@ class TestErrorsAndFilesystem:
         sandbox = fake_daytona.sandboxes[0]
         sandbox.mkdir_exit_code = 1
         with pytest.raises(DaytonaSandboxError, match='Could not create') as exc:
-            await backend.fs.write_bytes('/pkg/a.py', b'x')
+            await backend.write_bytes('/pkg/a.py', b'x')
         assert isinstance(exc.value, SandboxError)
         sandbox.mkdir_exit_code = 0
         sandbox.fs_error = DaytonaAuthenticationError('denied')
         with pytest.raises(DaytonaSandboxAuthError):
-            await backend.fs.make_dir('/pkg')
+            await backend.make_dir('/pkg')
         with pytest.raises(DaytonaSandboxAuthError):
-            await backend.fs.exists('/pkg')
+            await backend.exists('/pkg')
 
     async def test_missing_path_uses_builtin_error(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         with pytest.raises(FileNotFoundError):
-            await backend.fs.stat('/missing')
+            await backend.stat('/missing')
