@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Generic, Protocol
+from weakref import WeakValueDictionary
 
 import anyio
 from pydantic_ai.agent import AbstractAgent
@@ -80,8 +81,8 @@ class ChannelHost(Generic[AgentDepsT]):
     ) -> None:
         self._agent = agent
         self._adapter = adapter
-        self._store = store or InMemoryConversationStore()
-        self._conversation_locks: dict[str, anyio.Lock] = {}
+        self._store = store if store is not None else InMemoryConversationStore()
+        self._conversation_locks: WeakValueDictionary[str, anyio.Lock] = WeakValueDictionary()
 
     async def handle(self, event: ChannelEvent, *, deps: AgentDepsT = None) -> AgentRunResult[str]:
         """Run the agent for `event`, reply, then commit the resulting message history.

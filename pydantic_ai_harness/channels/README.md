@@ -6,8 +6,7 @@ send the agent's response through the provider that delivered the message.
 
 [Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/channels/)
 
-> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it
-> does, we follow the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 ## Quick start
 
@@ -28,6 +27,7 @@ agent = Agent('openai:gpt-5.6-sol', output_type=str)
 slack = SlackChannel(
     signing_secret=os.environ['SLACK_SIGNING_SECRET'],
     bot_token=os.environ['SLACK_BOT_TOKEN'],
+    team_id=os.environ['SLACK_TEAM_ID'],
 )
 host = ChannelHost(agent, slack)
 send_events, receive_events = anyio.create_memory_object_stream[ChannelEvent](100)
@@ -55,8 +55,9 @@ verification, otherwise acknowledge the verified request immediately after enque
 ## Host contract
 
 Adapters normalize five values into `ChannelEvent`: `event_id`, `conversation_id`, `sender_id`,
-`text`, and optional `reply_to_id`. IDs are scoped to one adapter installation. Build a separate
-adapter for each provider installation or credential set.
+`text`, and optional `reply_to_id`. `SlackChannel` requires the workspace's `team_id` and rejects
+events for other installations before normalization. Build a separate adapter for each provider
+installation or credential set.
 
 The host loads the conversation's Pydantic AI messages, calls `AbstractAgent.run()`, sends the text
 result through `ChannelAdapter.reply()`, then saves `result.all_messages()`. Calls for one
@@ -70,7 +71,9 @@ same time.
 The host does not claim events, acknowledge provider delivery, or retry. Claim `event_id` in the
 caller-owned queue before calling `handle()`. Duplicate calls run duplicate agent turns. Agent,
 reply, and store errors propagate. The host replies before saving history: a reply failure leaves
-history unchanged, while a save failure can occur after the user has received the reply.
+history unchanged, while a save failure or cancellation can occur after the user has received the
+reply. A durable store should own its transaction and retry policy. Do not blindly retry the whole
+handler after an ambiguous delivery or save failure.
 
 ## Slack behavior
 

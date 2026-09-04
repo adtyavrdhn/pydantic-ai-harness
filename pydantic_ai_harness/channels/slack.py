@@ -61,18 +61,20 @@ class SlackChannel:
         *,
         signing_secret: str,
         bot_token: str,
+        team_id: str,
         client: httpx.AsyncClient | None = None,
-        api_url: str = _DEFAULT_API_URL,
     ) -> None:
         """Configure one Slack app installation without taking ownership of `client`."""
         if not signing_secret:
             raise ValueError('signing_secret must not be empty')
         if not bot_token:
             raise ValueError('bot_token must not be empty')
+        if not team_id:
+            raise ValueError('team_id must not be empty')
         self._signing_secret = signing_secret.encode()
         self._bot_token = bot_token
+        self._team_id = team_id
         self._client = client
-        self._api_url = api_url
 
     def parse_request(self, raw_body: bytes, headers: Mapping[str, str]) -> ChannelEvent | SlackUrlVerification | None:
         """Verify a raw Slack request and normalize supported message events.
@@ -84,9 +86,11 @@ class SlackChannel:
         payload = _json_object(raw_body)
         request_type = _string(payload, 'type')
         if request_type == 'url_verification':
-            return SlackUrlVerification(_required_string(payload, 'challenge'))
+            return SlackUrlVerification(_required_nonempty_string(payload, 'challenge'))
         if request_type != 'event_callback':
             return None
+        if _required_nonempty_string(payload, 'team_id') != self._team_id:
+            raise SlackError('Slack event does not belong to this workspace installation')
 
         event = _mapping(payload.get('event'))
         if event is None:
@@ -96,13 +100,17 @@ class SlackChannel:
         if 'bot_id' in event or 'subtype' in event:
             return None
 
-        timestamp = _required_string(event, 'ts')
+        timestamp = _required_nonempty_string(event, 'ts')
+        if 'thread_ts' in event:
+            thread_timestamp = _required_nonempty_string(event, 'thread_ts')
+        else:
+            thread_timestamp = timestamp
         return ChannelEvent(
-            event_id=_required_string(payload, 'event_id'),
-            conversation_id=_required_string(event, 'channel'),
-            sender_id=_required_string(event, 'user'),
+            event_id=_required_nonempty_string(payload, 'event_id'),
+            conversation_id=_required_nonempty_string(event, 'channel'),
+            sender_id=_required_nonempty_string(event, 'user'),
             text=_required_string(event, 'text'),
-            reply_to_id=_string(event, 'thread_ts') or timestamp,
+            reply_to_id=thread_timestamp,
         )
 
     async def reply(self, event: ChannelEvent, text: str) -> None:
@@ -127,7 +135,8 @@ class SlackChannel:
             timestamp = int(timestamp_text)
         except ValueError as exc:
             raise SlackSignatureError('Invalid Slack request timestamp') from exc
-        if abs(time.time() - timestamp) > _MAX_REQUEST_AGE_SECONDS:
+        now = int(time.time())
+        if timestamp < now - _MAX_REQUEST_AGE_SECONDS or timestamp > now + _MAX_REQUEST_AGE_SECONDS:
             raise SlackSignatureError('Slack request timestamp is outside the five-minute window')
 
         signed = b'v0:' + timestamp_text.encode() + b':' + raw_body
@@ -137,7 +146,7 @@ class SlackChannel:
 
     async def _post(self, client: httpx.AsyncClient, payload: Mapping[str, str]) -> None:
         response = await client.post(
-            self._api_url,
+            _DEFAULT_API_URL,
             headers={'Authorization': f'Bearer {self._bot_token}'},
             json=payload,
         )
@@ -174,4 +183,11 @@ def _required_string(mapping: Mapping[str, object], key: str) -> str:
     value = _string(mapping, key)
     if value is None:
         raise SlackError(f'Slack payload field {key!r} must be a string')
+    return value
+
+
+def _required_nonempty_string(mapping: Mapping[str, object], key: str) -> str:
+    value = _required_string(mapping, key)
+    if not value:
+        raise SlackError(f'Slack payload field {key!r} must not be empty')
     return value

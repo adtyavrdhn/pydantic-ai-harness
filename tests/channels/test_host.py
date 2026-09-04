@@ -54,6 +54,11 @@ class _RecordingStore:
         await self.delegate.save(conversation_id, messages)
 
 
+class _FalsyStore(_RecordingStore):
+    def __bool__(self) -> bool:
+        return False
+
+
 def _event(event_id: str, conversation_id: str = 'conversation') -> ChannelEvent:
     return ChannelEvent(
         event_id=event_id,
@@ -91,6 +96,16 @@ class TestChannelHost:
         assert len(left.all_messages()) == 2
         assert len(right.all_messages()) == 2
 
+    async def test_uses_a_falsy_conversation_store(self) -> None:
+        adapter = _RecordingAdapter()
+        store = _FalsyStore()
+        host = ChannelHost(Agent('test'), adapter, store=store)
+
+        await host.handle(_event('one'))
+
+        assert store.loads == ['conversation']
+        assert len(store.saves) == 1
+
     async def test_passes_per_event_dependencies(self) -> None:
         adapter = _RecordingAdapter()
         seen: list[str] = []
@@ -111,6 +126,8 @@ class TestChannelHost:
         maximum_by_conversation: dict[str, int] = {}
         total_active = 0
         maximum_total = 0
+        two_models_started = asyncio.Event()
+        release_models = asyncio.Event()
 
         async def model(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
             nonlocal total_active, maximum_total
@@ -122,7 +139,9 @@ class TestChannelHost:
             )
             total_active += 1
             maximum_total = max(maximum_total, total_active)
-            await anyio.sleep(0.05)
+            if total_active == 2:
+                two_models_started.set()
+            await release_models.wait()
             active_by_conversation[conversation_id] -= 1
             total_active -= 1
             return ModelResponse(parts=[TextPart('done')])
@@ -132,6 +151,10 @@ class TestChannelHost:
             group.start_soon(host.handle, _event('same-1', 'same'))
             group.start_soon(host.handle, _event('same-2', 'same'))
             group.start_soon(host.handle, _event('other', 'other'))
+            await two_models_started.wait()
+            assert maximum_by_conversation == {'same': 1, 'other': 1}
+            assert maximum_total == 2
+            release_models.set()
 
         assert maximum_by_conversation == {'same': 1, 'other': 1}
         assert maximum_total == 2
@@ -150,9 +173,12 @@ class TestChannelHost:
 
         with pytest.raises(RuntimeError, match='send failed'):
             await host.handle(_event('one'))
+        adapter.error = None
+        result = await host.handle(_event('two'))
 
-        assert calls == 1
-        assert store.saves == []
+        assert calls == 2
+        assert len(result.all_messages()) == 2
+        assert len(store.saves) == 1
 
     async def test_store_failure_happens_after_reply_and_is_not_retried(self) -> None:
         adapter = _RecordingAdapter()
@@ -161,9 +187,43 @@ class TestChannelHost:
 
         with pytest.raises(RuntimeError, match='save failed'):
             await host.handle(_event('one'))
+        store.save_error = None
+        result = await host.handle(_event('two'))
 
-        assert len(adapter.replies) == 1
-        assert len(store.saves) == 1
+        assert len(adapter.replies) == 2
+        assert [len(messages) for _, messages in store.saves] == [2, 2]
+        assert len(result.all_messages()) == 2
+
+    async def test_store_load_failure_stops_processing_and_releases_lock(self) -> None:
+        class FailingLoadStore(_RecordingStore):
+            load_error: Exception | None = RuntimeError('load failed')
+
+            async def load(self, conversation_id: str) -> Sequence[ModelMessage]:
+                self.loads.append(conversation_id)
+                if self.load_error is not None:
+                    raise self.load_error
+                return await self.delegate.load(conversation_id)
+
+        calls = 0
+
+        def model(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            calls += 1
+            return ModelResponse(parts=[TextPart('done')])
+
+        adapter = _RecordingAdapter()
+        store = FailingLoadStore()
+        host = ChannelHost(Agent(FunctionModel(model)), adapter, store=store)
+
+        with pytest.raises(RuntimeError, match='load failed'):
+            await host.handle(_event('one'))
+        assert calls == 0
+        assert adapter.replies == []
+        assert store.saves == []
+
+        store.load_error = None
+        result = await host.handle(_event('two'))
+        assert len(result.all_messages()) == 2
 
     async def test_duplicate_event_ids_are_caller_owned(self) -> None:
         adapter = _RecordingAdapter()
@@ -219,6 +279,124 @@ class TestChannelHost:
 
         assert len(adapter.replies) == 1
         assert len(store.saves) == 1
+
+    async def test_cancellation_while_waiting_for_lock_does_not_start_run(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def model(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                await release.wait()
+            return ModelResponse(parts=[TextPart('done')])
+
+        adapter = _RecordingAdapter()
+        store = _RecordingStore()
+        host = ChannelHost(Agent(FunctionModel(model)), adapter, store=store)
+        first = asyncio.create_task(host.handle(_event('first')))
+        await started.wait()
+        waiting = asyncio.create_task(host.handle(_event('cancelled')))
+        await asyncio.sleep(0)
+
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        release.set()
+        await first
+        await host.handle(_event('next'))
+
+        assert calls == 2
+        assert len(adapter.replies) == 2
+        assert len(store.saves) == 2
+
+    async def test_cancellation_during_load_stops_processing_and_releases_lock(self) -> None:
+        load_started = asyncio.Event()
+        release_load = asyncio.Event()
+
+        class BlockingLoadStore(_RecordingStore):
+            block = True
+
+            async def load(self, conversation_id: str) -> Sequence[ModelMessage]:
+                self.loads.append(conversation_id)
+                if self.block:
+                    load_started.set()
+                    await release_load.wait()
+                return await self.delegate.load(conversation_id)
+
+        adapter = _RecordingAdapter()
+        store = BlockingLoadStore()
+        host = ChannelHost(Agent('test'), adapter, store=store)
+        task = asyncio.create_task(host.handle(_event('cancelled')))
+        await load_started.wait()
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert adapter.replies == []
+        assert store.saves == []
+
+        store.block = False
+        result = await host.handle(_event('next'))
+        assert len(result.all_messages()) == 2
+
+    async def test_cancellation_during_reply_leaves_history_uncommitted_and_releases_lock(self) -> None:
+        reply_started = asyncio.Event()
+        release_reply = asyncio.Event()
+
+        class BlockingAdapter(_RecordingAdapter):
+            block = True
+
+            async def reply(self, event: ChannelEvent, text: str) -> None:
+                self.replies.append((event, text))
+                if self.block:
+                    reply_started.set()
+                    await release_reply.wait()
+
+        adapter = BlockingAdapter()
+        store = _RecordingStore()
+        host = ChannelHost(Agent('test'), adapter, store=store)
+        task = asyncio.create_task(host.handle(_event('cancelled')))
+        await reply_started.wait()
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(adapter.replies) == 1
+        assert store.saves == []
+
+        adapter.block = False
+        result = await host.handle(_event('next'))
+        assert len(result.all_messages()) == 2
+
+    async def test_cancellation_during_save_happens_after_reply_and_releases_lock(self) -> None:
+        save_started = asyncio.Event()
+        release_save = asyncio.Event()
+
+        class BlockingStore(_RecordingStore):
+            async def save(self, conversation_id: str, messages: Sequence[ModelMessage]) -> None:
+                self.saves.append((conversation_id, messages))
+                save_started.set()
+                await release_save.wait()
+                await self.delegate.save(conversation_id, messages)
+
+        adapter = _RecordingAdapter()
+        store = BlockingStore()
+        host = ChannelHost(Agent('test'), adapter, store=store)
+        task = asyncio.create_task(host.handle(_event('cancelled')))
+        await save_started.wait()
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release_save.set()
+        result = await host.handle(_event('next'))
+
+        assert len(adapter.replies) == 2
+        assert [len(messages) for _, messages in store.saves] == [2, 2]
+        assert len(result.all_messages()) == 2
 
 
 def test_conversation_store_protocol_is_runtime_structural() -> None:
