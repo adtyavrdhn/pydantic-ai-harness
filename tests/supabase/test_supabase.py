@@ -207,7 +207,7 @@ class TestSupabase:
 
         assert 'future_mutation' not in _tool_names(model)
 
-    async def test_one_agent_cannot_connect_two_projects(self, supabase_server: FastMCP):
+    async def test_projects_with_overlapping_tools_collide(self, supabase_server: FastMCP):
         agent = Agent(
             TestModel(call_tools=[]),
             capabilities=[Supabase(project_ref='dev-one'), Supabase(project_ref='dev-two')],
@@ -215,6 +215,26 @@ class TestSupabase:
 
         with pytest.raises(UserError, match='conflicts with existing tool'):
             await agent.run('Inspect both projects')
+
+    async def test_projects_with_disjoint_tools_coexist(self, supabase_server: FastMCP):
+        model = TestModel(call_tools=[])
+        agent = Agent(
+            model,
+            capabilities=[
+                Supabase(project_ref='dev-one', features=('docs',)),
+                Supabase(project_ref='dev-two', features=('database',)),
+            ],
+        )
+
+        await agent.run('Inspect both projects')
+
+        assert _tool_names(model) == {
+            'execute_sql',
+            'list_extensions',
+            'list_migrations',
+            'list_tables',
+            'search_docs',
+        }
 
     async def test_writes_require_approval(self, supabase_server: FastMCP, calls: list[str]):
         def call_sql(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
