@@ -10,6 +10,9 @@
 uv add "pydantic-ai-harness[linear]" "pydantic-ai-slim[openai]"
 ```
 
+The second package installs the OpenAI provider used by the example. For another model, install its matching provider
+extra instead.
+
 ## Set up credentials
 
 For bearer authentication, create a Linear API key under **Settings > Account > Security & Access > Personal API
