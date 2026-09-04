@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 
 import anyio
@@ -36,10 +37,11 @@ class _RecordingAdapter:
 
 
 class _RecordingStore:
-    def __init__(self) -> None:
+    def __init__(self, *, save_error: Exception | None = None) -> None:
         self.delegate = InMemoryConversationStore()
         self.loads: list[str] = []
         self.saves: list[tuple[str, Sequence[ModelMessage]]] = []
+        self.save_error = save_error
 
     async def load(self, conversation_id: str) -> Sequence[ModelMessage]:
         self.loads.append(conversation_id)
@@ -47,6 +49,8 @@ class _RecordingStore:
 
     async def save(self, conversation_id: str, messages: Sequence[ModelMessage]) -> None:
         self.saves.append((conversation_id, messages))
+        if self.save_error is not None:
+            raise self.save_error
         await self.delegate.save(conversation_id, messages)
 
 
@@ -149,6 +153,72 @@ class TestChannelHost:
 
         assert calls == 1
         assert store.saves == []
+
+    async def test_store_failure_happens_after_reply_and_is_not_retried(self) -> None:
+        adapter = _RecordingAdapter()
+        store = _RecordingStore(save_error=RuntimeError('save failed'))
+        host = ChannelHost(Agent('test'), adapter, store=store)
+
+        with pytest.raises(RuntimeError, match='save failed'):
+            await host.handle(_event('one'))
+
+        assert len(adapter.replies) == 1
+        assert len(store.saves) == 1
+
+    async def test_duplicate_event_ids_are_caller_owned(self) -> None:
+        adapter = _RecordingAdapter()
+        host = ChannelHost(Agent('test'), adapter)
+        event = _event('duplicate')
+
+        await host.handle(event)
+        await host.handle(event)
+
+        assert len(adapter.replies) == 2
+
+    async def test_agent_failure_does_not_reply_or_save_and_releases_lock(self) -> None:
+        calls = 0
+
+        def model(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError('model failed')
+            return ModelResponse(parts=[TextPart('done')])
+
+        adapter = _RecordingAdapter()
+        store = _RecordingStore()
+        host = ChannelHost(Agent(FunctionModel(model)), adapter, store=store)
+
+        with pytest.raises(RuntimeError, match='model failed'):
+            await host.handle(_event('one'))
+        await host.handle(_event('two'))
+
+        assert len(adapter.replies) == 1
+        assert len(store.saves) == 1
+
+    async def test_cancellation_does_not_reply_or_save_and_releases_lock(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def model(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            started.set()
+            await release.wait()
+            return ModelResponse(parts=[TextPart('done')])
+
+        adapter = _RecordingAdapter()
+        store = _RecordingStore()
+        host = ChannelHost(Agent(FunctionModel(model)), adapter, store=store)
+        task = asyncio.create_task(host.handle(_event('cancelled')))
+        await started.wait()
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        await host.handle(_event('next'))
+
+        assert len(adapter.replies) == 1
+        assert len(store.saves) == 1
 
 
 def test_conversation_store_protocol_is_runtime_structural() -> None:
