@@ -120,7 +120,7 @@ class TestRealExecution:
 
         assert 'DIAGNOSTIC' in exc_info.value.stdout
         await anyio.sleep(25)
-        assert await sandbox.fs.exists(marker) is False
+        assert await sandbox.exists(marker) is False
 
     async def test_a_background_child_outlives_the_kill(self, sandbox: E2BSandboxBackend) -> None:
         """Pins the documented limitation that E2B's kill signals the command's own process only.
@@ -134,7 +134,7 @@ class TestRealExecution:
             await sandbox.run(f'(sleep 5; touch {marker}) & sleep 30', shell=True, timeout=2)
 
         await anyio.sleep(10)
-        assert await sandbox.fs.exists(marker) is True
+        assert await sandbox.exists(marker) is True
 
     async def test_a_cancelled_run_stops_the_command(self, sandbox: E2BSandboxBackend) -> None:
         """Validates the protocol's cancellation contract against real E2B.
@@ -147,7 +147,7 @@ class TestRealExecution:
             await sandbox.run(f'sleep 15; touch {marker}', shell=True, timeout=60)
 
         await anyio.sleep(20)
-        assert await sandbox.fs.exists(marker) is False
+        assert await sandbox.exists(marker) is False
 
     async def test_large_stderr_does_not_block_stdout(self, sandbox: E2BSandboxBackend) -> None:
         """Validates the fake-encoded assumption that E2B buffers both streams without deadlock."""
@@ -235,48 +235,48 @@ class TestRealFilesystem:
     async def test_shell_and_file_api_see_the_same_filesystem(self, sandbox: E2BSandboxBackend) -> None:
         """Validates the protocol's one-environment contract against real E2B."""
         api_path = f'/tmp/{_unique("api")}.txt'
-        await sandbox.fs.write_bytes(api_path, b'from-file-api\n')
+        await sandbox.write_bytes(api_path, b'from-file-api\n')
         via_shell = await sandbox.run(['cat', api_path], timeout=30)
         assert via_shell.stdout == 'from-file-api\n'
 
         shell_path = f'/tmp/{_unique("shell")}.txt'
         wrote = await sandbox.run(f'printf from-shell > {shell_path}', shell=True, timeout=30)
         assert wrote.exit_code == 0
-        assert await sandbox.fs.read_bytes(shell_path) == b'from-shell'
+        assert await sandbox.read_bytes(shell_path) == b'from-shell'
 
     async def test_binary_roundtrip_creating_parent_dirs(self, sandbox: E2BSandboxBackend) -> None:
         """Validates the fake-encoded assumption that E2B stores raw bytes and creates real parent dirs."""
         path = f'/tmp/{_unique("io")}/nested/deep/data.bin'
         payload = b'\x00\x01hello \xf0\x9f\x9a\x80 world'
 
-        await sandbox.fs.write_bytes(path, payload)
+        await sandbox.write_bytes(path, payload)
 
-        assert await sandbox.fs.read_bytes(path) == payload
+        assert await sandbox.read_bytes(path) == payload
 
     async def test_large_filesystem_transfer_near_read_limit(self, sandbox: E2BSandboxBackend) -> None:
         """Validates the fake-encoded assumption that E2B's file API handles a near-limit transfer."""
         path = f'/tmp/{_unique("big")}.bin'
         payload = b'A' * (4 * 1024 * 1024)
 
-        await sandbox.fs.write_bytes(path, payload)
+        await sandbox.write_bytes(path, payload)
 
-        assert (await sandbox.fs.stat(path)).size == len(payload)
-        assert await sandbox.fs.read_bytes(path) == payload
+        assert (await sandbox.stat(path)).size == len(payload)
+        assert await sandbox.read_bytes(path) == payload
 
     async def test_missing_file_raises_the_builtin_error(self, sandbox: E2BSandboxBackend) -> None:
         """Validates the protocol's contract that a missing path raises the builtin `FileNotFoundError`."""
         with pytest.raises(FileNotFoundError):
-            await sandbox.fs.read_bytes(f'/tmp/{_unique("missing")}')
+            await sandbox.read_bytes(f'/tmp/{_unique("missing")}')
 
-        assert await sandbox.fs.exists(f'/tmp/{_unique("missing")}') is False
+        assert await sandbox.exists(f'/tmp/{_unique("missing")}') is False
 
     async def test_list_dir_reports_basenames_and_dir_flags(self, sandbox: E2BSandboxBackend) -> None:
         """Validates the fake-encoded assumption that E2B lists entries by basename with a real dir flag."""
         root = f'/tmp/{_unique("ls")}'
-        await sandbox.fs.write_bytes(f'{root}/file.txt', b'x')
-        await sandbox.fs.write_bytes(f'{root}/sub/nested.txt', b'y')
+        await sandbox.write_bytes(f'{root}/file.txt', b'x')
+        await sandbox.write_bytes(f'{root}/sub/nested.txt', b'y')
 
-        entries = await sandbox.fs.list_dir(root)
+        entries = await sandbox.list_dir(root)
 
         assert sorted((entry.name, entry.is_dir, entry.path) for entry in entries) == [
             ('file.txt', False, f'{root}/file.txt'),
@@ -286,12 +286,12 @@ class TestRealFilesystem:
     async def test_make_dir_and_remove_are_recursive(self, sandbox: E2BSandboxBackend) -> None:
         """Validates the fake-encoded assumption that E2B's `mkdir -p` and recursive remove behave as documented."""
         root = f'/tmp/{_unique("tree")}'
-        await sandbox.fs.make_dir(f'{root}/a/b')
-        await sandbox.fs.write_bytes(f'{root}/a/b/file.txt', b'x')
+        await sandbox.make_dir(f'{root}/a/b')
+        await sandbox.write_bytes(f'{root}/a/b/file.txt', b'x')
 
-        await sandbox.fs.remove(root)
+        await sandbox.remove(root)
 
-        assert await sandbox.fs.exists(root) is False
+        assert await sandbox.exists(root) is False
 
     async def test_relative_paths_resolve_against_the_working_directory(self) -> None:
         """Validates the fake-encoded assumption that the facade's resolution matches the process cwd."""
@@ -320,11 +320,11 @@ class TestRealLifecycle:
         """Validates the fake-encoded assumption that connecting reuses state and does not take ownership."""
         marker = f'/tmp/{_unique("persist")}.txt'
         async with _owned(sandbox_timeout=120) as owner:
-            await owner.fs.write_bytes(marker, b'shared')
+            await owner.write_bytes(marker, b'shared')
 
             attached = E2BSandboxBackend(ref=owner.ref)
             assert (await attached.sandbox).sandbox_id == (await owner.sandbox).sandbox_id
-            assert await attached.fs.read_bytes(marker) == b'shared'
+            assert await attached.read_bytes(marker) == b'shared'
             await attached.close(terminate=False)
 
             assert (await owner.run(['cat', marker], timeout=30)).stdout == 'shared'
@@ -337,8 +337,8 @@ class TestRealLifecycle:
         """
         marker = f'/tmp/{_unique("paused")}.txt'
         async with _owned(sandbox_timeout=120) as owner:
-            await owner.fs.write_bytes(marker, b'before-pause')
+            await owner.write_bytes(marker, b'before-pause')
             await (await owner.sandbox).beta_pause()
 
             attached = E2BSandboxBackend(ref=owner.ref)
-            assert await attached.fs.read_bytes(marker) == b'before-pause'
+            assert await attached.read_bytes(marker) == b'before-pause'

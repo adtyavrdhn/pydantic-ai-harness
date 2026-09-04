@@ -453,28 +453,28 @@ class TestWorkingDir:
 class TestFilesystem:
     async def test_write_then_read_round_trips(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
-        await backend.fs.write_bytes('/tmp/a.txt', b'body')
-        assert await backend.fs.read_bytes('/tmp/a.txt') == b'body'
+        await backend.write_bytes('/tmp/a.txt', b'body')
+        assert await backend.read_bytes('/tmp/a.txt') == b'body'
 
     async def test_stat_reports_size_for_files(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
-        await backend.fs.write_bytes('/tmp/a.txt', b'body')
-        entry = await backend.fs.stat('/tmp/a.txt')
+        await backend.write_bytes('/tmp/a.txt', b'body')
+        entry = await backend.stat('/tmp/a.txt')
         assert (entry.name, entry.path, entry.is_dir, entry.size) == ('a.txt', '/tmp/a.txt', False, 4)
 
     async def test_stat_reports_no_size_for_directories(self, fake_e2b: FakeE2B) -> None:
         # A directory's reported size is a filesystem implementation detail, not a content
         # length, so the protocol carrier reports none.
         backend = await started()
-        await backend.fs.make_dir('/tmp/pkg')
-        entry = await backend.fs.stat('/tmp/pkg')
+        await backend.make_dir('/tmp/pkg')
+        entry = await backend.stat('/tmp/pkg')
         assert (entry.is_dir, entry.size) == (True, None)
 
     async def test_list_dir_returns_absolute_paths(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
-        await backend.fs.write_bytes('/srv/a.py', b'print(1)')
-        await backend.fs.make_dir('/srv/pkg')
-        entries = await backend.fs.list_dir('/srv')
+        await backend.write_bytes('/srv/a.py', b'print(1)')
+        await backend.make_dir('/srv/pkg')
+        entries = await backend.list_dir('/srv')
         assert [(entry.name, entry.path, entry.is_dir, entry.size) for entry in entries] == [
             ('a.py', '/srv/a.py', False, 8),
             ('pkg', '/srv/pkg', True, None),
@@ -484,15 +484,15 @@ class TestFilesystem:
         # One call covers both halves of the protocol's `remove`: E2B deletes a file or a
         # directory with everything under it.
         backend = await started()
-        await backend.fs.write_bytes('/tmp/pkg/nested/a.txt', b'body')
-        await backend.fs.remove('/tmp/pkg')
-        assert await backend.fs.exists('/tmp/pkg/nested/a.txt') is False
+        await backend.write_bytes('/tmp/pkg/nested/a.txt', b'body')
+        await backend.remove('/tmp/pkg')
+        assert await backend.exists('/tmp/pkg/nested/a.txt') is False
 
     async def test_exists(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
-        await backend.fs.write_bytes('/tmp/a.txt', b'body')
-        assert await backend.fs.exists('/tmp/a.txt') is True
-        assert await backend.fs.exists('/tmp/missing.txt') is False
+        await backend.write_bytes('/tmp/a.txt', b'body')
+        assert await backend.exists('/tmp/a.txt') is True
+        assert await backend.exists('/tmp/missing.txt') is False
 
     @pytest.mark.parametrize('operation', ['read_bytes', 'stat', 'list_dir', 'remove'])
     async def test_a_missing_path_raises_the_builtin_error(self, fake_e2b: FakeE2B, operation: str) -> None:
@@ -500,13 +500,13 @@ class TestFilesystem:
         # into the builtin `FileNotFoundError` every consumer already handles.
         backend = await started()
         with pytest.raises(FileNotFoundError, match="'/tmp/missing.txt'"):
-            await getattr(backend.fs, operation)('/tmp/missing.txt')
+            await getattr(backend, operation)('/tmp/missing.txt')
 
     async def test_a_filesystem_error_is_recoverable_while_the_sandbox_runs(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         fake_e2b.fs_error = fake_e2b.error_type('Permission denied')
         with pytest.raises(E2BSandboxError, match='Permission denied') as exc:
-            await backend.fs.write_bytes('/root/x', b'data')
+            await backend.write_bytes('/root/x', b'data')
         assert isinstance(exc.value, SandboxError)
         assert not isinstance(exc.value, SandboxUnavailableError)
 
@@ -517,23 +517,23 @@ class TestFilesystem:
         fake_e2b.fs_error = fake_e2b.ambiguous_type('request failed')
         fake_e2b.sandbox_is_running = False
         with pytest.raises(E2BSandboxUnavailableError):
-            await backend.fs.read_bytes('/x')
+            await backend.read_bytes('/x')
 
     async def test_a_missing_sandbox_is_terminal(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         fake_e2b.fs_error = fake_e2b.sandbox_gone_type('sandbox gone')
         with pytest.raises(E2BSandboxUnavailableError):
-            await backend.fs.list_dir('/x')
+            await backend.list_dir('/x')
 
     async def test_an_auth_failure_is_terminal(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         fake_e2b.fs_error = fake_e2b.auth_type('bad key')
         with pytest.raises(E2BSandboxAuthError, match='E2B rejected the credentials'):
-            await backend.fs.make_dir('/x')
+            await backend.make_dir('/x')
 
     async def test_exists_still_reports_other_failures(self, fake_e2b: FakeE2B) -> None:
         # Only "there is nothing at that path" is an answer; anything else is a failure.
         backend = await started()
         fake_e2b.fs_error = fake_e2b.error_type('Permission denied')
         with pytest.raises(E2BSandboxError, match='Permission denied'):
-            await backend.fs.exists('/root/x')
+            await backend.exists('/root/x')

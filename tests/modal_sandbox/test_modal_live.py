@@ -203,48 +203,48 @@ class TestRealFilesystem:
     async def test_shell_and_file_api_see_the_same_filesystem(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the protocol's one-environment contract against real Modal."""
         api_path = f'/tmp/{_unique("api")}.txt'
-        await sandbox.fs.write_bytes(api_path, b'from-file-api\n')
+        await sandbox.write_bytes(api_path, b'from-file-api\n')
         via_shell = await sandbox.run(['cat', api_path], timeout=15)
         assert via_shell.stdout == 'from-file-api\n'
 
         shell_path = f'/tmp/{_unique("shell")}.txt'
         wrote = await sandbox.run(f'printf from-shell > {shell_path}', shell=True, timeout=15)
         assert wrote.exit_code == 0
-        assert await sandbox.fs.read_bytes(shell_path) == b'from-shell'
+        assert await sandbox.read_bytes(shell_path) == b'from-shell'
 
     async def test_binary_roundtrip_creating_parent_dirs(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the fake-encoded assumption that Modal stores raw bytes and creates real parent dirs."""
         path = f'/tmp/{_unique("io")}/nested/deep/data.bin'
         payload = b'\x00\x01hello \xf0\x9f\x9a\x80 world'
 
-        await sandbox.fs.write_bytes(path, payload)
+        await sandbox.write_bytes(path, payload)
 
-        assert await sandbox.fs.read_bytes(path) == payload
+        assert await sandbox.read_bytes(path) == payload
 
     async def test_large_filesystem_transfer_near_read_limit(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the fake-encoded assumption that Modal's fs API handles a near-limit transfer."""
         path = f'/tmp/{_unique("big")}.bin'
         payload = b'A' * (4 * 1024 * 1024)
 
-        await sandbox.fs.write_bytes(path, payload)
+        await sandbox.write_bytes(path, payload)
 
-        assert (await sandbox.fs.stat(path)).size == len(payload)
-        assert await sandbox.fs.read_bytes(path) == payload
+        assert (await sandbox.stat(path)).size == len(payload)
+        assert await sandbox.read_bytes(path) == payload
 
     async def test_missing_file_raises_the_builtin_error(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the protocol's contract that a missing path raises the builtin `FileNotFoundError`."""
         with pytest.raises(FileNotFoundError):
-            await sandbox.fs.read_bytes(f'/tmp/{_unique("missing")}')
+            await sandbox.read_bytes(f'/tmp/{_unique("missing")}')
 
-        assert await sandbox.fs.exists(f'/tmp/{_unique("missing")}') is False
+        assert await sandbox.exists(f'/tmp/{_unique("missing")}') is False
 
     async def test_list_dir_reports_basenames_and_dir_flags(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the fake-encoded assumption that Modal lists entries by basename with a real dir flag."""
         root = f'/tmp/{_unique("ls")}'
-        await sandbox.fs.write_bytes(f'{root}/file.txt', b'x')
-        await sandbox.fs.write_bytes(f'{root}/sub/nested.txt', b'y')
+        await sandbox.write_bytes(f'{root}/file.txt', b'x')
+        await sandbox.write_bytes(f'{root}/sub/nested.txt', b'y')
 
-        entries = await sandbox.fs.list_dir(root)
+        entries = await sandbox.list_dir(root)
 
         assert sorted((entry.name, entry.is_dir, entry.path) for entry in entries) == [
             ('file.txt', False, f'{root}/file.txt'),
@@ -254,12 +254,12 @@ class TestRealFilesystem:
     async def test_make_dir_and_remove_are_recursive(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the fake-encoded assumption that Modal's `mkdir -p` and recursive remove behave as documented."""
         root = f'/tmp/{_unique("tree")}'
-        await sandbox.fs.make_dir(f'{root}/a/b')
-        await sandbox.fs.write_bytes(f'{root}/a/b/file.txt', b'x')
+        await sandbox.make_dir(f'{root}/a/b')
+        await sandbox.write_bytes(f'{root}/a/b/file.txt', b'x')
 
-        await sandbox.fs.remove(root)
+        await sandbox.remove(root)
 
-        assert await sandbox.fs.exists(root) is False
+        assert await sandbox.exists(root) is False
 
     async def test_relative_paths_resolve_against_the_working_directory(self) -> None:
         """Validates the fake-encoded assumption that the facade's resolution matches the process cwd."""
@@ -299,12 +299,12 @@ class TestRealLifecycle:
         """Validates the fake-encoded assumption that connecting reuses state and does not take ownership."""
         marker = f'/tmp/{_unique("persist")}.txt'
         async with _owned(sandbox_timeout=120) as owner:
-            await owner.fs.write_bytes(marker, b'shared')
+            await owner.write_bytes(marker, b'shared')
 
             attached = ModalSandboxBackend(ref=owner.ref)
             await attached.sandbox
             assert attached.ref == owner.ref
-            assert await attached.fs.read_bytes(marker) == b'shared'
+            assert await attached.read_bytes(marker) == b'shared'
             await attached.close(terminate=False)
 
             assert (await owner.run(['cat', marker], timeout=15)).stdout == 'shared'
