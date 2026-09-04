@@ -29,9 +29,9 @@ _DEFAULT_API_URL = 'https://api.telegram.org'
 _MAX_TEXT_CHARS = 4096
 _MAX_RETRY_AFTER_SECONDS = 60
 _SECRET_PATTERN = re.compile(r'[A-Za-z0-9_-]{1,256}')
-_CONVERSATION_PATTERN = re.compile(r'telegram:chat:(-?[0-9]+)(?::topic:([0-9]+))?')
-_MESSAGE_PATTERN = re.compile(r'telegram:message:([0-9]+)')
-_TELEGRAM_URL_PATTERN = re.compile(r'(https?://[^/\s]+/bot)[^/\s]+(/[^\s]*)?')
+_CONVERSATION_PATTERN = re.compile(r'telegram:chat:(-?[1-9][0-9]*)(?::(topic|direct-topic):([1-9][0-9]*))?')
+_MESSAGE_PATTERN = re.compile(r'telegram:message:([1-9][0-9]*)')
+_TELEGRAM_URL_PATTERN = re.compile(r'(https?://[^\s]*?/bot)[^/\s]+(/[^\s]+)')
 _JSON_ADAPTER: TypeAdapter[object] = TypeAdapter(object)
 _MAPPING_ADAPTER: TypeAdapter[dict[str, object]] = TypeAdapter(dict[str, object])
 
@@ -44,13 +44,21 @@ class TelegramWebhookError(TelegramError):
     """A Telegram webhook request fails secret-token verification."""
 
 
+class TelegramPartialDeliveryError(TelegramError):
+    """A multi-message reply fails after at least one chunk is confirmed."""
+
+    def __init__(self, message: str, *, sent_chunks: int) -> None:
+        """Record how many chunks Telegram confirmed before the failure."""
+        super().__init__(message)
+        self.sent_chunks = sent_chunks
+
+
 class _TelegramTokenFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        redacted = _TELEGRAM_URL_PATTERN.sub(r'\1<redacted>\2', message)
-        if redacted != message:
-            record.msg = redacted
-            record.args = ()
+        if record.name == 'httpx' and record.msg == 'HTTP Request: %s %s "%s %d %s"':
+            args = record.args
+            if isinstance(args, tuple):  # pragma: no branch - HTTPX supplies positional logging arguments
+                record.args = tuple(_redact_log_argument(value) for value in args)
         return True
 
 
@@ -116,47 +124,18 @@ class TelegramChannel:
         `None`. The caller should atomically claim the returned `event_id` before passing the event
         to [`ChannelHost.handle`][pydantic_ai_harness.channels.ChannelHost.handle].
         """
-        secret_values = [
-            value for name, value in headers.items() if name.casefold() == 'x-telegram-bot-api-secret-token'
-        ]
-        if len(secret_values) > 1:
-            raise TelegramWebhookError('Telegram webhook has ambiguous secret token headers')
-        if len(secret_values) != 1 or not hmac.compare_digest(secret_values[0], self._webhook_secret):
-            raise TelegramWebhookError('Telegram webhook secret token is missing or invalid')
-
-        try:
-            payload = _mapping(_JSON_ADAPTER.validate_json(raw_body))
-        except ValidationError:
-            payload = None
-        if payload is None:
-            raise TelegramError('Telegram webhook payload must be a JSON object')
-
-        update_id = payload.get('update_id')
-        if isinstance(update_id, bool) or not isinstance(update_id, int) or update_id < 0:
-            raise TelegramError('Telegram webhook payload has an invalid update_id')
-
-        raw_message = payload.get('message')
-        if raw_message is None:
-            return None
-        message = _mapping(raw_message)
+        update_id, message = _verified_update(raw_body, headers, self._webhook_secret)
         if message is None:
-            raise TelegramError('Telegram webhook payload has an invalid message')
+            return None
 
         text = message.get('text')
         if not isinstance(text, str) or not text:
             return None
 
-        chat = _mapping(message.get('chat'))
-        message_id = message.get('message_id')
-        if chat is None or not _is_integer_id(message_id) or message_id <= 0:
-            raise TelegramError('Telegram webhook payload has invalid message identity')
-        chat_id = chat.get('id')
-        if not _is_integer_id(chat_id):
-            raise TelegramError('Telegram webhook payload has invalid chat identity')
-
-        topic_id = message.get('message_thread_id')
-        if topic_id is not None and (not _is_integer_id(topic_id) or topic_id <= 0):
-            raise TelegramError('Telegram webhook payload has invalid topic identity')
+        identity = _message_identity(message)
+        if identity is None:
+            return None
+        chat_id, topic_kind, topic_id, message_id = identity
 
         sender = self._sender(message)
         if sender is None:
@@ -166,8 +145,8 @@ class TelegramChannel:
             return None
 
         conversation_id = f'telegram:chat:{chat_id}'
-        if topic_id is not None:
-            conversation_id += f':topic:{topic_id}'
+        if topic_kind is not None:
+            conversation_id += f':{topic_kind}:{topic_id}'
         return ChannelEvent(
             event_id=f'telegram:update:{update_id}',
             conversation_id=conversation_id,
@@ -200,27 +179,39 @@ class TelegramChannel:
         return 'user', sender_id
 
     async def reply(self, event: ChannelEvent, text: str) -> None:
-        """Reply once in Telegram, splitting text at the provider limit.
+        """Reply in Telegram, splitting text at the provider limit.
 
         A flood-control response is retried once after Telegram's `retry_after` delay. Transport
         failures and other provider errors are surfaced without retry because delivery may already
-        have happened.
+        have happened. If a later chunk fails, `TelegramPartialDeliveryError.sent_chunks` reports
+        how many preceding chunks Telegram confirmed.
         """
         if not text:
             raise ValueError('text must not be empty')
-        chat_id, topic_id = _decode_conversation(event.conversation_id)
+        chat_id, topic_kind, topic_id = _decode_conversation(event.conversation_id)
         message_id = _decode_message(event.reply_to_id)
 
-        for start in range(0, len(text), _MAX_TEXT_CHARS):
+        chunks = [text[start : start + _MAX_TEXT_CHARS] for start in range(0, len(text), _MAX_TEXT_CHARS)]
+        for index, chunk in enumerate(chunks):
             payload: dict[str, object] = {
                 'chat_id': chat_id,
-                'text': text[start : start + _MAX_TEXT_CHARS],
+                'text': chunk,
             }
-            if topic_id is not None:
+            if topic_kind == 'topic':
                 payload['message_thread_id'] = topic_id
+            elif topic_kind == 'direct-topic':
+                payload['direct_messages_topic_id'] = topic_id
             if message_id is not None:
                 payload['reply_parameters'] = {'message_id': message_id}
-            await self._send_with_one_flood_retry(payload)
+            try:
+                await self._send_with_one_flood_retry(payload)
+            except TelegramError as exc:
+                if index == 0:
+                    raise
+                raise TelegramPartialDeliveryError(
+                    f'Telegram reply failed after {index} of {len(chunks)} chunks were confirmed: {exc}',
+                    sent_chunks=index,
+                ) from None
 
     async def _send_with_one_flood_retry(self, payload: Mapping[str, object]) -> None:
         try:
@@ -256,12 +247,16 @@ class TelegramChannel:
         if envelope is None:
             raise TelegramError(f'Telegram Bot API returned an invalid response: {method}')
         if response.is_success and envelope.get('ok') is True:
-            return
+            result = _mapping(envelope.get('result'))
+            sent_message_id = result.get('message_id') if result is not None else None
+            if _is_integer_id(sent_message_id) and sent_message_id >= 0:
+                return
+            raise TelegramError(f'Telegram Bot API returned an invalid response: {method}')
 
         description = envelope.get('description')
         message = description if isinstance(description, str) else f'Telegram Bot API rejected {method}'
         message = message.replace(self._bot_token, '<redacted>')
-        retry_after = _retry_after(envelope)
+        retry_after = _retry_after(envelope) if response.status_code == 429 else None
         if retry_after is not None:
             raise _RateLimited(message, retry_after=retry_after)
         raise TelegramError(message)
@@ -274,16 +269,91 @@ def _mapping(value: object) -> dict[str, object] | None:
         return None
 
 
+def _verified_update(
+    raw_body: bytes, headers: Mapping[str, str], webhook_secret: str
+) -> tuple[int, dict[str, object] | None]:
+    secret_values = [value for name, value in headers.items() if name.casefold() == 'x-telegram-bot-api-secret-token']
+    if len(secret_values) > 1:
+        raise TelegramWebhookError('Telegram webhook has ambiguous secret token headers')
+    if (
+        len(secret_values) != 1
+        or _SECRET_PATTERN.fullmatch(secret_values[0]) is None
+        or not hmac.compare_digest(secret_values[0], webhook_secret)
+    ):
+        raise TelegramWebhookError('Telegram webhook secret token is missing or invalid')
+
+    try:
+        payload = _mapping(_JSON_ADAPTER.validate_json(raw_body))
+    except ValidationError:
+        payload = None
+    if payload is None:
+        raise TelegramError('Telegram webhook payload must be a JSON object')
+
+    update_id = payload.get('update_id')
+    if isinstance(update_id, bool) or not isinstance(update_id, int) or update_id <= 0:
+        raise TelegramError('Telegram webhook payload has an invalid update_id')
+
+    raw_message = payload.get('message')
+    if raw_message is None:
+        return update_id, None
+    message = _mapping(raw_message)
+    if message is None:
+        raise TelegramError('Telegram webhook payload has an invalid message')
+    return update_id, message
+
+
+def _message_identity(message: Mapping[str, object]) -> tuple[int, str | None, int | None, int] | None:
+    message_id = message.get('message_id')
+    if not _is_integer_id(message_id):
+        raise TelegramError('Telegram webhook payload has invalid message identity')
+    if message_id == 0 or message.get('ephemeral_message_id') is not None:
+        return None
+    chat = _mapping(message.get('chat'))
+    if chat is None or message_id < 0:
+        raise TelegramError('Telegram webhook payload has invalid message identity')
+    chat_id = chat.get('id')
+    if not _is_integer_id(chat_id):
+        raise TelegramError('Telegram webhook payload has invalid chat identity')
+
+    topic_id = message.get('message_thread_id')
+    if topic_id is not None and (not _is_integer_id(topic_id) or topic_id <= 0):
+        raise TelegramError('Telegram webhook payload has invalid topic identity')
+    direct_topic = message.get('direct_messages_topic')
+    direct_topic_id: int | None = None
+    if direct_topic is not None:
+        direct_topic_mapping = _mapping(direct_topic)
+        if direct_topic_mapping is None:
+            raise TelegramError('Telegram webhook payload has invalid direct-topic identity')
+        raw_direct_topic_id = direct_topic_mapping.get('topic_id')
+        if not _is_integer_id(raw_direct_topic_id) or raw_direct_topic_id <= 0:
+            raise TelegramError('Telegram webhook payload has invalid direct-topic identity')
+        direct_topic_id = raw_direct_topic_id
+    if topic_id is not None and direct_topic_id is not None:
+        raise TelegramError('Telegram webhook payload has ambiguous topic identity')
+    if topic_id is not None:
+        return chat_id, 'topic', topic_id, message_id
+    if direct_topic_id is not None:
+        return chat_id, 'direct-topic', direct_topic_id, message_id
+    return chat_id, None, None, message_id
+
+
 def _is_integer_id(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _decode_conversation(conversation_id: str) -> tuple[int, int | None]:
+def _redact_log_argument(value: object) -> object:
+    if isinstance(value, (str, httpx.URL)):
+        text = str(value)
+        return _TELEGRAM_URL_PATTERN.sub(r'\1<redacted>\2', text)
+    return value
+
+
+def _decode_conversation(conversation_id: str) -> tuple[int, str | None, int | None]:
     match = _CONVERSATION_PATTERN.fullmatch(conversation_id)
     if match is None:
         raise TelegramError('event conversation_id is not a Telegram chat identity')
-    topic = match.group(2)
-    return int(match.group(1)), int(topic) if topic is not None else None
+    topic = match.group(3)
+    return int(match.group(1)), match.group(2), int(topic) if topic is not None else None
 
 
 def _decode_message(reply_to_id: str | None) -> int | None:
