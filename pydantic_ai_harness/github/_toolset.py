@@ -11,6 +11,9 @@ External contract, verified 2026-09-04:
   declare its MCP `readOnlyHint` annotation.
 - `X-MCP-Tools`, `X-MCP-Features`, and `X-MCP-Insiders` can expand the exposed
   tool surface, so caller-supplied values are not accepted.
+- URL selectors such as `/x/all` and `/insiders` can also expand that surface.
+  Built-in connections therefore accept only the public GitHub MCP host or a
+  GitHub Enterprise Cloud data-residency host at the plain `/mcp` path.
 - The consolidated and granular sub-issue mutation tools accept an opaque
   `sub_issue_id` that does not identify its repository, so repository scope
   cannot be enforced for those tools and they are not exposed.
@@ -23,6 +26,7 @@ https://github.com/github/github-mcp-server/blob/main/docs/server-configuration.
 https://github.com/github/github-mcp-server/blob/main/docs/feature-flags.md
 https://github.com/github/github-mcp-server/blob/main/README.md
 https://github.com/github/github-mcp-server/blob/main/pkg/toolvalidation/readonlyhint.go
+https://github.github.com/gh-aw/troubleshooting/debug-ghe/
 
 Re-check the endpoint and headers in the remote server, server configuration,
 and feature flag docs. Confirm the sub-issue tool names and schemas in the tool
@@ -68,6 +72,9 @@ _RESERVED_HEADERS = frozenset({'x-mcp-features', 'x-mcp-insiders', 'x-mcp-readon
 _SEARCH_TOOL_NAMES = frozenset({'search_code', 'search_commits', 'search_issues', 'search_pull_requests'})
 _QUALIFIER_RE = re.compile(r'(?<![A-Za-z0-9_])(repo|org|user):([^\s)]+)', re.IGNORECASE)
 _BOOLEAN_OR_RE = re.compile(r'\bOR\b')
+_GITHUB_MCP_HOST_RE = re.compile(
+    r'^(?:api\.githubcopilot\.com|copilot-api\.(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+ghe\.com)$', re.IGNORECASE
+)
 _TOOLSET_RE = re.compile(r'^[a-z0-9_]+$')
 _SCOPE_COMPONENT_RE = re.compile(r'^[^\s/:]+$')
 _OBJECT_MAPPING_ADAPTER = TypeAdapter(dict[str, object])
@@ -95,8 +102,15 @@ def validate_access(access: str) -> AccessMode:
 
 def _validate_url(url: str) -> None:
     parts = urlsplit(url)
-    if parts.scheme.lower() != 'https' or not parts.netloc:
-        raise UserError('`url` must be an absolute HTTPS URL.')
+    if (
+        parts.scheme.lower() != 'https'
+        or _GITHUB_MCP_HOST_RE.fullmatch(parts.hostname or '') is None
+        or parts.netloc.casefold() != (parts.hostname or '').casefold()
+        or parts.path not in ('/mcp', '/mcp/')
+        or parts.query
+        or parts.fragment
+    ):
+        raise UserError('`url` must be an official HTTPS GitHub MCP endpoint with path `/mcp` or `/mcp/`.')
 
 
 def _validate_toolsets(toolsets: Sequence[str]) -> tuple[str, ...]:
