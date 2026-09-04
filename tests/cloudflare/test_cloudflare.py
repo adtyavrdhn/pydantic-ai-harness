@@ -184,12 +184,14 @@ class TestCloudflareToolset:
         async with toolset:
             tools = await toolset.get_tools(run_context)
             assert 'zoneId' not in tools['list_records'].tool_def.parameters_json_schema['required']
+            details = await toolset.call_tool('zone_details', {'account_id': 'a1'}, run_context, tools['zone_details'])
             result = await toolset.call_tool('list_records', {'account_id': 'a1'}, run_context, tools['list_records'])
             with pytest.raises(ModelRetry) as exc_info:
                 await toolset.call_tool(
                     'list_records', {'account_id': 'a1', 'zoneId': 'other'}, run_context, tools['list_records']
                 )
             assert len(str(exc_info.value).encode()) <= 64
+        assert details == 'zone:a1:z1'
         assert str(result).startswith('a1:z1:0')
 
     async def test_alternate_account_and_zone_keys_are_pinned(
