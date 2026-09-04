@@ -72,21 +72,38 @@ class TestSlackRequestParsing:
             },
             event_id='Ev456',
         )
+        other_root_body = _body(
+            {
+                'type': 'message',
+                'channel': 'C123',
+                'user': 'U789',
+                'text': 'separate root',
+                'ts': '1700000099.000001',
+            },
+            event_id='Ev789',
+        )
 
-        assert channel.parse_request(root_body, _headers(root_body)) == ChannelEvent(
+        root = channel.parse_request(root_body, _headers(root_body))
+        thread = channel.parse_request(thread_body, _headers(thread_body))
+        other_root = channel.parse_request(other_root_body, _headers(other_root_body))
+        assert root == ChannelEvent(
             event_id='Ev123',
-            conversation_id='C123',
+            conversation_id='slack:T123:C123:1700000000.000001',
             sender_id='U123',
             text='<@BOT> hello',
             reply_to_id='1700000000.000001',
+            delivery_id='C123',
         )
-        assert channel.parse_request(thread_body, _headers(thread_body)) == ChannelEvent(
+        assert thread == ChannelEvent(
             event_id='Ev456',
-            conversation_id='C123',
+            conversation_id='slack:T123:C123:1700000000.000001',
             sender_id='U456',
             text='follow up',
             reply_to_id='1700000000.000001',
+            delivery_id='C123',
         )
+        assert isinstance(other_root, ChannelEvent)
+        assert other_root.conversation_id == 'slack:T123:C123:1700000099.000001'
 
     def test_rejects_event_for_another_workspace_installation(self) -> None:
         body = _body(team_id='T999')
@@ -94,6 +111,33 @@ class TestSlackRequestParsing:
 
         with pytest.raises(SlackError, match='workspace installation'):
             channel.parse_request(body, _headers(body))
+
+    def test_conversation_identity_isolated_by_workspace_and_channel(self) -> None:
+        original_body = _body()
+        other_workspace_body = _body(team_id='T999')
+        other_channel_body = _body(
+            {
+                'type': 'app_mention',
+                'channel': 'C999',
+                'user': 'U123',
+                'text': '<@BOT> hello',
+                'ts': '1700000000.000001',
+            }
+        )
+        original = SlackChannel(signing_secret='signing-secret', bot_token='token', team_id='T123').parse_request(
+            original_body, _headers(original_body)
+        )
+        other_workspace = SlackChannel(
+            signing_secret='signing-secret', bot_token='token', team_id='T999'
+        ).parse_request(other_workspace_body, _headers(other_workspace_body))
+        other_channel = SlackChannel(signing_secret='signing-secret', bot_token='token', team_id='T123').parse_request(
+            other_channel_body, _headers(other_channel_body)
+        )
+
+        assert isinstance(original, ChannelEvent)
+        assert isinstance(other_workspace, ChannelEvent)
+        assert isinstance(other_channel, ChannelEvent)
+        assert len({original.conversation_id, other_workspace.conversation_id, other_channel.conversation_id}) == 3
 
     def test_returns_url_verification_challenge(self) -> None:
         body = _body(type='url_verification', challenge='challenge-value')
@@ -204,10 +248,11 @@ class TestSlackReply:
             await channel.reply(
                 ChannelEvent(
                     event_id='Ev123',
-                    conversation_id='C123',
+                    conversation_id='slack:T123:C123:1700000000.000001',
                     sender_id='U123',
                     text='hello',
                     reply_to_id='1700000000.000001',
+                    delivery_id='C123',
                 ),
                 'agent reply',
             )
@@ -221,6 +266,21 @@ class TestSlackReply:
             'text': 'agent reply',
             'thread_ts': '1700000000.000001',
         }
+
+    async def test_uses_conversation_as_delivery_fallback(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={'ok': True})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            channel = SlackChannel(signing_secret='secret', bot_token='token', team_id='team', client=client)
+            await channel.reply(
+                ChannelEvent(event_id='e', conversation_id='C-fallback', sender_id='u', text='x'), 'reply'
+            )
+
+        assert json.loads(seen[0].content)['channel'] == 'C-fallback'
 
     async def test_surfaces_http_and_slack_api_errors(self) -> None:
         responses = iter(

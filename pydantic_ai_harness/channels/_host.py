@@ -20,6 +20,7 @@ class ChannelEvent:
 
     `reply_to_id` identifies the provider object that should receive the response. For a threaded
     provider this is the thread root; for a reply-based provider it is the source message.
+    `delivery_id` identifies the provider destination when it differs from `conversation_id`.
     """
 
     event_id: str
@@ -27,6 +28,7 @@ class ChannelEvent:
     sender_id: str
     text: str
     reply_to_id: str | None = None
+    delivery_id: str | None = None
 
 
 class ChannelAdapter(Protocol):

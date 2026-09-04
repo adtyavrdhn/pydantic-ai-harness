@@ -1,32 +1,61 @@
 ---
 title: Channels
-description: Run Pydantic AI agents from verified messages received through chat providers.
+description: Run Pydantic AI agents from verified Slack messages.
 ---
 
 # Channels
 
-Channels run a text-output Pydantic AI agent for messages received from chat providers. Use them
-when an HTTP endpoint, queue consumer, or polling loop needs to preserve conversation history and
-send the agent's response through the provider that delivered the message.
+Channels let a Pydantic AI agent answer Slack mentions and continue each Slack thread with its own message history.
 
-[Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/channels/)
+## Install
 
-> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
+Channels uses the base Harness package. This example uses an OpenAI model and FastAPI:
 
-## Quick start
+```bash
+uv add pydantic-ai-harness "pydantic-ai-slim[openai]" fastapi uvicorn
+```
 
-`ChannelHost` sits outside `AbstractCapability`. It starts each turn through the agent's public
-`run()` method, so capabilities, tools, model settings, and output validation configured on the
-agent continue to apply.
+## Set up Slack
 
-```python
+1. Create a Slack app at [api.slack.com/apps](https://api.slack.com/apps).
+2. Under **OAuth & Permissions**, add the bot scopes `app_mentions:read` and `chat:write`, then install the app to the workspace. Copy the bot token that starts with `xoxb-`.
+3. Under **Basic Information**, copy the signing secret.
+4. Start the example below on a public HTTPS URL, enable **Event Subscriptions**, set the request URL to `https://your-host/slack/events`, and subscribe to the `app_mention` bot event.
+5. Copy the workspace ID that starts with `T` from the Slack browser URL `app.slack.com/client/T.../`.
+
+Set the four required environment variables:
+
+```bash
+export OPENAI_API_KEY='your-openai-api-key'
+export SLACK_SIGNING_SECRET='your-slack-signing-secret'
+export SLACK_BOT_TOKEN='xoxb-your-bot-token'
+export SLACK_TEAM_ID='T-your-workspace-id'
+```
+
+Slack's installation screen handles OAuth. The package does not open a browser or implement an OAuth redirect. Browser interaction is required once to create, configure, and install the Slack app.
+
+## Run
+
+Save this as `app.py`:
+
+```python {names="defined"}
+import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import anyio
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import PlainTextResponse
 from pydantic_ai import Agent
 
 from pydantic_ai_harness.channels import ChannelEvent, ChannelHost
-from pydantic_ai_harness.channels.slack import SlackChannel, SlackUrlVerification
+from pydantic_ai_harness.channels.slack import (
+    SlackChannel,
+    SlackError,
+    SlackSignatureError,
+    SlackUrlVerification,
+)
 
 agent = Agent('openai:gpt-5.6-sol', output_type=str)
 slack = SlackChannel(
@@ -38,77 +67,71 @@ host = ChannelHost(agent, slack)
 send_events, receive_events = anyio.create_memory_object_stream[ChannelEvent](100)
 
 
-def accept_slack_request(raw_body: bytes, headers: dict[str, str]) -> str | None:
-    request = slack.parse_request(raw_body, headers)
-    if isinstance(request, SlackUrlVerification):
-        return request.challenge
-    if request is not None:
-        send_events.send_nowait(request)
-    return None
-
-
 async def consume_events() -> None:
     async with receive_events:
         async for event in receive_events:
-            await host.handle(event)
+            try:
+                await host.handle(event)
+            except Exception:
+                logging.exception('Slack event failed')
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async with anyio.create_task_group() as group:
+        group.start_soon(consume_events)
+        yield
+        group.cancel_scope.cancel()
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.post('/slack/events')
+async def receive_slack_event(request: Request) -> Response:
+    raw_body = await request.body()
+    try:
+        parsed = slack.parse_request(raw_body, request.headers)
+    except SlackSignatureError:
+        return Response(status_code=401)
+    except SlackError:
+        return Response(status_code=400)
+
+    if isinstance(parsed, SlackUrlVerification):
+        return PlainTextResponse(parsed.challenge)
+    if parsed is not None:
+        with anyio.move_on_after(2) as enqueue_scope:
+            await send_events.send(parsed)
+        if enqueue_scope.cancel_called:
+            return Response(status_code=503)
+    return Response(status_code=200)
 ```
 
-Call `accept_slack_request` with the untouched request bytes. Return its challenge for Slack URL
-verification, otherwise acknowledge the verified request immediately after enqueueing it. Run
-`consume_events` as a worker owned by your application.
+Run it:
 
-## Host contract
+```bash
+uv run uvicorn app:app --host 0.0.0.0 --port 8000
+```
 
-Adapters normalize five values into `ChannelEvent`: `event_id`, `conversation_id`, `sender_id`,
-`text`, and optional `reply_to_id`. `SlackChannel` requires the workspace's `team_id` and rejects
-events for other installations before normalization. Build a separate adapter for each provider
-installation or credential set.
+Expose port 8000 through your HTTPS host, invite the bot to a channel, and mention it. The endpoint verifies Slack's signature before enqueueing the event, returns the URL-verification challenge when Slack configures the endpoint, and replies in the original thread.
 
-The host loads the conversation's Pydantic AI messages, calls `AbstractAgent.run()`, sends the text
-result through `ChannelAdapter.reply()`, then saves `result.all_messages()`. Calls for one
-`conversation_id` are serialized within one `ChannelHost`; different conversations may run at the
-same time.
+## Things to ask
 
-`InMemoryConversationStore` is the default and loses history when the process exits. Implement
-`ConversationStore` for persistent history. Multiple workers must partition their queue by
-`conversation_id` or coordinate outside the host because host locks are process-local.
+- `@bot Summarize this update in three bullets.`
+- `@bot Rewrite this announcement for customers.`
+- `@bot List the decisions and open questions in this thread.`
+- Follow up in the same thread with `@bot Make it shorter` or `@bot Explain the second point`.
 
-The host does not claim events, acknowledge provider delivery, or retry. Claim `event_id` in the
-caller-owned queue before calling `handle()`. Duplicate calls run duplicate agent turns. Agent,
-reply, and store errors propagate. The host replies before saving history: a reply failure leaves
-history unchanged, while a save failure or cancellation can occur after the user has received the
-reply. A durable store should own its transaction and retry policy. Do not blindly retry the whole
-handler after an ambiguous delivery or save failure.
+## Operational notes
 
-## Slack behavior
+- Pass the untouched request bytes to `parse_request()`. Reading and re-encoding JSON first breaks signature verification.
+- Slack expects a response within three seconds and retries failed delivery. The example reserves two seconds for its bounded in-process queue and returns 503 when full. Use a durable queue for production.
+- Claim `event_id` before calling `handle()` if duplicate agent turns are unacceptable. The host does not claim, acknowledge, or retry events.
+- The default history store is process-local and loses history on restart. Pass a `ConversationStore` implementation for persistent history.
+- Events are serialized per Slack workspace, channel, and thread inside one `ChannelHost`. Coordinate workers outside the package when several processes share a store.
+- Signature verification authenticates Slack, not the sender. Check `sender_id` and `delivery_id` before enqueueing if only selected users or channels may invoke the agent.
+- The host sends the reply before saving history. A save failure can occur after Slack receives the reply, so do not blindly retry an ambiguous whole handler call.
+- The caller owns FastAPI, the queue, OAuth, and any injected `httpx.AsyncClient`.
+- While Harness is on 0.x releases, minor releases may change this API. See the [version policy](index.md#version-policy).
 
-`SlackChannel.parse_request()` verifies `X-Slack-Request-Timestamp` and `X-Slack-Signature` against
-the raw body before decoding JSON. Requests more than five minutes from local time are rejected.
-It accepts `app_mention` and ordinary `message` callbacks, ignores bot messages and message
-subtypes, and returns `None` for unsupported events.
-
-Signature verification authenticates Slack, not the human sender. Apply channel and sender policy
-to the normalized IDs before enqueueing events when the app should serve only an allowlist.
-
-Root messages use their `ts` as `reply_to_id`. Thread replies keep the parent's `thread_ts`, so
-`SlackChannel.reply()` posts the response to the original thread with `chat.postMessage`.
-
-Pass an `httpx.AsyncClient` to reuse connections. The caller owns an injected client. Without one,
-each reply uses a short-lived client. `SlackChannel` stores its signing secret and bot token in
-private attributes and excludes them from `repr`; the caller remains responsible for secret
-storage and token selection.
-
-Slack requires an HTTP 2xx response within three seconds and may retry delivery. HTTP framework,
-queue, claim/ack, and retry policy remain application concerns.
-
-## API reference
-
-::: pydantic_ai_harness.channels.ChannelEvent
-
-::: pydantic_ai_harness.channels.ChannelHost
-
-::: pydantic_ai_harness.channels.ConversationStore
-
-::: pydantic_ai_harness.channels.InMemoryConversationStore
-
-::: pydantic_ai_harness.channels.slack.SlackChannel
+[Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/channels/)

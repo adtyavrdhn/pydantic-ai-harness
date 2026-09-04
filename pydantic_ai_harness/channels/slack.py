@@ -100,6 +100,7 @@ class SlackChannel:
         if 'bot_id' in event or 'subtype' in event:
             return None
 
+        channel_id = _required_nonempty_string(event, 'channel')
         timestamp = _required_nonempty_string(event, 'ts')
         if 'thread_ts' in event:
             thread_timestamp = _required_nonempty_string(event, 'thread_ts')
@@ -107,15 +108,16 @@ class SlackChannel:
             thread_timestamp = timestamp
         return ChannelEvent(
             event_id=_required_nonempty_string(payload, 'event_id'),
-            conversation_id=_required_nonempty_string(event, 'channel'),
+            conversation_id=f'slack:{self._team_id}:{channel_id}:{thread_timestamp}',
             sender_id=_required_nonempty_string(event, 'user'),
             text=_required_string(event, 'text'),
             reply_to_id=thread_timestamp,
+            delivery_id=channel_id,
         )
 
     async def reply(self, event: ChannelEvent, text: str) -> None:
         """Post `text` to the Slack conversation and original thread for `event`."""
-        payload: dict[str, str] = {'channel': event.conversation_id, 'text': text}
+        payload: dict[str, str] = {'channel': event.delivery_id or event.conversation_id, 'text': text}
         if event.reply_to_id is not None:
             payload['thread_ts'] = event.reply_to_id
 
