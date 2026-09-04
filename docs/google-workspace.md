@@ -4,7 +4,7 @@ Google Workspace lets an agent read selected Gmail, Calendar, Drive, Docs, Sheet
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/google_workspace/)
 
-> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, the release notes explain the migration. See the [version policy](../docs/index.md#version-policy).
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
 ## Install
 
@@ -18,18 +18,18 @@ In Google Cloud:
 
 1. Join the Google Workspace Developer Preview Program, then enable the Workspace API and MCP service for each product you will select.
 2. If you select Chat, configure the Google Chat API app and turn off **Enable interactive features**.
-3. Use your application's OAuth flow to obtain a bearer token with the scopes for each selected product. Each value below starts with `https://www.googleapis.com/auth/`.
+3. Use your application's OAuth flow to obtain a bearer token with the read-only scopes for each selected product. Add mutation scopes only when using `read_only=False`. Each value below starts with `https://www.googleapis.com/auth/`.
 
-| Product | Scope suffixes |
-|---|---|
-| Gmail | `gmail.readonly`, `gmail.compose` |
-| Drive | `drive.readonly`, `drive.file` |
-| Docs | `drive.readonly`, `drive.file`, `documents.readonly`, `documents` |
-| Sheets | `drive.readonly`, `drive.file`, `spreadsheets.readonly`, `spreadsheets` |
-| Slides | `drive.readonly`, `drive.file`, `presentations.readonly`, `presentations` |
-| Calendar | `calendar.calendarlist.readonly`, `calendar.events.freebusy`, `calendar.events.readonly` |
-| Chat | `chat.spaces.readonly`, `chat.memberships.readonly`, `chat.messages.readonly`, `chat.messages.create`, `chat.users.readstate` |
-| People | `directory.readonly`, `userinfo.profile`, `contacts.readonly` |
+| Product | Read-only scope suffixes | Additional mutation scope suffixes |
+|---|---|---|
+| Gmail | `gmail.readonly` | `gmail.compose`, `gmail.modify` |
+| Drive | `drive.readonly` | `drive.file` |
+| Docs | `drive.readonly`, `documents.readonly` | `drive.file`, `documents` |
+| Sheets | `drive.readonly`, `spreadsheets.readonly` | `drive.file`, `spreadsheets` |
+| Slides | `drive.readonly`, `presentations.readonly` | `drive.file`, `presentations` |
+| Calendar | `calendar.calendarlist.readonly`, `calendar.events.freebusy`, `calendar.events.readonly` | `calendar.events` |
+| Chat | `chat.spaces.readonly`, `chat.memberships.readonly`, `chat.messages.readonly` | `chat.messages.create`, `chat.users.readstate` |
+| People | `directory.readonly`, `userinfo.profile`, `contacts.readonly` | None |
 
 Set these environment variables:
 
@@ -46,7 +46,7 @@ Save this as `workspace_agent.py` after setting the two environment variables ab
 import asyncio
 
 from pydantic_ai import Agent
-from pydantic_ai_harness import GoogleWorkspace
+from pydantic_ai_harness.google_workspace import GoogleWorkspace
 
 agent = Agent('openai:gpt-5.6-sol', capabilities=[GoogleWorkspace()])
 

@@ -63,6 +63,17 @@ class TestGoogleWorkspace:
         monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', 'token')
         Agent(TestModel(), capabilities=[GoogleWorkspace(services=('gmail',))])
 
+    @pytest.mark.parametrize('access_token', ['', ' '])
+    def test_rejects_empty_explicit_access_token(self, access_token: str):
+        with pytest.raises(UserError, match='`access_token` must not be empty'):
+            GoogleWorkspace(services=('gmail',), access_token=access_token)
+
+    @pytest.mark.parametrize('access_token', ['', ' '])
+    def test_rejects_empty_environment_access_token(self, access_token: str, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', access_token)
+        with pytest.raises(UserError, match='`GOOGLE_ACCESS_TOKEN` must not be empty'):
+            Agent(TestModel(), capabilities=[GoogleWorkspace(services=('gmail',))])
+
     @pytest.mark.parametrize(
         ('service', 'url'),
         [

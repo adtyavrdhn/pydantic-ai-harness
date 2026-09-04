@@ -107,7 +107,7 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
 
     Use these for hosted OAuth, persistent token storage, per-user credentials,
     or custom transport policy. A selected service absent from the mapping uses
-    the direct authentication fields.
+    the bearer-token configuration.
     """
 
     include_instructions: bool = True
@@ -125,6 +125,9 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
         if unknown:
             raise UserError(f'Unknown Google Workspace service: {sorted(unknown)[0]!r}.')
         self.services = services
+
+        if self.access_token is not None and not self.access_token.strip():
+            raise UserError('`access_token` must not be empty.')
 
         if self.clients is not None:
             unused_clients = set(self.clients).difference(services)
@@ -177,6 +180,8 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
             return self.access_token
         access_token = os.environ.get('GOOGLE_ACCESS_TOKEN')
         if access_token is not None:
+            if not access_token.strip():
+                raise UserError('`GOOGLE_ACCESS_TOKEN` must not be empty.')
             return access_token
         raise UserError(
             'Google Workspace authentication requires `access_token`, `GOOGLE_ACCESS_TOKEN`, or a prebuilt client.'
