@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+import anyio
+import pytest
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.run import AgentRunResult
+
+from pydantic_ai_harness.channels import (
+    ChannelEvent,
+    ChannelHost,
+    ConversationStore,
+    InMemoryConversationStore,
+)
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return 'asyncio'
+
+
+class _RecordingAdapter:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.replies: list[tuple[ChannelEvent, str]] = []
+        self.error = error
+
+    async def reply(self, event: ChannelEvent, text: str) -> None:
+        self.replies.append((event, text))
+        if self.error is not None:
+            raise self.error
+
+
+class _RecordingStore:
+    def __init__(self) -> None:
+        self.delegate = InMemoryConversationStore()
+        self.loads: list[str] = []
+        self.saves: list[tuple[str, Sequence[ModelMessage]]] = []
+
+    async def load(self, conversation_id: str) -> Sequence[ModelMessage]:
+        self.loads.append(conversation_id)
+        return await self.delegate.load(conversation_id)
+
+    async def save(self, conversation_id: str, messages: Sequence[ModelMessage]) -> None:
+        self.saves.append((conversation_id, messages))
+        await self.delegate.save(conversation_id, messages)
+
+
+def _event(event_id: str, conversation_id: str = 'conversation') -> ChannelEvent:
+    return ChannelEvent(
+        event_id=event_id,
+        conversation_id=conversation_id,
+        sender_id='sender',
+        text=f'prompt {event_id}',
+        reply_to_id=f'message {event_id}',
+    )
+
+
+class TestChannelHost:
+    async def test_runs_public_agent_replies_and_saves_history(self) -> None:
+        adapter = _RecordingAdapter()
+        store = _RecordingStore()
+        agent: Agent[None, str] = Agent('test', name='channel-agent')
+        host = ChannelHost(agent, adapter, store=store)
+
+        first = await host.handle(_event('one'))
+        second = await host.handle(_event('two'))
+
+        assert isinstance(first, AgentRunResult)
+        assert [text for _, text in adapter.replies] == ['success (no tool calls)', 'success (no tool calls)']
+        assert store.loads == ['conversation', 'conversation']
+        assert [len(messages) for _, messages in store.saves] == [2, 4]
+        assert len(second.all_messages()) == 4
+        assert all(message.conversation_id == 'conversation' for message in second.all_messages())
+
+    async def test_default_store_keeps_conversations_separate(self) -> None:
+        adapter = _RecordingAdapter()
+        host = ChannelHost(Agent('test'), adapter)
+
+        left = await host.handle(_event('left', 'left'))
+        right = await host.handle(_event('right', 'right'))
+
+        assert len(left.all_messages()) == 2
+        assert len(right.all_messages()) == 2
+
+    async def test_passes_per_event_dependencies(self) -> None:
+        adapter = _RecordingAdapter()
+        seen: list[str] = []
+
+        def instructions(ctx: RunContext[str]) -> str:
+            seen.append(ctx.deps)
+            return f'Dependency: {ctx.deps}'
+
+        agent = Agent('test', deps_type=str, instructions=instructions)
+        host = ChannelHost(agent, adapter)
+
+        await host.handle(_event('one'), deps='tenant-specific')
+
+        assert seen == ['tenant-specific']
+
+    async def test_serializes_one_conversation_but_allows_different_conversations(self) -> None:
+        active_by_conversation: dict[str, int] = {}
+        maximum_by_conversation: dict[str, int] = {}
+        total_active = 0
+        maximum_total = 0
+
+        async def model(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            nonlocal total_active, maximum_total
+            conversation_id = messages[-1].conversation_id
+            assert conversation_id is not None
+            active_by_conversation[conversation_id] = active_by_conversation.get(conversation_id, 0) + 1
+            maximum_by_conversation[conversation_id] = max(
+                maximum_by_conversation.get(conversation_id, 0), active_by_conversation[conversation_id]
+            )
+            total_active += 1
+            maximum_total = max(maximum_total, total_active)
+            await anyio.sleep(0.05)
+            active_by_conversation[conversation_id] -= 1
+            total_active -= 1
+            return ModelResponse(parts=[TextPart('done')])
+
+        host = ChannelHost(Agent(FunctionModel(model)), _RecordingAdapter())
+        async with anyio.create_task_group() as group:
+            group.start_soon(host.handle, _event('same-1', 'same'))
+            group.start_soon(host.handle, _event('same-2', 'same'))
+            group.start_soon(host.handle, _event('other', 'other'))
+
+        assert maximum_by_conversation == {'same': 1, 'other': 1}
+        assert maximum_total == 2
+
+    async def test_does_not_retry_adapter_failure_or_save_history(self) -> None:
+        calls = 0
+
+        def model(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            calls += 1
+            return ModelResponse(parts=[TextPart('done')])
+
+        adapter = _RecordingAdapter(RuntimeError('send failed'))
+        store = _RecordingStore()
+        host = ChannelHost(Agent(FunctionModel(model)), adapter, store=store)
+
+        with pytest.raises(RuntimeError, match='send failed'):
+            await host.handle(_event('one'))
+
+        assert calls == 1
+        assert store.saves == []
+
+
+def test_conversation_store_protocol_is_runtime_structural() -> None:
+    store: ConversationStore = InMemoryConversationStore()
+    assert store is not None
