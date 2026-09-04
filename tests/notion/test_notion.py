@@ -245,6 +245,24 @@ class TestNotion:
         assert result.output == 'Found with keyword search.'
         assert ('notion-search', {'query': 'launch plan'}) in notion_state['calls']
 
+    async def test_search_guidance_uses_limited_ai_search_when_keyword_search_is_unavailable(
+        self, notion_server: FastMCP, notion_state: NotionState
+    ) -> None:
+        notion_state['ai_search_status'] = 'available_with_limit'
+        notion_state['unavailable_tools'].add('search')
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            assert info.instructions is not None
+            assert 'ai_search_available=True' in info.instructions
+            tool_names = {tool.name for tool in info.function_tools}
+            assert 'notion-ai-search' in tool_names
+            assert 'notion-search' not in tool_names
+            return ModelResponse(parts=[TextPart('AI search is available with a limit.')])
+
+        result = await Agent(FunctionModel(model), capabilities=[Notion(client=notion_server)]).run('Find launch plan')
+
+        assert result.output == 'AI search is available with a limit.'
+
     async def test_read_tools_with_unavailable_access_status_are_hidden(
         self, notion_server: FastMCP, notion_state: NotionState
     ) -> None:

@@ -234,7 +234,7 @@ class NotionToolset(MCPToolset[AgentDepsT]):
         if self._identity_key is not None and identity_key != self._identity_key:
             raise UserError('Notion connection identity changed; no workspace tools were exposed.')
         self._identity_key = identity_key
-        self._ai_search_available = identity.current_tool_access['ai_search'].status == 'available'
+        self._ai_search_available = identity.current_tool_access['ai_search'].status in _AVAILABLE_STATUSES
         self._available_tool_names = {
             name
             for name in _READ_TOOL_NAMES | _MUTATION_TOOL_NAMES

@@ -7,7 +7,7 @@ class NotionState(TypedDict):
     """Mutable state recorded by the in-process Notion server."""
 
     calls: list[tuple[str, dict[str, str]]]
-    ai_search_status: Literal['available', 'not_enabled']
+    ai_search_status: Literal['available', 'available_with_limit', 'not_enabled']
     missing_access_tools: set[str]
     unavailable_tools: set[str]
     page_content: str
