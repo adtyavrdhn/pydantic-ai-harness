@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, AgentNode, NodeResult
 from pydantic_ai.exceptions import ApprovalRequired, CallDeferred, ToolFailedError, ToolRetryError
 from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnPart, UserContent
 from pydantic_ai.tools import (
@@ -20,17 +21,14 @@ from pydantic_ai.tools import (
 )
 
 if TYPE_CHECKING:
-    from pydantic_ai import _agent_graph
     from pydantic_ai._instructions import AgentInstructions
-    from pydantic_ai.capabilities.abstract import WrapRunHandler, WrapToolExecuteHandler
-    from pydantic_ai.result import FinalResult
+    from pydantic_ai.capabilities import WrapRunHandler, WrapToolExecuteHandler
     from pydantic_ai.run import AgentRunResult
-    from pydantic_graph import End
 
 
 _INSTRUCTIONS = """\
 Some tools run in the background: when you call them you'll get an immediate \
-acknowledgment. If the run remains active, the text result will be delivered \
+acknowledgment. If the run remains active, the result will be delivered \
 automatically as a follow-up message when the task completes. Continue working on other \
 things in the meantime; do not block waiting for the result.\
 """
@@ -117,11 +115,6 @@ class BackgroundTools(AbstractCapability[AgentDepsT]):
         A synchronous background tool runs concurrently with the agent. Make mutable
         dependencies and other shared state it uses thread-safe.
 
-        A synchronous background tool must not call `ctx.enqueue()`: its worker thread
-        can race the pending-message drain and lose the message. Async background tools
-        do not have this cross-thread race, but delivery still requires the run to
-        continue.
-
     `ToolReturn.return_value` and `ToolReturn.content` remain model-visible, including
     multimodal content. Application-only `ToolReturn.metadata` and deferred tool names from
     `ToolReturn.tools` are not carried into the follow-up message. Raised exceptions become
@@ -153,6 +146,24 @@ class BackgroundTools(AbstractCapability[AgentDepsT]):
     - Callable `(ctx, tool_def) -> bool | Awaitable[bool]`: custom predicate.
     """
 
+    id: str | None = 'background_tools'
+
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """Combine selectors so each matching tool is scheduled exactly once."""
+        merged = super().combine(capabilities)
+        # Core only groups instances of the same capability class under one id.
+        assert isinstance(merged, cls)
+
+        async def matches_any(ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> bool:
+            for capability in capabilities:
+                assert isinstance(capability, cls)
+                if await matches_tool_selector(capability.tools, ctx, tool_def):
+                    return True
+            return False
+
+        return replace(merged, tools=matches_any)
+
     _tasks: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]], init=False, repr=False)
     _realtime: bool = field(default=False, init=False, repr=False)
     _completed: list[tuple[UserContent, ...]] = field(
@@ -177,7 +188,13 @@ class BackgroundTools(AbstractCapability[AgentDepsT]):
         args: dict[str, Any],
         handler: WrapToolExecuteHandler,
     ) -> Any:
-        if self._realtime or tool_def.sequential or not await matches_tool_selector(self.tools, ctx, tool_def):
+        run_sequential = ctx.tool_manager is not None and ctx.tool_manager.get_parallel_execution_mode() == 'sequential'
+        if (
+            self._realtime
+            or run_sequential
+            or tool_def.sequential
+            or not await matches_tool_selector(self.tools, ctx, tool_def)
+        ):
             return await handler(args)
 
         task_id = call.tool_call_id
@@ -211,7 +228,7 @@ class BackgroundTools(AbstractCapability[AgentDepsT]):
         task.add_done_callback(task_done)
         return (
             f"Tool '{tool_name}' is running in background (task {task_id}). "
-            f'If this run remains active, you will receive the text result automatically when it completes. '
+            f'If this run remains active, you will receive the result automatically when it completes. '
             f'Continue with other work in the meantime.'
         )
 
@@ -219,9 +236,9 @@ class BackgroundTools(AbstractCapability[AgentDepsT]):
         self,
         ctx: RunContext[AgentDepsT],
         *,
-        node: _agent_graph.AgentNode[AgentDepsT, Any],
-        result: _agent_graph.AgentNode[AgentDepsT, Any] | End[FinalResult[Any]],
-    ) -> _agent_graph.AgentNode[AgentDepsT, Any] | End[FinalResult[Any]]:
+        node: AgentNode[AgentDepsT],
+        result: NodeResult[AgentDepsT],
+    ) -> NodeResult[AgentDepsT]:
         from pydantic_graph import End
 
         if isinstance(result, End) and isinstance(result.data.output, DeferredToolRequests):
@@ -230,7 +247,13 @@ class BackgroundTools(AbstractCapability[AgentDepsT]):
 
         # Let the outer drain deliver anything already queued before waiting for
         # another completion.
-        while isinstance(result, End) and self._tasks and not self._completed and not ctx.pending_messages:
+        while (
+            isinstance(result, End)
+            and self._tasks
+            and not self._completed
+            and not self._task_errors
+            and not ctx.pending_messages
+        ):
             done, _ = await asyncio.wait(tuple(self._tasks), return_when=asyncio.FIRST_COMPLETED)
             self._tasks.difference_update(done)
 

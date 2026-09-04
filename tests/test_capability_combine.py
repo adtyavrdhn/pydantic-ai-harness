@@ -60,6 +60,7 @@ from pydantic_ai.models.test import TestModel
 import pydantic_ai_harness
 from pydantic_ai_harness import (
     Advisor,
+    BackgroundTools,
     Coder,
     Memory,
     Planning,
@@ -169,6 +170,10 @@ def _check_advisor(merged: Any) -> None:
     assert merged.max_tokens == 4096
 
 
+def _check_background_tools(merged: Any) -> None:
+    assert callable(merged.tools)
+
+
 def _check_sub_agents(merged: Any) -> None:
     # Rosters union: an agent either side could reach stays reachable through one delegate tool.
     assert [entry.agent.name for entry in merged.agents] == ['alpha', 'beta']
@@ -233,6 +238,11 @@ COMBINE_POLICY: dict[str, Policy] = {
         ),
         _check_advisor,
     ),
+    'BackgroundTools': Combines(
+        'one background scheduler per agent; selectors combine without wrapping a tool twice',
+        lambda: (BackgroundTools[Any](tools=['first']), BackgroundTools[Any](tools=['second'])),
+        _check_background_tools,
+    ),
     # -- Several of these is the normal case, so they stay anonymous. --
     'Coder': Anonymous('a packaged harness; composing two is composing their members'),
     'Researcher': Anonymous('a packaged harness; composing two is composing their members'),
@@ -243,7 +253,6 @@ COMBINE_POLICY: dict[str, Policy] = {
     'InputGuardrail': Anonymous('several guards is the design'),
     'OutputGuardrail': Anonymous('several guards is the design'),
     'PromptInjectionDefender': Anonymous('one per `tool_filter`; several scopes compose'),
-    'BackgroundTools': Anonymous('one per tool selector; several disjoint scopes compose'),
     'ToolGuardrail': Anonymous('several guards is the design'),
     'ManagedPrompt': Anonymous('one per prompt name'),
     'RepoContext': Anonymous('one per workspace root'),

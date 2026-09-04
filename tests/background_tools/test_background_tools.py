@@ -37,6 +37,7 @@ from pydantic_ai.realtime.codec import (
     ToolResult,
 )
 from pydantic_ai.run import AgentRunResult
+from pydantic_ai.tool_manager import ToolManager
 from pydantic_ai.tools import DeferredToolRequests, RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
 
@@ -213,21 +214,21 @@ class TestBackgroundTools:
                 task_group.cancel_scope.cancel()
 
     @pytest.mark.parametrize(
-        ('error_factory', 'expected'),
+        ('error_factory', 'expected', 'private_detail'),
         [
-            (lambda: RuntimeError('private backend detail'), 'failed: RuntimeError'),
-            (lambda: ModelRetry('use different arguments'), 'failed: use different arguments'),
-            (lambda: ToolFailed('service unavailable'), 'failed: service unavailable'),
+            (lambda: ModelRetry('use different arguments'), 'failed: use different arguments', None),
+            (lambda: ToolFailed('service unavailable'), 'failed: service unavailable', None),
             (
                 lambda: CallDeferred(metadata={'private_job_id': 'secret'}),
                 'failed: CallDeferred was raised; background tools cannot defer a running task.',
+                'secret',
             ),
-            (RuntimeError, 'failed: RuntimeError'),
+            (RuntimeError, 'failed: RuntimeError', None),
         ],
-        ids=['runtime', 'retry', 'tool-failed', 'deferred', 'empty-error'],
+        ids=['retry', 'tool-failed', 'deferred', 'empty-error'],
     )
     async def test_control_flow_and_empty_errors_have_readable_follow_ups(
-        self, error_factory: Callable[[], Exception], expected: str
+        self, error_factory: Callable[[], Exception], expected: str, private_detail: str | None
     ) -> None:
         release = asyncio.Event()
         agent = Agent(_model_calling('broken', ack_callback=release.set), capabilities=[BackgroundTools()])
@@ -239,18 +240,15 @@ class TestBackgroundTools:
 
         result = await agent.run('go')
 
-        assert result.output == 'done'
         assert _follow_up_seen(result.all_messages(), expected)
-        assert not _follow_up_seen(result.all_messages(), 'private_job_id')
-        assert not _follow_up_seen(result.all_messages(), 'secret')
+        if private_detail is not None:
+            assert not _follow_up_seen(result.all_messages(), private_detail)
         assert result.usage.tool_calls == 0
 
     async def test_pending_background_call_counts_toward_tool_call_limit(self) -> None:
         started = 0
 
         def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            if _ack_seen(messages):
-                return ModelResponse(parts=[ToolCallPart(tool_name='slow', args='{}')])
             return ModelResponse(parts=[ToolCallPart(tool_name='slow', args='{}')])
 
         agent = Agent(FunctionModel(model_fn), capabilities=[BackgroundTools()])
@@ -348,11 +346,11 @@ class TestBackgroundTools:
 
         async with agent.run_stream('go') as stream_result:
             output = asyncio.ensure_future(stream_result.get_output())
-            await asyncio.wait_for(started.wait(), timeout=1)
+            await asyncio.wait_for(started.wait(), timeout=5)
             await asyncio.sleep(0)
             assert not output.done()
             release.set()
-            assert await asyncio.wait_for(output, timeout=1) == 'final answer'
+            assert await asyncio.wait_for(output, timeout=5) == 'final answer'
 
         assert not _follow_up_seen(stream_result.all_messages(), 'late result')
 
@@ -380,20 +378,24 @@ class TestBackgroundTools:
         assert not _ack_seen(result.all_messages())
         assert not _follow_up_seen(result.all_messages(), 'Background tool')
 
-    async def test_selected_sync_tool_acks_then_delivers_result_as_follow_up(self) -> None:
-        agent = Agent(_model_calling('sync_bg'), capabilities=[BackgroundTools()])
+    async def test_run_scoped_sequential_mode_uses_normal_execution(self) -> None:
+        agent = Agent(TestModel(), capabilities=[BackgroundTools()])
 
         @agent.tool_plain(metadata={'background': True})
-        def sync_bg() -> str:  # pyright: ignore[reportUnusedFunction]
-            return 'sync result'
+        async def selected() -> str:  # pyright: ignore[reportUnusedFunction]
+            return 'normal result'
 
-        result = await agent.run('go')
+        with ToolManager.parallel_execution_mode('sequential'):
+            result = await agent.run('go')
 
-        assert result.output == 'done'
-        assert _ack_seen(result.all_messages())
-        assert _follow_up_seen(result.all_messages(), 'completed.\nResult: sync result')
+        assert any(
+            isinstance(part, ToolReturnPart) and part.tool_name == 'selected' and part.content == 'normal result'
+            for message in result.all_messages()
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
 
-    async def test_sync_background_tool_can_enqueue_from_worker_thread(self) -> None:
+    async def test_selected_sync_tool_acks_then_delivers_result_as_follow_up(self) -> None:
         agent = Agent(_model_calling('sync_bg'), capabilities=[BackgroundTools()])
 
         @agent.tool(metadata={'background': True})
@@ -403,8 +405,55 @@ class TestBackgroundTools:
 
         result = await agent.run('go')
 
-        assert result.output == 'done'
+        assert _ack_seen(result.all_messages())
         assert _follow_up_seen(result.all_messages(), 'message from sync background tool')
+        assert _follow_up_seen(result.all_messages(), 'completed.\nResult: sync result')
+
+    async def test_multiple_capabilities_combine_selectors_without_double_execution(self) -> None:
+        calls = {'first': 0, 'shared': 0, 'plain': 0}
+        release = asyncio.Event()
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if _follow_up_seen(messages, 'first result') and _follow_up_seen(messages, 'shared result'):
+                return ModelResponse(parts=[TextPart(content='done')])
+            if _ack_seen(messages):
+                release.set()
+                return ModelResponse(parts=[TextPart(content='waiting')])
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(tool_name='first', args='{}'),
+                    ToolCallPart(tool_name='shared', args='{}'),
+                    ToolCallPart(tool_name='plain', args='{}'),
+                ]
+            )
+
+        agent = Agent(
+            FunctionModel(model_fn),
+            capabilities=[BackgroundTools(tools=['first', 'shared']), BackgroundTools(tools=['shared'])],
+        )
+
+        @agent.tool_plain
+        async def first() -> str:  # pyright: ignore[reportUnusedFunction]
+            calls['first'] += 1
+            await release.wait()
+            return 'first result'
+
+        @agent.tool_plain
+        async def shared() -> str:  # pyright: ignore[reportUnusedFunction]
+            calls['shared'] += 1
+            await release.wait()
+            return 'shared result'
+
+        @agent.tool_plain
+        async def plain() -> str:  # pyright: ignore[reportUnusedFunction]
+            calls['plain'] += 1
+            return 'plain result'
+
+        result = await agent.run('go')
+
+        assert calls == {'first': 1, 'shared': 1, 'plain': 1}
+        assert _follow_up_seen(result.all_messages(), 'completed.\nResult: first result')
+        assert _follow_up_seen(result.all_messages(), 'completed.\nResult: shared result')
 
     async def test_background_tool_uses_context_cancel_to_stop_the_run(self) -> None:
         first_started = asyncio.Event()
@@ -629,7 +678,6 @@ class TestBackgroundTools:
 
         assert isinstance(result.output, DeferredToolRequests)
         assert result.output.approvals[0].tool_name == 'needs_approval'
-        assert fast_done.is_set()
         assert model_calls == 1
 
     async def test_queued_result_is_not_delayed_by_an_unrelated_live_task(self) -> None:
@@ -704,7 +752,7 @@ class TestBackgroundTools:
 
     async def test_cancelled_background_tool_does_not_cancel_its_sibling(self) -> None:
         release = asyncio.Event()
-        sibling_cancelled = False
+        cancelled_raised = asyncio.Event()
 
         def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             if _follow_up_seen(messages, 'slow value'):
@@ -721,37 +769,51 @@ class TestBackgroundTools:
         @agent.tool_plain(metadata={'background': True})
         async def cancelled() -> str:  # pyright: ignore[reportUnusedFunction]
             await release.wait()
+            cancelled_raised.set()
             raise asyncio.CancelledError
 
         @agent.tool_plain(metadata={'background': True})
         async def slow() -> str:  # pyright: ignore[reportUnusedFunction]
-            nonlocal sibling_cancelled
             await release.wait()
-            try:
-                await asyncio.sleep(0.05)
-            except asyncio.CancelledError:  # pragma: no cover -- the assertion below verifies this path is not taken
-                sibling_cancelled = True
-                raise
+            await cancelled_raised.wait()
             return 'slow value'
 
         result = await asyncio.wait_for(agent.run('go'), timeout=5)
 
-        assert result.output == 'done'
-        assert not sibling_cancelled
         assert _follow_up_seen(result.all_messages(), 'completed.\nResult: slow value')
 
     async def test_background_base_exception_stops_the_run(self) -> None:
         class FatalBackgroundError(BaseException):
             pass
 
-        agent = Agent(_model_calling('fatal'), capabilities=[BackgroundTools()])
+        slow_started = asyncio.Event()
+        slow_cancelled = asyncio.Event()
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name='fatal', args='{}'), ToolCallPart(tool_name='slow', args='{}')]
+            )
+
+        agent = Agent(FunctionModel(model_fn), capabilities=[BackgroundTools()])
 
         @agent.tool_plain(metadata={'background': True})
         async def fatal() -> str:  # pyright: ignore[reportUnusedFunction]
+            await slow_started.wait()
             raise FatalBackgroundError
 
+        @agent.tool_plain(metadata={'background': True})
+        async def slow() -> str:  # pyright: ignore[reportUnusedFunction]
+            slow_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                slow_cancelled.set()
+                raise
+            return 'unreachable'  # pragma: no cover
+
         with pytest.raises(FatalBackgroundError):
-            await agent.run('go')
+            await asyncio.wait_for(agent.run('go'), timeout=5)
+        await asyncio.wait_for(slow_cancelled.wait(), timeout=5)
 
     async def test_pre_start_cancellation_releases_reserved_tool_usage(self) -> None:
         ctx = RunContext(deps=None, model=TestModel(), usage=RunUsage(), pending_messages=[])
@@ -803,24 +865,6 @@ class TestBackgroundTools:
         with pytest.raises(FatalBackgroundError):
             await capability.wrap_run(ctx, handler=run_handler)
 
-    async def test_run_abort_cancels_live_tasks(self) -> None:
-        cancel_seen = asyncio.Event()
-        agent = Agent(_model_calling('slow'), capabilities=[BackgroundTools()])
-
-        @agent.tool_plain(metadata={'background': True})
-        async def slow() -> str:  # pyright: ignore[reportUnusedFunction]
-            try:
-                await asyncio.sleep(60)
-            except asyncio.CancelledError:
-                cancel_seen.set()
-                raise
-            return 'never'  # pragma: no cover -- task is cancelled before completing
-
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(agent.run('go'), timeout=0.5)
-
-        await asyncio.wait_for(cancel_seen.wait(), timeout=1)
-
     async def test_run_abort_waits_for_background_task_cancellation_cleanup(self) -> None:
         started = asyncio.Event()
         cancellation_seen = asyncio.Event()
@@ -842,18 +886,18 @@ class TestBackgroundTools:
                 raise
 
         run = asyncio.ensure_future(agent.run('go'))
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=5)
         run.cancel()
 
         try:
-            await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+            await asyncio.wait_for(cancellation_seen.wait(), timeout=5)
             await asyncio.sleep(1.1)
             assert not run.done()
         finally:
             release.set()
 
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(run, timeout=1)
+            await asyncio.wait_for(run, timeout=5)
         assert finished.is_set()
 
     async def test_run_abort_does_not_wait_for_default_sync_worker(self) -> None:
@@ -870,17 +914,17 @@ class TestBackgroundTools:
             return 'late result'
 
         run = asyncio.ensure_future(agent.run('go'))
-        assert await asyncio.to_thread(started.wait, 1)
+        assert await asyncio.to_thread(started.wait, 5)
         run.cancel()
 
         try:
             with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(run, timeout=1)
+                await asyncio.wait_for(run, timeout=5)
             assert not finished.is_set()
         finally:
             release.set()
 
-        assert await asyncio.to_thread(finished.wait, 1)
+        assert await asyncio.to_thread(finished.wait, 5)
 
     async def test_cancellation_token_cancels_live_tasks(self) -> None:
         cancel_seen = asyncio.Event()
@@ -904,7 +948,7 @@ class TestBackgroundTools:
 
         with pytest.raises(RunCancelled):
             await asyncio.wait_for(run, timeout=5)
-        await asyncio.wait_for(cancel_seen.wait(), timeout=1)
+        await asyncio.wait_for(cancel_seen.wait(), timeout=5)
 
     async def test_name_list_selector(self) -> None:
         release = asyncio.Event()

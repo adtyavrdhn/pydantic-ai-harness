@@ -101,10 +101,6 @@ cancellation. Suppressing cancellation can keep cleanup open.
 >
 > A synchronous background tool runs concurrently with the agent. Make mutable dependencies and
 > other shared state it uses thread-safe.
->
-> A synchronous background tool must not call `ctx.enqueue()`: its worker thread can race the
-> pending-message drain and lose the message. Async background tools do not have this cross-thread
-> race, but delivery still requires the run to continue.
 
 ## Limitations
 
@@ -112,11 +108,10 @@ cancellation. Suppressing cancellation can keep cleanup open.
 - **Realtime**: Realtime sessions already execute tools concurrently. Selected tools stay on the
   realtime session's native tool-result path, so their original result content is preserved and
   they do not return the background acknowledgment.
-- **Result hooks and tracing**: The follow-up user message does not pass through result hooks. A
-  wrap-based result guard nested inside `BackgroundTools` can inspect the handler result, so guard
-  behavior depends on capability order. Tool instrumentation and `after_tool_execute` observe the
-  immediate acknowledgment. Screen and bound the result inside the tool when enforcement must not
-  depend on ordering.
+- **Result hooks and tracing**: The follow-up user message does not pass through tool-result or
+  tool-error hooks. A wrap-based capability nested inside `BackgroundTools` can inspect the handler
+  outcome; capabilities outside it observe the immediate acknowledgment. Screen and bound the result
+  inside the tool when enforcement must not depend on ordering.
 
 ## Durable execution
 
