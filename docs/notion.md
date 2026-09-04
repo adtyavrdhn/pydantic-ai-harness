@@ -1,6 +1,6 @@
 # Notion
 
-The Notion integration lets an agent search and read your workspace, then make explicitly approved changes.
+The Notion integration lets an agent search and read your workspace, then make explicitly selected changes.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/notion/)
 
@@ -90,5 +90,10 @@ uv run python examples/notion_page_update.py "Find the launch plan and replace i
 - The default `Notion` and `NotionToolset` surface is read-only. Add each write tool explicitly with `mutations`.
 - Selecting a mutation makes it callable but does not approve it. Compose `approval_required()` as shown above.
 - One toolset belongs to one authenticated workspace/user. If that identity changes, construct a new toolset.
+- The client owns token storage and refresh. Follow Notion's [token lifecycle guidance](https://developers.notion.com/guides/mcp/build-mcp-client#token-lifecycle):
+  store each connection's tokens encrypted, persist each rotated pair atomically, and serialize refreshes per grant.
+  On `invalid_grant`, clear that grant and reauthorize instead of retrying.
 - Use `NOTION_MCP_URL` for production. A custom client or proxy is trusted to implement the same tool names safely.
-- Treat Notion and connected-app content as untrusted data. Content cannot authorize a mutation or change its target.
+- Tool results are available to the configured model provider. Check that provider's data-handling policy before use.
+- Treat Notion and connected-app content as untrusted data. Do not treat content as authorization for a mutation or
+  target change. The `approval_required()` wrapper shown above enforces the human approval boundary.

@@ -108,12 +108,12 @@ def notion_server(notion_state: NotionState) -> FastMCP:
         return [{'id': 'page-1', 'title': 'Launch plan', 'url': 'https://notion.so/page-1'}]
 
     @server.tool(name='notion-get-users')
-    def get_users() -> list[dict[str, str]]:
+    def get_users() -> list[dict[str, str]]:  # pragma: no cover
         """List users."""
         return [{'id': 'user-1', 'name': 'Ada'}]
 
     @server.tool(name='notion-query-meeting-notes')
-    def query_meeting_notes(query: str) -> list[dict[str, str]]:
+    def query_meeting_notes(query: str) -> list[dict[str, str]]:  # pragma: no cover
         """Query meeting notes."""
         return [{'id': 'meeting-1', 'title': query}]
 
@@ -127,12 +127,12 @@ def notion_server(notion_state: NotionState) -> FastMCP:
         return {'id': page_id, 'url': f'https://notion.so/{page_id}'}
 
     @server.tool(name='notion-create-database')
-    def create_database(title: str) -> dict[str, str]:
+    def create_database(title: str) -> dict[str, str]:  # pragma: no cover
         """Create a database."""
         return {'id': 'database-1', 'title': title}
 
     @server.tool(name='notion-delete-workspace')
-    def delete_workspace() -> str:
+    def delete_workspace() -> str:  # pragma: no cover
         """A hypothetical server tool that the integration must not expose."""
         return 'deleted'
 
@@ -180,6 +180,22 @@ def malformed_attribution_server() -> FastMCP:
     def fetch(id: str) -> dict[str, object]:
         """Return success without the required identity fields."""
         return {'id': id}
+
+    return server
+
+
+@pytest.fixture
+def non_text_attribution_server() -> FastMCP:
+    from mcp.server.fastmcp.server import FastMCP, Settings  # noqa: PLC0415
+    from mcp.types import ImageContent  # noqa: PLC0415
+
+    Settings.model_rebuild()
+    server = FastMCP('notion-non-text-attribution')
+
+    @server.tool(name='notion-fetch')
+    def fetch() -> object:
+        """Return a non-text identity response."""
+        return ImageContent(type='image', data='eA==', mimeType='image/png')
 
     return server
 
@@ -258,12 +274,12 @@ def rotating_identity_server() -> FastMCP:
         }
 
     @server.tool(name='notion-update-page')
-    def update_page(page_id: str, command: str, new_str: str) -> dict[str, str]:
+    def update_page(page_id: str, command: str, new_str: str) -> dict[str, str]:  # pragma: no cover
         """Return an update result that must not be reached."""
         return {'page_id': page_id, 'command': command, 'new_str': new_str}
 
     @server.tool(name='notion-search')
-    def search(query: str) -> list[dict[str, str]]:
+    def search(query: str) -> list[dict[str, str]]:  # pragma: no cover
         """Return a result that must not be reached after identity changes."""
         return [{'id': 'page-1', 'title': query}]
 

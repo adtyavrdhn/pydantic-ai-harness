@@ -8,11 +8,11 @@ import pytest
 from fastmcp import Client
 from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import RunContext
 
-from pydantic_ai_harness.notion import Notion, NotionToolset
+from pydantic_ai_harness.notion import NOTION_MCP_URL, Notion, NotionToolset
 
 from ._support import NotionState
 
@@ -22,16 +22,10 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.anyio
 
 
-def _tool_returns(messages: list[ModelMessage], name: str) -> list[ToolReturnPart]:
-    return [
-        part
-        for message in messages
-        for part in message.parts
-        if isinstance(part, ToolReturnPart) and part.tool_name == name
-    ]
-
-
 class TestNotionToolset:
+    def test_official_endpoint_keeps_path_scoped_oauth_resource(self) -> None:
+        assert NOTION_MCP_URL == 'https://mcp.notion.com/mcp'
+
     async def test_tool_discovery_manages_its_own_client_lifecycle(
         self, notion_server: FastMCP, run_context: RunContext[None]
     ) -> None:
@@ -151,6 +145,14 @@ class TestNotionToolset:
             with pytest.raises(UserError, match='attribution was malformed; no workspace tools were exposed'):
                 await toolset.get_tools(run_context)
 
+    async def test_non_text_attribution_is_rejected(
+        self, non_text_attribution_server: FastMCP, run_context: RunContext[None]
+    ) -> None:
+        toolset = NotionToolset[None](client=non_text_attribution_server)
+
+        with pytest.raises(UserError, match='attribution was malformed; no workspace tools were exposed'):
+            await toolset.get_tools(run_context)
+
     async def test_oversized_identity_field_is_rejected(
         self, oversized_identity_field_server: FastMCP, run_context: RunContext[None]
     ) -> None:
@@ -193,6 +195,7 @@ class TestNotion:
             assert 'connection identity' in info.instructions
             assert 'workspace-1' in info.instructions
             assert 'user-1' in info.instructions
+            assert 'unknown_block_ids' in info.instructions
             if step == 0:
                 step += 1
                 return ModelResponse(parts=[ToolCallPart('notion-ai-search', {'query': 'launch plan'}, 'search')])
@@ -215,6 +218,10 @@ class TestNotion:
             seen_tools.update(tool.name for tool in info.function_tools)
             assert info.instructions is not None
             assert 'explicitly selected Notion mutation tools' in info.instructions
+            assert 'IDs returned by search or fetch' in info.instructions
+            assert '`notion-get-async-task`' in info.instructions
+            assert 'do not automatically retry a\nnon-idempotent mutation' in info.instructions
+            assert 'request fresh approval' in info.instructions
             return ModelResponse(parts=[TextPart('done')])
 
         result = await Agent(
@@ -245,23 +252,22 @@ class TestNotion:
         assert result.output == 'Found with keyword search.'
         assert ('notion-search', {'query': 'launch plan'}) in notion_state['calls']
 
-    async def test_search_guidance_uses_limited_ai_search_when_keyword_search_is_unavailable(
+    async def test_limited_ai_search_follows_provider_fallback_guidance(
         self, notion_server: FastMCP, notion_state: NotionState
     ) -> None:
         notion_state['ai_search_status'] = 'available_with_limit'
-        notion_state['unavailable_tools'].add('search')
 
         def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             assert info.instructions is not None
-            assert 'ai_search_available=True' in info.instructions
+            assert 'ai_search_available=False' in info.instructions
             tool_names = {tool.name for tool in info.function_tools}
-            assert 'notion-ai-search' in tool_names
-            assert 'notion-search' not in tool_names
-            return ModelResponse(parts=[TextPart('AI search is available with a limit.')])
+            assert 'notion-ai-search' not in tool_names
+            assert 'notion-search' in tool_names
+            return ModelResponse(parts=[TextPart('Keyword search is the supported fallback.')])
 
         result = await Agent(FunctionModel(model), capabilities=[Notion(client=notion_server)]).run('Find launch plan')
 
-        assert result.output == 'AI search is available with a limit.'
+        assert result.output == 'Keyword search is the supported fallback.'
 
     async def test_read_tools_with_unavailable_access_status_are_hidden(
         self, notion_server: FastMCP, notion_state: NotionState
@@ -372,7 +378,7 @@ class TestNotion:
                         )
                     ]
                 )
-            return ModelResponse(parts=[TextPart('should not run')])
+            return ModelResponse(parts=[TextPart('should not run')])  # pragma: no cover
 
         notion = NotionToolset[None](client=notion_server, mutations='notion-update-page')
         agent = Agent(
