@@ -77,9 +77,9 @@ The repository also includes this as [`examples/github_pr_review.py`](../example
   `output_type=[str, DeferredToolRequests]`. Mutations then return `DeferredToolRequests` until the caller approves or
   denies each tool-call ID and resumes with `DeferredToolResults`. Set `require_approval=False` only if the application
   enforces an equivalent approval policy.
-- Supported `toolsets` are `repos`, `issues`, and `pull_requests`. Searches containing Boolean `OR` or literal
-  `repo:`, `org:`, or `user:` text are rejected. Tools with an opaque secondary target are hidden; named secondary
-  targets outside the configured scope are rejected.
+- Supported `toolsets` are `repos`, `issues`, and `pull_requests`. Boolean `OR` searches are rejected. `repo:`, `org:`,
+  or `user:` qualifiers that do not exactly match the configured scope are also rejected, even when they appear as
+  literal text. Tools with an opaque secondary target are hidden; named secondary targets outside the scope are rejected.
 - The PAT or OAuth access token, together with GitHub organization policy, remains GitHub's authorization boundary.
   Restrict the token to the same target and permissions.
 - The default endpoint is GitHub's hosted MCP server at `https://api.githubcopilot.com/mcp/`. GitHub Enterprise Cloud
