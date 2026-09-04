@@ -21,7 +21,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 
-from pydantic_ai_harness.atlassian import ATLASSIAN_MCP_URL, Atlassian, AtlassianToolset
+from pydantic_ai_harness.atlassian import Atlassian, AtlassianToolset
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
@@ -39,14 +39,14 @@ class TestAtlassian:
             toolset = AtlassianToolset[None](cloud_id='site-1')
         transport = toolset.client.transport
         assert isinstance(transport, StreamableHttpTransport)
-        assert transport.url == ATLASSIAN_MCP_URL
+        assert transport.url == 'https://mcp.atlassian.com/v2/mcp?tools=all'
         assert isinstance(transport.auth, OAuth)
 
     def test_bearer_token_is_bound_to_the_official_endpoint(self):
         toolset = AtlassianToolset[None](cloud_id='site-1', authorization_token='bearer-secret')
         transport = toolset.client.transport
         assert isinstance(transport, StreamableHttpTransport)
-        assert transport.url == ATLASSIAN_MCP_URL
+        assert transport.url == 'https://mcp.atlassian.com/v2/mcp?tools=all'
         assert isinstance(transport.auth, BearerAuth)
         assert transport.auth.token.get_secret_value() == 'bearer-secret'
 
@@ -74,6 +74,13 @@ class TestAtlassian:
             )
         with pytest.raises(UserError, match='Configure authentication on the prebuilt `client`'):
             Atlassian(cloud_id='site-1', client=atlassian_server, authorization_token='ignored-secret')
+
+    @pytest.mark.parametrize('authorization_token', ['', '   '])
+    def test_rejects_empty_bearer_token(self, authorization_token: str):
+        with pytest.raises(UserError, match='`authorization_token` must not be empty'):
+            Atlassian(cloud_id='site-1', authorization_token=authorization_token)
+        with pytest.raises(UserError, match='`authorization_token` must not be empty'):
+            AtlassianToolset(cloud_id='site-1', authorization_token=authorization_token)
 
     @pytest.mark.parametrize(
         ('build', 'match'),
@@ -163,6 +170,26 @@ class TestAtlassian:
         first_request = result.all_messages()[0]
         assert isinstance(first_request, ModelRequest)
         assert 'cloudId `site-1`' in (first_request.instructions or '')
+
+    async def test_instructions_can_be_omitted_without_removing_tools(
+        self, atlassian_server: FastMCP, atlassian_calls: list[str]
+    ):
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+                return ModelResponse(
+                    parts=[ToolCallPart(tool_name='getJiraIssue', args={'cloudId': 'site-1', 'issueIdOrKey': 'ENG-42'})]
+                )
+            return ModelResponse(parts=[TextPart('done')])
+
+        result = await Agent(
+            FunctionModel(model),
+            capabilities=[Atlassian(cloud_id='site-1', client=atlassian_server, include_instructions=False)],
+        ).run('Read ENG-42')
+        first_request = result.all_messages()[0]
+        assert isinstance(first_request, ModelRequest)
+        assert first_request.instructions is None
+        assert result.output == 'done'
+        assert atlassian_calls == ['getJiraIssue']
 
     @pytest.mark.parametrize(
         ('product', 'expected'),

@@ -48,7 +48,8 @@ deletes.
 
 Each product call is checked against `cloud_id` before it reaches the server. Atlassian also applies the authenticated
 principal's product permissions and OAuth site scope. Construct one capability or toolset per user in multi-user
-applications; do not share an authenticated MCP client between users.
+applications; do not share an authenticated MCP client between users. Site and product instructions are included by
+default; set `include_instructions=False` when equivalent instructions are already supplied elsewhere.
 
 ## Enable writes
 
@@ -96,12 +97,12 @@ Supported values follow Atlassian's current Rovo MCP v2 catalogue:
 | `jira_service_management` | API token only | No |
 | `bitbucket` | OAuth 2.1 or API token; workspace must be linked to an Atlassian organization | No |
 
-Pass a caller-owned bearer token with `authorization_token=`, or pass a preconfigured FastMCP client with `client=`
-for persistent OAuth storage, Basic authentication, service-account policy, custom TLS, or connection pooling. A URL
-is not accepted as `client`, and `authorization_token` cannot be combined with a preconfigured client. These rules
-keep the convenience bearer-token path pinned to Atlassian's official endpoint. Both values are excluded from the
-capability's representation. Configure API-token authentication when selecting Jira Service Management; its tools do
-not support OAuth 2.1. Atlassian validates the credential type at the server.
+Pass a service-account API key with `authorization_token=` for Bearer authentication. Personal API tokens use Basic
+authentication and require a preconfigured FastMCP client passed with `client=`. A preconfigured client can also
+provide persistent OAuth storage, custom TLS, or connection pooling. A URL is not accepted as `client`, and
+`authorization_token` cannot be combined with a preconfigured client. These rules keep the convenience Bearer path
+pinned to Atlassian's official endpoint. Both values are excluded from the capability's representation. Configure one
+of these API-token mechanisms when selecting Jira Service Management; its tools do not support OAuth 2.1.
 
 Atlassian organization administrators can independently allow or block read, write, search, delete, and manage
 permission groups. The user's existing Jira, Confluence, JSM, and Bitbucket permissions still apply. Some enriched
@@ -131,6 +132,7 @@ agent = Agent(
 - [Atlassian Rovo MCP v2 tools](https://support.atlassian.com/atlassian-ai-gateway/docs/supported-tools/)
 - [OAuth 2.1 and site scoping](https://support.atlassian.com/atlassian-ai-gateway/docs/configure-oauth-2-1/)
 - [Authentication methods](https://support.atlassian.com/atlassian-ai-gateway/docs/authentication-and-authorization/)
+- [API-token authentication](https://support.atlassian.com/atlassian-ai-gateway/docs/configure-authentication-via-api-token/)
 - [Organization permissions](https://support.atlassian.com/security-and-access-policies/docs/Configure-Atlassian-Rovo-MCP-server-permission/)
 - [Rovo credit usage](https://support.atlassian.com/rovo/docs/rovo-usage-limits/)
 

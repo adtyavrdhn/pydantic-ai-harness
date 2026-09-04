@@ -38,8 +38,7 @@ except ImportError as _import_error:  # pragma: no cover
         'MCP support is required for the Atlassian capability. Install it with: uv add "pydantic-ai-slim[mcp]"'
     ) from _import_error
 
-ATLASSIAN_MCP_URL = 'https://mcp.atlassian.com/v2/mcp?tools=all'
-"""Atlassian Rovo MCP v2 endpoint with the flat tool catalogue."""
+_ATLASSIAN_MCP_URL = 'https://mcp.atlassian.com/v2/mcp?tools=all'
 
 AtlassianAccess = Literal['read_only', 'read_write', 'destructive']
 """Maximum class of Atlassian operation exposed to the agent."""
@@ -189,6 +188,8 @@ def validate_auth_configuration(
     authorization_token: str | None,
     client: MCPToolsetClient | None,
 ) -> None:
+    if authorization_token is not None and not authorization_token.strip():
+        raise UserError('`authorization_token` must not be empty.')
     if 'jira_service_management' in products and authorization_token is None and client is None:
         raise UserError(
             'Jira Service Management MCP tools require API-token authentication; '
@@ -226,7 +227,7 @@ class AtlassianToolset(MCPToolset[AgentDepsT]):
             cloud_id: Atlassian site ID accepted by every selected product tool.
             products: Product tool families to expose. Jira is the default.
             access: Read-only, read-write, or destructive tool exposure.
-            authorization_token: Caller-owned bearer token. Omit for OAuth 2.1.
+            authorization_token: Atlassian service-account API key sent as a Bearer token. Omit for OAuth 2.1.
             client: Replacement MCP client for custom auth, transport, or tests.
             id: Stable toolset ID.
         """
@@ -236,7 +237,7 @@ class AtlassianToolset(MCPToolset[AgentDepsT]):
         validate_access(access)
         validate_auth_configuration(normalized_products, authorization_token, client)
 
-        resolved_client: MCPToolsetClient = ATLASSIAN_MCP_URL if client is None else client
+        resolved_client: MCPToolsetClient = _ATLASSIAN_MCP_URL if client is None else client
         auth: Literal['oauth'] | str | None = (authorization_token or 'oauth') if client is None else None
         super().__init__(resolved_client, id=id, auth=auth, process_tool_call=self._enforce_site_scope)
         self.cloud_id = cloud_id

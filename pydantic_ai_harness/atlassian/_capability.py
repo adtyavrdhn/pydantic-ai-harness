@@ -48,7 +48,7 @@ class Atlassian(AbstractCapability[AgentDepsT]):
     """Require Pydantic AI approval for every exposed write or destructive tool."""
 
     authorization_token: str | None = field(default=None, repr=False)
-    """Caller-owned bearer token. When omitted, Pydantic AI performs OAuth 2.1."""
+    """Atlassian service-account API key. When omitted, Pydantic AI performs OAuth 2.1."""
 
     include_instructions: bool = True
     """Tell the model which site and products the tools are scoped to."""
