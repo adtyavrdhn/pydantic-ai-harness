@@ -36,7 +36,7 @@ class StripeServer:
         if self.status_code is not None:
             return httpx.Response(self.status_code)
         message: JsonValue = json.loads(request.content)
-        if not isinstance(message, dict):
+        if not isinstance(message, dict):  # pragma: no cover
             return httpx.Response(400)
 
         method = message.get('method')
@@ -56,7 +56,7 @@ class StripeServer:
             name = params.get('name') if isinstance(params, dict) else None
             mode = 'write' if name == 'stripe_api_write' else 'read'
             result = {'content': [{'type': 'text', 'text': f'{{"mode":"{mode}"}}'}]}
-        else:
+        else:  # pragma: no cover
             return httpx.Response(400)
         return httpx.Response(200, json={'jsonrpc': '2.0', 'id': request_id, 'result': result})
 
