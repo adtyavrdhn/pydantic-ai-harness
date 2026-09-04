@@ -19,52 +19,77 @@ from .fake_daytona import FakeDaytona
 pytestmark = pytest.mark.anyio(backends=['asyncio'])
 
 
-def _ctx(run_id: str = 'run-1') -> RunContext[None]:
-    return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id)
+def _ctx(run_id: str = 'run-1', conversation_id: str | None = None) -> RunContext[None]:
+    return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id, conversation_id=conversation_id)
+
+
+async def _resolved(
+    capability: DaytonaSandbox[None], ctx: RunContext[None], ref: SandboxRef | None = None
+) -> DaytonaSandboxBackend:
+    """Ask the capability for a backend and touch it, so the create-or-attach actually happens."""
+    backend = capability.get_sandbox(ctx, ref=ref)
+    assert isinstance(backend, DaytonaSandboxBackend)
+    await backend.sandbox
+    return backend
 
 
 class TestLifecycle:
-    async def test_acquire_reuses_one_named_sandbox_and_returns_id_refs(self, fake_daytona: FakeDaytona) -> None:
-        capability = DaytonaSandbox[None]()
-        first = await capability.acquire_sandbox(_ctx())
-        second = await capability.acquire_sandbox(_ctx())
-        assert first == second
-        assert first.sandbox_id == fake_daytona.sandboxes[0].id
-        assert len(fake_daytona.sandboxes) == 1
-        assert fake_daytona.closed_clients == 3
+    async def test_building_a_backend_does_no_io(self, fake_daytona: FakeDaytona) -> None:
+        DaytonaSandbox[None]().get_sandbox(_ctx(), ref=None)
 
-    async def test_different_runs_use_different_names(self, fake_daytona: FakeDaytona) -> None:
-        capability = DaytonaSandbox[None]()
-        await capability.acquire_sandbox(_ctx('run-1'))
-        await capability.acquire_sandbox(_ctx('run-2'))
-        assert fake_daytona.create_params[0].name != fake_daytona.create_params[1].name
-
-    async def test_get_sandbox_reconnects_by_ref(self, fake_daytona: FakeDaytona) -> None:
-        sandbox = fake_daytona.sandbox()
-        backend = await DaytonaSandbox[None]().get_sandbox(_ctx(), SandboxRef(sandbox_id=sandbox.id))
-        assert isinstance(backend, DaytonaSandboxBackend)
-        assert backend.sandbox_id == sandbox.id
-
-    async def test_release_deletes_without_starting(self, fake_daytona: FakeDaytona) -> None:
-        capability = DaytonaSandbox[None]()
-        ref = await capability.acquire_sandbox(_ctx())
-        sandbox = fake_daytona.sandboxes[0]
-        await capability.release_sandbox(_ctx(), ref)
-        assert sandbox.start_calls == []
-        assert sandbox.deleted is True
-
-    async def test_attached_sandbox_is_not_owned(self, fake_daytona: FakeDaytona) -> None:
-        capability = DaytonaSandbox[None](sandbox_id='existing')
-        ref = await capability.acquire_sandbox(_ctx())
-        await capability.release_sandbox(_ctx(), ref)
-        assert ref == SandboxRef(sandbox_id='existing')
         assert fake_daytona.sandboxes == []
 
-    async def test_failed_acquisition_close_does_not_delete(self, fake_daytona: FakeDaytona) -> None:
-        fake_daytona.close_error = RuntimeError('close failed')
-        with pytest.raises(RuntimeError, match='close failed'):
-            await DaytonaSandbox[None]().acquire_sandbox(_ctx())
+    async def test_one_conversation_reuses_one_named_sandbox(self, fake_daytona: FakeDaytona) -> None:
+        capability = DaytonaSandbox[None]()
+
+        first = await _resolved(capability, _ctx('run-1', conversation_id='chat-1'))
+        second = await _resolved(capability, _ctx('run-2', conversation_id='chat-1'))
+
+        assert first.ref == second.ref
+        assert first.ref == SandboxRef(sandbox_id=fake_daytona.sandboxes[0].id)
+        assert len(fake_daytona.sandboxes) == 1
+
+    async def test_different_conversations_use_different_names(self, fake_daytona: FakeDaytona) -> None:
+        capability = DaytonaSandbox[None]()
+
+        await _resolved(capability, _ctx('run-1', conversation_id='chat-1'))
+        await _resolved(capability, _ctx('run-2', conversation_id='chat-2'))
+
+        assert fake_daytona.create_params[0].name != fake_daytona.create_params[1].name
+
+    async def test_a_ref_attaches_to_that_sandbox(self, fake_daytona: FakeDaytona) -> None:
+        sandbox = fake_daytona.sandbox()
+
+        backend = await _resolved(DaytonaSandbox[None](), _ctx(), SandboxRef(sandbox_id=sandbox.id))
+
+        assert backend.ref == SandboxRef(sandbox_id=sandbox.id)
+        assert fake_daytona.create_params == []
+
+    async def test_a_configured_sandbox_id_attaches_and_creates_nothing(self, fake_daytona: FakeDaytona) -> None:
+        fake_daytona.sandbox('existing')
+
+        backend = await _resolved(DaytonaSandbox[None](sandbox_id='existing'), _ctx())
+
+        assert backend.ref == SandboxRef(sandbox_id='existing')
+        assert fake_daytona.create_params == []
+
+    async def test_nothing_deletes_the_sandbox_when_a_run_ends(self, fake_daytona: FakeDaytona) -> None:
+        # A conversation spans many runs, so the end of one is not the end of the workspace.
+        await _resolved(DaytonaSandbox[None](), _ctx(conversation_id='chat-1'))
+
         assert fake_daytona.sandboxes[0].deleted is False
+
+
+class TestDeleteById:
+    """`delete_by_id` is how an application ends a sandbox itself, without starting it first."""
+
+    async def test_deletes_without_starting(self, fake_daytona: FakeDaytona) -> None:
+        sandbox = fake_daytona.sandbox('owned')
+
+        await DaytonaSandboxBackend.delete_by_id('owned')
+
+        assert sandbox.start_calls == []
+        assert sandbox.deleted is True
 
 
 class TestConfiguration:

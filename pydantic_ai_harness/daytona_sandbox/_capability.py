@@ -17,17 +17,26 @@ from pydantic_ai_harness.daytona_sandbox._backend import (
 )
 
 
-def _sandbox_name(run_id: str) -> str:
-    return f'pydantic-ai-{hashlib.sha256(run_id.encode()).hexdigest()[:32]}'
+def _sandbox_name(identity: str) -> str:
+    """Return a Daytona-safe, deterministic name for one conversation."""
+    return f'pydantic-ai-{hashlib.sha256(identity.encode()).hexdigest()[:32]}'
 
 
 @dataclass(kw_only=True)
 class DaytonaSandbox(AbstractCapability[AgentDepsT]):
     """Supply an isolated Daytona sandbox through `ctx.sandbox`.
 
-    Owned acquisition uses a deterministic name derived from the logical run ID,
-    making retries reconnect instead of provisioning another sandbox. Set
-    `sandbox_id` to attach without taking ownership of the sandbox lifetime.
+    One named sandbox is created or reused per conversation, so a follow-up run continues in
+    the workspace the previous one left behind. The name is derived from the conversation, which
+    also makes creation safe to retry across durable workers: a retry attaches to the sandbox the
+    first attempt made rather than provisioning a second one.
+
+    Nothing here deletes a sandbox. A conversation can span many runs, so the end of a run is not
+    the end of the workspace; Daytona stops an idle sandbox after `auto_stop_minutes` and deletes
+    it immediately after that. Raise `auto_stop_minutes` for longer work, or delete one yourself
+    with `DaytonaSandboxBackend.delete_by_id`.
+
+    Set `sandbox_id` to attach to a sandbox managed elsewhere instead.
     """
 
     sandbox_id: str | None = None
@@ -72,27 +81,18 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
                 'attaches to an existing one.'
             )
 
-    async def acquire_sandbox(self, ctx: RunContext[AgentDepsT]) -> SandboxRef:
+    def get_sandbox(self, ctx: RunContext[AgentDepsT], *, ref: SandboxRef | None) -> SandboxBackend:
+        """Build the backend for this run. No I/O here: it attaches or creates on first use."""
+        if ref is not None:
+            # An environment the run was pointed at explicitly, or one an earlier run left behind.
+            return DaytonaSandboxBackend(ref=ref, working_dir=self.workdir)
         if self.sandbox_id is not None:
-            return SandboxRef(sandbox_id=self.sandbox_id)
-        if ctx.run_id is None:  # pragma: no cover - core assigns it before acquisition
-            raise RuntimeError('Daytona sandbox acquisition requires a run ID.')
-        backend = await DaytonaSandboxBackend.create_or_connect(
-            name=_sandbox_name(ctx.run_id),
+            return DaytonaSandboxBackend(ref=SandboxRef(sandbox_id=self.sandbox_id), working_dir=self.workdir)
+        return DaytonaSandboxBackend(
+            name=_sandbox_name(ctx.conversation_id or ctx.run_id or ''),
             snapshot=self.snapshot,
             auto_stop_minutes=self.auto_stop_minutes,
             working_dir=self.workdir,
             env=self.env,
             network_block_all=self.network_block_all,
         )
-        ref = SandboxRef(sandbox_id=backend.sandbox_id)
-        await backend.close(terminate=False)
-        return ref
-
-    async def get_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> SandboxBackend | None:
-        return await DaytonaSandboxBackend.connect(ref.sandbox_id, working_dir=self.workdir)
-
-    async def release_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> None:
-        if self.sandbox_id is not None:
-            return
-        await DaytonaSandboxBackend.delete_by_id(ref.sandbox_id)

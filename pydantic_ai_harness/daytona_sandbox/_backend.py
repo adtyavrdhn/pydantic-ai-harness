@@ -28,8 +28,9 @@ import posixpath
 import shlex
 import time
 import uuid
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Mapping, Sequence
 from contextlib import asynccontextmanager
+from types import ModuleType
 from typing import TYPE_CHECKING
 
 import anyio
@@ -38,10 +39,10 @@ from pydantic_ai.sandboxes import (
     FileEntry,
     SandboxBackend,
     SandboxError,
+    SandboxRef,
     SandboxTimeoutError,
     SandboxUnavailableError,
 )
-from typing_extensions import Self
 
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
 
@@ -234,22 +235,22 @@ class _DaytonaFilesystem:
 
     async def read_bytes(self, path: str) -> bytes:
         async with self._translated(path):
-            return await self._backend.sandbox.fs.download_file(path, _REQUEST_TIMEOUT)
+            return await (await self._backend.sandbox).fs.download_file(path, _REQUEST_TIMEOUT)
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         parent = posixpath.dirname(path)
         async with self._translated(path):
             if parent not in ('', '.', '/'):
-                mkdir = await self._backend.sandbox.process.exec(
+                mkdir = await (await self._backend.sandbox).process.exec(
                     f'mkdir -p -- {shlex.quote(parent)}', timeout=_REQUEST_TIMEOUT
                 )
                 if mkdir.exit_code != 0:
                     raise DaytonaSandboxError(mkdir.result or f'Could not create {parent!r}.')
-            await self._backend.sandbox.fs.upload_file(data, path, timeout=_REQUEST_TIMEOUT)
+            await (await self._backend.sandbox).fs.upload_file(data, path, timeout=_REQUEST_TIMEOUT)
 
     async def stat(self, path: str) -> FileEntry:
         async with self._translated(path):
-            entry = await self._backend.sandbox.fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
+            entry = await (await self._backend.sandbox).fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
         return FileEntry(
             name=posixpath.basename(path.rstrip('/')),
             path=path,
@@ -259,7 +260,7 @@ class _DaytonaFilesystem:
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
         async with self._translated(path):
-            entries = await self._backend.sandbox.fs.list_files(path, request_timeout=_REQUEST_TIMEOUT)
+            entries = await (await self._backend.sandbox).fs.list_files(path, request_timeout=_REQUEST_TIMEOUT)
         return [
             FileEntry(
                 name=entry.name,
@@ -272,17 +273,17 @@ class _DaytonaFilesystem:
 
     async def make_dir(self, path: str) -> None:
         async with self._translated(path):
-            await self._backend.sandbox.fs.create_folder(path, '755', request_timeout=_REQUEST_TIMEOUT)
+            await (await self._backend.sandbox).fs.create_folder(path, '755', request_timeout=_REQUEST_TIMEOUT)
 
     async def remove(self, path: str) -> None:
         async with self._translated(path):
-            await self._backend.sandbox.fs.delete_file(path, recursive=True, request_timeout=_REQUEST_TIMEOUT)
+            await (await self._backend.sandbox).fs.delete_file(path, recursive=True, request_timeout=_REQUEST_TIMEOUT)
 
     async def exists(self, path: str) -> bool:
         from daytona import DaytonaNotFoundError
 
         try:
-            await self._backend.sandbox.fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
+            await (await self._backend.sandbox).fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
         except DaytonaNotFoundError:
             return False
         except Exception as error:
@@ -290,57 +291,111 @@ class _DaytonaFilesystem:
         return True
 
 
+def _require_daytona() -> ModuleType:
+    """Import the optional `daytona` package, or explain how to install it."""
+    try:
+        import daytona
+    except ImportError as error:
+        raise DaytonaSandboxError(_MISSING_DAYTONA) from error
+    return daytona
+
+
 class DaytonaSandboxBackend(SandboxBackend):
     """A Daytona sandbox behind Pydantic AI's `SandboxBackend` protocol.
 
-    The backend owns its `AsyncDaytona` client and implements filesystem and background
-    private process support. Daytona delivers output through callbacks, so complete command
-    results are buffered while a command runs.
+    Building one does no I/O. It holds settings plus, optionally, the identity of a sandbox that
+    already exists; the first operation creates or attaches, once, and everything after that
+    reuses the same environment. Reach the live Daytona sandbox through
+    [`sandbox`][pydantic_ai_harness.daytona_sandbox.DaytonaSandboxBackend.sandbox], which you
+    can only await — so no operation can run against a sandbox that does not exist yet.
+
+    The backend owns its `AsyncDaytona` client. Nothing here deletes a sandbox on its own:
+    Daytona stops an idle one after `auto_stop_minutes` and deletes it immediately after that.
+    Call [`close`][pydantic_ai_harness.daytona_sandbox.DaytonaSandboxBackend.close] with
+    `terminate=True` to end one sooner.
+
+    Daytona delivers output through callbacks, so complete command results are buffered while a
+    command runs.
 
     The protocol is structural, but subclassing it here makes a signature drift fail the type
     check on this class instead of at a distant `Sandbox.wrap` call.
-    """
 
-    sandbox: AsyncSandbox
-    """The underlying Daytona sandbox, for provider-specific functionality."""
+    Args:
+        ref: Identity of an existing sandbox to attach to on first use.
+        name: Daytona name to attach to on first use, creating it only if there is none. This is
+            what lets several runs share one environment, and what makes a durable retry attach
+            rather than provision a second sandbox. Ignored when `ref` is given.
+        snapshot: Daytona snapshot a newly created sandbox starts from.
+        auto_stop_minutes: How long Daytona leaves a newly created sandbox idle before stopping
+            it; it is deleted immediately after.
+        working_dir: Directory commands run in; the sandbox's own default when `None`.
+        env: Environment variables set on a newly created sandbox.
+        network_block_all: Whether a newly created sandbox is cut off from the network.
+    """
 
     def __init__(
         self,
-        client: AsyncDaytona,
-        sandbox: AsyncSandbox,
         *,
-        owned: bool,
-        working_dir: str | None = None,
-    ) -> None:
-        self._client = client
-        self.sandbox = sandbox
-        self._owned = owned
-        self._working_dir = absolute_path('working_dir', working_dir)
-        self._closed = False
-        self.fs = _DaytonaFilesystem(self)
-
-    @property
-    def sandbox_id(self) -> str:
-        return self.sandbox.id
-
-    @classmethod
-    async def create(
-        cls,
-        *,
+        ref: SandboxRef | None = None,
         name: str | None = None,
         snapshot: str | None = None,
         auto_stop_minutes: int = DEFAULT_AUTO_STOP_MINUTES,
         working_dir: str | None = None,
         env: Mapping[str, str] | None = None,
         network_block_all: bool = False,
-    ) -> Self:
-        """Create an owned sandbox with Daytona's automatic stop and delete backstop."""
-        try:
-            from daytona import AsyncDaytona, CreateSandboxFromSnapshotParams
-        except ImportError as error:
-            raise DaytonaSandboxError(_MISSING_DAYTONA) from error
-        working_dir = absolute_path('working_dir', working_dir)
-        client = AsyncDaytona()
+    ) -> None:
+        self._ref = ref
+        self._name = name
+        self._snapshot = snapshot
+        self._auto_stop_minutes = auto_stop_minutes
+        self._env = dict(env) if env is not None else None
+        self._network_block_all = network_block_all
+        self._working_dir = absolute_path('working_dir', working_dir)
+        self._client: AsyncDaytona | None = None
+        self._live: AsyncSandbox | None = None
+        self._owned = False
+        self._closed = False
+        self._lock = anyio.Lock()
+        self.fs = _DaytonaFilesystem(self)
+
+    @property
+    def sandbox(self) -> Awaitable[AsyncSandbox]:
+        """The live Daytona sandbox, created or attached on first use.
+
+        Awaitable and never a plain value: every operation has to go through the step that
+        makes the sandbox exist, so none of them can skip it.
+        """
+        return self._resolve()
+
+    async def _resolve(self) -> AsyncSandbox:
+        async with self._lock:
+            if self._live is None:
+                # Guarded once, here: everything that touches Daytona runs after this.
+                _require_daytona()
+                if self._ref is not None:
+                    self._live = await self._attach(self._ref.sandbox_id)
+                elif self._name is not None:
+                    self._live = await self._create_or_attach_by_name(self._name)
+                else:
+                    self._live = await self._create()
+                self._ref = SandboxRef(sandbox_id=self._live.id)
+        return self._live
+
+    @property
+    def ref(self) -> SandboxRef | None:
+        """Identity of the sandbox, or `None` before one has been created."""
+        return self._ref
+
+    async def _new_client(self) -> AsyncDaytona:
+        client = _require_daytona().AsyncDaytona()
+        self._client = client
+        return client
+
+    async def _create(self, name: str | None = None) -> AsyncSandbox:
+        """Create a sandbox with Daytona's automatic stop and delete backstop."""
+        from daytona import CreateSandboxFromSnapshotParams
+
+        client = await self._new_client()
         try:
             # Cancellation can orphan a sandbox until the paired auto-stop and immediate
             # auto-delete settings reap it. A stable name lets a retry reconnect meanwhile.
@@ -348,100 +403,96 @@ class DaytonaSandboxBackend(SandboxBackend):
                 sandbox = await client.create(
                     CreateSandboxFromSnapshotParams(
                         name=name,
-                        snapshot=snapshot,
-                        env_vars=dict(env) if env is not None else None,
-                        auto_stop_interval=auto_stop_minutes,
+                        snapshot=self._snapshot,
+                        env_vars=dict(self._env) if self._env is not None else None,
+                        auto_stop_interval=self._auto_stop_minutes,
                         auto_delete_interval=0,
-                        network_block_all=network_block_all,
+                        network_block_all=self._network_block_all,
                     ),
                     timeout=_LIFECYCLE_TIMEOUT,
                 )
         except BaseException as error:
             await cleanup_call(client.close, timeout=_TEARDOWN_TIMEOUT)
+            self._client = None
             if isinstance(error, TimeoutError):
                 raise DaytonaSandboxError(
                     f'Daytona sandbox creation did not complete within {_CREATE_TIMEOUT}s.'
                 ) from error
             if isinstance(error, Exception):
-                raise cls.operation_error(error, 'Could not create Daytona sandbox') from error
+                raise self.operation_error(error, 'Could not create Daytona sandbox') from error
             raise  # pragma: no cover - cancellation propagates after bounded client cleanup
-        return cls(client, sandbox, owned=True, working_dir=working_dir)
+        self._owned = True
+        return sandbox
 
-    @classmethod
-    async def connect(cls, sandbox_id_or_name: str, *, working_dir: str | None = None) -> Self:
-        """Connect by Daytona sandbox ID or name; references produced by Harness use IDs."""
-        try:
-            from daytona import AsyncDaytona
-        except ImportError as error:
-            raise DaytonaSandboxError(_MISSING_DAYTONA) from error
-        working_dir = absolute_path('working_dir', working_dir)
-        client = AsyncDaytona()
+    async def _attach(self, sandbox_id_or_name: str) -> AsyncSandbox:
+        """Attach by Daytona sandbox ID or name, starting a stopped sandbox.
+
+        A sandbox that is gone raises rather than resolving to a dead environment. Nothing is
+        recreated in its place — a run that expected files there must be told they are gone,
+        not handed an empty workspace.
+        """
+        client = await self._new_client()
         try:
             with anyio.fail_after(_CREATE_TIMEOUT):
                 sandbox = await client.get(sandbox_id_or_name, request_timeout=_REQUEST_TIMEOUT)
                 await sandbox.start(timeout=_LIFECYCLE_TIMEOUT)
         except BaseException as error:
             await cleanup_call(client.close, timeout=_TEARDOWN_TIMEOUT)
+            self._client = None
             if isinstance(error, TimeoutError):
                 raise DaytonaSandboxError(
                     f'Daytona sandbox connection did not complete within {_CREATE_TIMEOUT}s.'
                 ) from error
             if isinstance(error, Exception):
-                raise cls.operation_error(
+                raise self.operation_error(
                     error, f'Could not connect to Daytona sandbox {sandbox_id_or_name!r}', unavailable=True
                 ) from error
             raise  # pragma: no cover - cancellation propagates after bounded client cleanup
-        return cls(client, sandbox, owned=False, working_dir=working_dir)
+        return sandbox
 
-    @classmethod
-    async def create_or_connect(
-        cls,
-        *,
-        name: str,
-        snapshot: str | None = None,
-        auto_stop_minutes: int = DEFAULT_AUTO_STOP_MINUTES,
-        working_dir: str | None = None,
-        env: Mapping[str, str] | None = None,
-        network_block_all: bool = False,
-    ) -> Self:
-        """Connect by stable name, create if absent, then reconnect after a lost race."""
+    async def _create_or_attach_by_name(self, name: str) -> AsyncSandbox:
+        """Attach by stable name, create if absent, then attach again after a lost race."""
         try:
-            return await cls.connect(name, working_dir=working_dir)
+            return await self._attach(name)
         except DaytonaSandboxUnavailableError:
             pass
         try:
-            return await cls.create(
-                name=name,
-                snapshot=snapshot,
-                auto_stop_minutes=auto_stop_minutes,
-                working_dir=working_dir,
-                env=env,
-                network_block_all=network_block_all,
-            )
+            return await self._create(name)
         except DaytonaSandboxError as create_error:
             try:
-                return await cls.connect(name, working_dir=working_dir)
+                return await self._attach(name)
             except DaytonaSandboxUnavailableError:
                 raise create_error
 
+    def _describe(self) -> str:
+        """How to name this sandbox in an error, before or after it exists."""
+        if self._ref is not None:
+            return repr(self._ref.sandbox_id)
+        if self._name is not None:
+            return f'named {self._name!r}'
+        return 'that was never started'
+
     async def close(self, *, terminate: bool) -> None:
         """Close the SDK client, deleting the sandbox first when this backend owns it."""
-        if self._closed:
+        client, sandbox = self._client, self._live
+        if self._closed or client is None or sandbox is None:
+            # Never used, so there is no client to close and no sandbox to delete. Resolving one
+            # here just to close it would create the very sandbox being released.
             return
         deletion_error: Exception | None = None
         if terminate and self._owned:
             deletion_error = await cleanup_call(
-                functools.partial(self._client.delete, self.sandbox, timeout=_LIFECYCLE_TIMEOUT, wait=True),
+                functools.partial(client.delete, sandbox, timeout=_LIFECYCLE_TIMEOUT, wait=True),
                 timeout=_TEARDOWN_TIMEOUT,
             )
             if self._is_not_found(deletion_error):
                 deletion_error = None
-        close_error = await cleanup_call(self._client.close, timeout=_TEARDOWN_TIMEOUT)
+        close_error = await cleanup_call(client.close, timeout=_TEARDOWN_TIMEOUT)
         self._closed = close_error is None
         error = deletion_error or close_error
         if error is not None:
             await raise_after_cleanup(
-                self.operation_error(error, f'Could not close Daytona sandbox {self.sandbox_id!r}')
+                self.operation_error(error, f'Could not close Daytona sandbox {self._describe()}')
             )
 
     @staticmethod
@@ -477,12 +528,13 @@ class DaytonaSandboxBackend(SandboxBackend):
         # same answer, and the cache converges. No lock needed.
         if self._working_dir is None:
             try:
-                discovered = await self.sandbox.get_work_dir()
+                sandbox = await self.sandbox
+                discovered = await sandbox.get_work_dir()
             except Exception as error:
                 raise self.operation_error(error, 'Could not determine the working directory') from error
             if not posixpath.isabs(discovered):
                 raise DaytonaSandboxError(
-                    f'Could not determine the working directory of Daytona sandbox {self.sandbox_id!r}.'
+                    f'Could not determine the working directory of Daytona sandbox {self._describe()}.'
                 )
             self._working_dir = posixpath.normpath(discovered)
         return self._working_dir
@@ -522,7 +574,7 @@ class DaytonaSandboxBackend(SandboxBackend):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         started = time.monotonic()
         session_id = f'pydantic-ai-{uuid.uuid4().hex}'
-        process = self.sandbox.process
+        process = (await self.sandbox).process
         created = False
         try:
             with anyio.fail_after(_REQUEST_TIMEOUT):
@@ -586,9 +638,7 @@ class DaytonaSandboxBackend(SandboxBackend):
 
 
 if TYPE_CHECKING:
-    _client = AsyncDaytona.__new__(AsyncDaytona)
-    _sandbox = AsyncSandbox.__new__(AsyncSandbox)
-    _backend = DaytonaSandboxBackend(_client, _sandbox, owned=False)
+    _backend = DaytonaSandboxBackend()
     _backend_conforms: SandboxBackend = _backend
     _filesystem_backend_conforms: SupportsFilesystem = _backend
     _filesystem_conforms: SandboxFilesystem = _backend.fs
