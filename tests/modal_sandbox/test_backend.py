@@ -235,6 +235,21 @@ async def test_missing_modal_package_is_named(monkeypatch: pytest.MonkeyPatch, e
 
 
 class TestClose:
+    async def test_an_unused_backend_has_nothing_to_close(self, fake_modal: FakeModal) -> None:
+        # Building one does no I/O, so closing it must not reach Modal either -- resolving here
+        # would create the very sandbox being released.
+        await ModalSandboxBackend().close(terminate=True)
+
+        assert fake_modal.sandboxes == []
+        assert fake_modal.create_kwargs == []
+
+    async def test_attaching_twice_to_one_id_reuses_the_same_sandbox(self, fake_modal: FakeModal) -> None:
+        first = await started(ref=SandboxRef(sandbox_id='sb-keep'))
+        second = await started(ref=SandboxRef(sandbox_id='sb-keep'))
+
+        assert await second.sandbox is await first.sandbox
+        assert fake_modal.attach_ids == ['sb-keep', 'sb-keep']
+
     async def test_terminates_and_detaches_when_owned(self, fake_modal: FakeModal) -> None:
         backend = await started()
         await backend.close(terminate=True)
