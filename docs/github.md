@@ -77,11 +77,13 @@ The repository also includes this as [`examples/github_pr_review.py`](../example
   `output_type=[str, DeferredToolRequests]`. Mutations then return `DeferredToolRequests` until the caller approves or
   denies each tool-call ID and resumes with `DeferredToolResults`. Set `require_approval=False` only if the application
   enforces an equivalent approval policy.
-- Supported `toolsets` are `repos`, `issues`, and `pull_requests`. Boolean `OR` searches are rejected. `repo:`, `org:`,
-  or `user:` qualifiers that do not exactly match the configured scope are also rejected, even when they appear as
-  literal text. Tools with an opaque secondary target are hidden; named secondary targets outside the scope are rejected.
+- Supported `toolsets` are `repos`, `issues`, and `pull_requests`. Searches containing the uppercase token `OR`,
+  including quoted literal uses, are rejected. `repo:`, `org:`, or `user:` qualifiers that do not exactly match the
+  configured scope are also rejected, even when they appear as literal text. Tools with an opaque secondary target are
+  hidden; named secondary targets outside the scope are rejected.
 - The PAT or OAuth access token, together with GitHub organization policy, remains GitHub's authorization boundary.
-  Restrict the token to the same target and permissions.
+  Scope checks do not provide strict response isolation: GitHub can include linked public resources or other resources
+  the token can read. Restricting the token to the same target and permissions reduces private-data exposure.
 - The default endpoint is GitHub's hosted MCP server at `https://api.githubcopilot.com/mcp/`. GitHub Enterprise Cloud
   with data residency can use its tenant `copilot-api` URL through `url=`. GitHub Enterprise Server requires a
   caller-configured local MCP client because GitHub does not host the remote server there.

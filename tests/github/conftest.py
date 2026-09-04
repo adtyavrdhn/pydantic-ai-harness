@@ -121,18 +121,28 @@ def github_server(github_calls: list[tuple[str, dict[str, object]]]) -> FastMCP:
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
     def issue_dependency_write(
+        method: str,
+        type: str,
         owner: str,
         repo: str,
-        related_owner: str,
-        related_repo: str,
-    ) -> dict[str, str]:
+        issue_number: int,
+        related_issue_number: int,
+        related_owner: str | None = None,
+        related_repo: str | None = None,
+    ) -> dict[str, object]:
         """Write an issue dependency that can target another repository."""
-        return {  # pragma: no cover
+        arguments: dict[str, object] = {
+            'method': method,
+            'type': type,
             'owner': owner,
             'repo': repo,
+            'issue_number': issue_number,
+            'related_issue_number': related_issue_number,
             'related_owner': related_owner,
             'related_repo': related_repo,
         }
+        github_calls.append(('issue_dependency_write', arguments))
+        return arguments
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
     def issue_write(
