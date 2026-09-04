@@ -1,0 +1,148 @@
+"""Shared fixtures for the GitHub integration tests."""
+
+from __future__ import annotations
+
+import importlib.util
+from typing import TYPE_CHECKING
+
+import pytest
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RunUsage
+
+if TYPE_CHECKING:
+    from mcp.server.fastmcp import FastMCP
+
+collect_ignore = (
+    ['test_github.py'] if importlib.util.find_spec('mcp') is None or importlib.util.find_spec('fastmcp') is None else []
+)
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return 'asyncio'
+
+
+@pytest.fixture
+def run_context() -> RunContext[None]:
+    return RunContext[None](
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        prompt=None,
+        messages=[],
+        run_step=0,
+    )
+
+
+@pytest.fixture
+def github_calls() -> list[tuple[str, dict[str, object]]]:
+    return []
+
+
+@pytest.fixture
+def github_server(github_calls: list[tuple[str, dict[str, object]]]) -> FastMCP:
+    from mcp.server.fastmcp.server import FastMCP, Settings  # noqa: PLC0415
+    from mcp.types import ToolAnnotations  # noqa: PLC0415
+
+    Settings.model_rebuild()
+    server = FastMCP('github-fake')
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def get_file_contents(owner: str, repo: str, path: str) -> dict[str, str]:
+        """Read a file."""
+        arguments: dict[str, object] = {'owner': owner, 'repo': repo, 'path': path}
+        github_calls.append(('get_file_contents', arguments))
+        return {'owner': owner, 'repo': repo, 'path': path, 'content': 'print("hello")'}
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def search_code(query: str) -> str:
+        """Search code."""
+        return query
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def search_commits(query: str) -> str:
+        """Search commits."""
+        return query
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def search_issues(query: str, owner: str | None = None, repo: str | None = None) -> dict[str, str | None]:
+        """Search issues."""
+        return {'query': query, 'owner': owner, 'repo': repo}
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def search_pull_requests(query: str) -> str:
+        """Search pull requests."""
+        return query
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def pull_request_read(owner: str, repo: str, pullNumber: int, method: str = 'get') -> dict[str, object]:
+        """Read a pull request."""
+        arguments: dict[str, object] = {
+            'owner': owner,
+            'repo': repo,
+            'pullNumber': pullNumber,
+            'method': method,
+        }
+        github_calls.append(('pull_request_read', arguments))
+        return arguments
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def list_teams(org: str) -> str:
+        """List organization teams."""
+        return org
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def get_me() -> str:
+        """Get the current user."""
+        return 'octocat'
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def create_issue(owner: str, repo: str, title: str) -> dict[str, str]:
+        """Create an issue."""
+        arguments: dict[str, object] = {'owner': owner, 'repo': repo, 'title': title}
+        github_calls.append(('create_issue', arguments))
+        return {'owner': owner, 'repo': repo, 'title': title}
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def fork_repository(owner: str, repo: str, organization: str | None = None) -> dict[str, str | None]:
+        """Fork a repository to an optional destination organization."""
+        return {'owner': owner, 'repo': repo, 'organization': organization}
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def repository_ruleset_read(
+        level: str,
+        owner: str | None = None,
+        repo: str | None = None,
+        org: str | None = None,
+        enterprise: str | None = None,
+    ) -> dict[str, str | None]:
+        """Read a ruleset selected by a target-level discriminator."""
+        return {'level': level, 'owner': owner, 'repo': repo, 'org': org, 'enterprise': enterprise}
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def issue_dependency_write(
+        owner: str,
+        repo: str,
+        related_owner: str,
+        related_repo: str,
+    ) -> dict[str, str]:
+        """Write an issue dependency that can target another repository."""
+        return {
+            'owner': owner,
+            'repo': repo,
+            'related_owner': related_owner,
+            'related_repo': related_repo,
+        }
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def issue_write(owner: str, repo: str, parent_owner: str, parent_repo: str) -> dict[str, str]:
+        """Write an issue that can use a parent from another repository."""
+        return {'owner': owner, 'repo': repo, 'parent_owner': parent_owner, 'parent_repo': parent_repo}
+
+    @server.tool()
+    def unclassified_tool(owner: str, repo: str) -> str:
+        """A tool without safety annotations."""
+        return f'{owner}/{repo}'
+
+    return server
