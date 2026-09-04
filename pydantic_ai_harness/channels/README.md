@@ -136,7 +136,6 @@ Expose port 8000 through your HTTPS host, invite the bot to a channel, and menti
 - Slack may truncate replies over 40,000 characters. The adapter raises `SlackAPIError` when Slack reports that warning instead of treating a partial reply as success.
 - On the first HTTP 429, this adapter instance pauses its replies in the current process, waits for `Retry-After`, and retries the same generated reply once. A second 429 waits again before it propagates; timeouts and 5xx responses are not retried because their delivery outcome can be ambiguous.
 - The caller owns FastAPI, the queue, OAuth, and any injected `httpx.AsyncClient`.
-- While Harness is on 0.x releases, minor releases may change this API. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 ## Telegram webhook
 
@@ -152,12 +151,14 @@ uv add pydantic-ai-harness "pydantic-ai-slim[openai]" starlette uvicorn
 
 1. Create a bot in Telegram with BotFather and copy its token.
 2. Call `getMe` with that token and copy the numeric `result.id` as `TELEGRAM_BOT_ID`.
-3. Choose the numeric Telegram user or sender-chat ID allowed to invoke the agent.
+3. Before setting the webhook, send the bot a direct message and call `getUpdates`. Copy `message.from.id` as the
+   allowed user ID. To allow a message sent on behalf of a chat, copy `message.sender_chat.id` from that update.
 4. Set a public HTTPS webhook URL and register it with `setWebhook`.
 
 ```bash
 export TELEGRAM_BOT_TOKEN='your-botfather-token'
 curl --fail "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe"
+curl --fail "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates"
 
 export TELEGRAM_BOT_ID='your-numeric-result-id'
 export TELEGRAM_ALLOWED_SENDER_ID='your-numeric-user-or-sender-chat-id'
@@ -175,6 +176,9 @@ curl --fail --request POST \
 Telegram bot authentication does not use OAuth. No browser interaction is required by this integration, though
 you use the Telegram app to talk to BotFather and your bot.
 
+For ordinary group messages, disable Privacy Mode with BotFather or make the bot a group administrator. Re-add the
+bot after changing Privacy Mode so Telegram applies the new setting.
+
 ### Run
 
 Save this as `telegram_bot.py`:
@@ -182,6 +186,7 @@ Save this as `telegram_bot.py`:
 ```python {names="defined"}
 import logging
 import os
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -203,15 +208,21 @@ telegram = TelegramChannel(
 )
 host = ChannelHost(Agent('openai:gpt-5.6-sol', output_type=str), telegram)
 send_events, receive_events = anyio.create_memory_object_stream[ChannelEvent](100)
+MAX_CLAIMED_EVENTS = 10_000
+MAX_WEBHOOK_BODY_BYTES = 1_000_000
 
 
 async def consume_events() -> None:
     claimed: set[str] = set()
+    claim_order: deque[str] = deque()
     async with receive_events:
         async for event in receive_events:
             if event.event_id in claimed:
                 continue
+            if len(claim_order) == MAX_CLAIMED_EVENTS:
+                claimed.remove(claim_order.popleft())
             claimed.add(event.event_id)
+            claim_order.append(event.event_id)
             try:
                 await host.handle(event)
             except Exception:
@@ -227,8 +238,17 @@ async def lifespan(_app: Starlette) -> AsyncIterator[None]:
 
 
 async def telegram_webhook(request: Request) -> Response:
+    body = bytearray()
+    with anyio.move_on_after(5) as body_scope:
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_WEBHOOK_BODY_BYTES:
+                return Response(status_code=413)
+            body.extend(chunk)
+    if body_scope.cancel_called:
+        return Response(status_code=408)
+
     try:
-        event = telegram.parse_request(await request.body(), request.headers)
+        event = telegram.parse_request(bytes(body), request.headers)
     except TelegramWebhookError:
         return Response(status_code=401)
     except TelegramError:
@@ -266,12 +286,18 @@ uv run uvicorn telegram_bot:app --host 0.0.0.0 --port 8000
   unsupported update types, and ephemeral messages.
 - History is isolated by bot, chat, and forum or direct-message topic. Replies go to the original chat, topic, and
   source message.
-- Telegram may retry webhook delivery. The example uses a bounded in-process queue and claim set, which lose work
-  and claims on restart. Use a durable queue with an atomic `event_id` claim when duplicate turns are unacceptable.
+- The example rejects webhook bodies over 1,000,000 bytes, stops reading after five seconds, and returns 503 when
+  its bounded queue cannot accept an event within two seconds.
+- Telegram may retry webhook delivery. The example uses a bounded in-process queue, retains the latest 10,000
+  claims, and returns 204 after enqueue. It loses state on restart, and a later handler failure is not retried. Use a
+  durable queue with an atomic `event_id` claim and explicit retry policy when duplicate or lost turns are
+  unacceptable.
 - Replies are split at 4096 characters. A valid HTTP 429 delay of at most 60 seconds is retried once. Transport and
   other provider failures are not retried because delivery may be ambiguous. A later-chunk failure reports how many
   earlier chunks Telegram confirmed.
 - The caller owns Starlette, the queue, and any injected `httpx.AsyncClient`. Store the BotFather token and webhook
-  secret as application secrets.
+  secret as application secrets. Telegram puts the bot token in the Bot API request URL; custom clients, proxies,
+  and API URLs must not log or forward it to an untrusted service.
+- While Harness is on 0.x releases, minor releases may change this API. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 [Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/channels/)

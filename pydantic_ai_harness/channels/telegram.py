@@ -17,7 +17,9 @@ import hmac
 import logging
 import re
 from collections.abc import Collection, Mapping
+from threading import Lock
 from typing import TypeGuard
+from weakref import finalize
 
 import anyio
 import httpx
@@ -36,7 +38,6 @@ _CONVERSATION_PATTERN = re.compile(
 )
 _DELIVERY_PATTERN = re.compile(r'-?[1-9][0-9]*')
 _MESSAGE_PATTERN = re.compile(r'telegram:message:([1-9][0-9]*)')
-_TELEGRAM_URL_PATTERN = re.compile(r'(https?://[^\s]*?/bot)[^/\s]+(/[^\s]+)')
 _JSON_ADAPTER: TypeAdapter[object] = TypeAdapter(object)
 _MAPPING_ADAPTER: TypeAdapter[dict[str, object]] = TypeAdapter(dict[str, object])
 
@@ -59,11 +60,37 @@ class TelegramPartialDeliveryError(TelegramError):
 
 
 class _TelegramTokenFilter(logging.Filter):
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = Lock()
+        self._prefixes: dict[str, tuple[str, int]] = {}
+
+    def register(self, token_url_prefix: str, redacted_url_prefix: str) -> None:
+        with self._lock:
+            current = self._prefixes.get(token_url_prefix)
+            count = current[1] + 1 if current is not None else 1
+            self._prefixes[token_url_prefix] = redacted_url_prefix, count
+
+    def unregister(self, token_url_prefix: str) -> None:
+        with self._lock:
+            redacted_url_prefix, count = self._prefixes[token_url_prefix]
+            if count == 1:
+                del self._prefixes[token_url_prefix]
+            else:
+                self._prefixes[token_url_prefix] = redacted_url_prefix, count - 1
+
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name == 'httpx' and record.msg == 'HTTP Request: %s %s "%s %d %s"':
             args = record.args
             if isinstance(args, tuple):  # pragma: no branch - HTTPX supplies positional logging arguments
-                record.args = tuple(_redact_log_argument(value) for value in args)
+                with self._lock:
+                    replacements = tuple(
+                        (token_url_prefix, redacted_url_prefix)
+                        for token_url_prefix, (redacted_url_prefix, _count) in sorted(
+                            self._prefixes.items(), key=lambda item: len(item[0]), reverse=True
+                        )
+                    )
+                record.args = tuple(_redact_log_argument(value, replacements) for value in args)
         return True
 
 
@@ -126,8 +153,11 @@ class TelegramChannel:
         self._api_url = api_url.rstrip('/')
 
         httpx_logger = logging.getLogger('httpx')
+        token_url_prefix = str(httpx.URL(f'{self._api_url}/bot{self._bot_token}/'))
+        _TOKEN_FILTER.register(token_url_prefix, f'{token_url_prefix.rpartition("/bot")[0]}/bot<redacted>/')
         if _TOKEN_FILTER not in httpx_logger.filters:
             httpx_logger.addFilter(_TOKEN_FILTER)
+        finalize(self, _TOKEN_FILTER.unregister, token_url_prefix)
 
     def parse_request(self, raw_body: bytes, headers: Mapping[str, str]) -> ChannelEvent | None:
         """Verify and normalize one caller-owned Telegram webhook request.
@@ -339,6 +369,12 @@ def _message_identity(message: Mapping[str, object]) -> tuple[int, str | None, i
     topic_id = message.get('message_thread_id')
     if topic_id is not None and (not _is_integer_id(topic_id) or topic_id <= 0):
         raise TelegramError('Telegram webhook payload has invalid topic identity')
+    is_topic_message = message.get('is_topic_message')
+    if is_topic_message is not None and is_topic_message is not True:
+        raise TelegramError('Telegram webhook payload has invalid topic identity')
+    if is_topic_message is True and topic_id is None:
+        raise TelegramError('Telegram webhook payload has invalid topic identity')
+    forum_topic_id = topic_id if is_topic_message is True else None
     direct_topic = message.get('direct_messages_topic')
     direct_topic_id: int | None = None
     if direct_topic is not None:
@@ -349,10 +385,10 @@ def _message_identity(message: Mapping[str, object]) -> tuple[int, str | None, i
         if not _is_integer_id(raw_direct_topic_id) or raw_direct_topic_id <= 0:
             raise TelegramError('Telegram webhook payload has invalid direct-topic identity')
         direct_topic_id = raw_direct_topic_id
-    if topic_id is not None and direct_topic_id is not None:
+    if forum_topic_id is not None and direct_topic_id is not None:
         raise TelegramError('Telegram webhook payload has ambiguous topic identity')
-    if topic_id is not None:
-        return chat_id, 'topic', topic_id, message_id
+    if forum_topic_id is not None:
+        return chat_id, 'topic', forum_topic_id, message_id
     if direct_topic_id is not None:
         return chat_id, 'direct-topic', direct_topic_id, message_id
     return chat_id, None, None, message_id
@@ -362,10 +398,12 @@ def _is_integer_id(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _redact_log_argument(value: object) -> object:
+def _redact_log_argument(value: object, replacements: tuple[tuple[str, str], ...]) -> object:
     if isinstance(value, (str, httpx.URL)):
         text = str(value)
-        return _TELEGRAM_URL_PATTERN.sub(r'\1<redacted>\2', text)
+        for token_url_prefix, redacted_url_prefix in replacements:
+            text = text.replace(token_url_prefix, redacted_url_prefix)
+        return text
     return value
 
 

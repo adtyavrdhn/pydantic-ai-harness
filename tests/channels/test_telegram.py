@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from pathlib import Path
+from types import TracebackType
+from typing import TypeGuard
 
+import anyio
 import httpx
 import pytest
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from pydantic import TypeAdapter
 from pydantic_ai import Agent
+from starlette.applications import Starlette
 
 from pydantic_ai_harness.channels import ChannelEvent, ChannelHost, InMemoryConversationStore
 from pydantic_ai_harness.channels.telegram import (
@@ -52,6 +58,7 @@ def _update(
     }
     if topic_id is not None:
         message['message_thread_id'] = topic_id
+        message['is_topic_message'] = True
     return json.dumps({'update_id': update_id, 'message': message}).encode()
 
 
@@ -63,6 +70,16 @@ def _channel(client: httpx.AsyncClient | None = None) -> TelegramChannel:
         allowed_senders={22},
         client=client,
     )
+
+
+def _telegram_docs_example() -> str:
+    readme = Path(__file__).parents[2] / 'pydantic_ai_harness' / 'channels' / 'README.md'
+    telegram_section = readme.read_text(encoding='utf-8').split('Save this as `telegram_bot.py`:', 1)[1]
+    return telegram_section.split('```python {names="defined"}', 1)[1].split('```', 1)[0]
+
+
+def _is_async_no_arg(value: object) -> TypeGuard[Callable[[], Awaitable[None]]]:
+    return callable(value)
 
 
 class TestTelegramChannel:
@@ -181,6 +198,7 @@ class TestTelegramChannel:
             {
                 'message_id': 1,
                 'message_thread_id': 0,
+                'is_topic_message': True,
                 'from': {'id': 22, 'is_bot': False},
                 'chat': {'id': 1},
                 'text': 'hello',
@@ -247,6 +265,44 @@ class TestTelegramChannel:
         assert plain_event is not None
         assert plain_event.conversation_id == 'telegram:bot:9001:chat:-100123'
 
+    async def test_keeps_generic_message_thread_in_chat_conversation(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(_BODY_ADAPTER.validate_python(json.loads(request.content)))
+            return _response({'ok': True, 'result': {'message_id': 1}})
+
+        body = _BODY_ADAPTER.validate_python(json.loads(_update(topic_id=None)))
+        message = _BODY_ADAPTER.validate_python(body['message'])
+        message['message_thread_id'] = 2
+        body['message'] = message
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        channel = _channel(client)
+
+        event = channel.parse_request(json.dumps(body).encode(), _headers())
+
+        assert event is not None
+        assert event.conversation_id == 'telegram:bot:9001:chat:-100123'
+        await channel.reply(event, 'answer')
+        assert requests == [
+            {
+                'chat_id': -100123,
+                'reply_parameters': {'message_id': 33},
+                'text': 'answer',
+            }
+        ]
+        await client.aclose()
+
+    async def test_rejects_forum_topic_marker_without_thread_id(self) -> None:
+        for topic_fields in ({'is_topic_message': True}, {'is_topic_message': False, 'message_thread_id': 2}):
+            body = _BODY_ADAPTER.validate_python(json.loads(_update(topic_id=None)))
+            message = _BODY_ADAPTER.validate_python(body['message'])
+            message.update(topic_fields)
+            body['message'] = message
+
+            with pytest.raises(TelegramError, match='invalid topic identity'):
+                _channel().parse_request(json.dumps(body).encode(), _headers())
+
     async def test_preserves_direct_message_topic_identity(self) -> None:
         requests: list[dict[str, object]] = []
 
@@ -276,10 +332,12 @@ class TestTelegramChannel:
         ]
 
         message['message_thread_id'] = 44
+        message['is_topic_message'] = True
         with pytest.raises(TelegramError, match='ambiguous topic'):
             channel.parse_request(json.dumps(body).encode(), _headers())
 
         message.pop('message_thread_id')
+        message.pop('is_topic_message')
         direct_topic = _BODY_ADAPTER.validate_python(message['direct_messages_topic'])
         direct_topic['topic_id'] = 56
         message['direct_messages_topic'] = direct_topic
@@ -311,6 +369,111 @@ class TestTelegramChannel:
         assert claimed == {'telegram:bot:9001:update:11'}
         assert len(requests) == 1
         await client.aclose()
+
+    async def test_documented_server_bounds_ingress_and_claims(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv('TELEGRAM_BOT_ID', '9001')
+        monkeypatch.setenv('TELEGRAM_BOT_TOKEN', 'bot-secret')
+        monkeypatch.setenv('TELEGRAM_ALLOWED_SENDER_ID', '22')
+        monkeypatch.setenv('TELEGRAM_WEBHOOK_SECRET', 'webhook-secret')
+        monkeypatch.setenv('OPENAI_API_KEY', 'test-key')
+        namespace: dict[str, object] = {}
+        exec(compile(_telegram_docs_example(), 'telegram_bot.py', 'exec'), namespace)
+        app = namespace.get('app')
+        assert isinstance(app, Starlette)
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://example.test') as client:
+            oversized = await client.post('/telegram', content=b'x' * 1_000_001, headers=_headers())
+            unauthorized = await client.post('/telegram', content=b'{}')
+            malformed = await client.post('/telegram', content=b'not json', headers=_headers())
+            ignored = await client.post('/telegram', content=b'{"update_id":1}', headers=_headers())
+
+            assert [oversized.status_code, unauthorized.status_code, malformed.status_code, ignored.status_code] == [
+                413,
+                401,
+                400,
+                204,
+            ]
+
+            move_on_after = anyio.move_on_after
+
+            def expire_body_read(delay: float | None) -> anyio.CancelScope:
+                return move_on_after(0 if delay == 5 else delay)
+
+            monkeypatch.setattr(anyio, 'move_on_after', expire_body_read)
+            timed_out = await client.post('/telegram', content=b'{}', headers=_headers())
+            assert timed_out.status_code == 408
+            monkeypatch.setattr(anyio, 'move_on_after', move_on_after)
+
+            for update_id in range(100):
+                queued = await client.post('/telegram', content=_update(update_id=update_id + 1), headers=_headers())
+                assert queued.status_code == 204
+
+            def expire_enqueue(delay: float | None) -> anyio.CancelScope:
+                return move_on_after(0 if delay == 2 else delay)
+
+            monkeypatch.setattr(anyio, 'move_on_after', expire_enqueue)
+            full = await client.post('/telegram', content=_update(update_id=101), headers=_headers())
+            assert full.status_code == 503
+
+        send_events = namespace.get('send_events')
+        receive_events = namespace.get('receive_events')
+        assert isinstance(send_events, MemoryObjectSendStream)
+        assert isinstance(receive_events, MemoryObjectReceiveStream)
+        await send_events.aclose()
+        await receive_events.aclose()
+
+        events = [
+            ChannelEvent(
+                event_id=f'telegram:bot:9001:update:{update_id}',
+                conversation_id='telegram:bot:9001:chat:1',
+                sender_id='telegram:user:22',
+                text='hello',
+            )
+            for update_id in range(10_001)
+        ]
+        events.append(events[0])
+
+        class FakeHost:
+            def __init__(self) -> None:
+                self.handled: list[str] = []
+
+            async def handle(self, event: ChannelEvent) -> None:
+                self.handled.append(event.event_id)
+
+        class FakeReceive:
+            def __init__(self, values: list[ChannelEvent]) -> None:
+                self._values: Iterator[ChannelEvent] = iter(values)
+
+            async def __aenter__(self) -> FakeReceive:
+                return self
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: TracebackType | None,
+            ) -> None:
+                return None
+
+            def __aiter__(self) -> FakeReceive:
+                return self
+
+            async def __anext__(self) -> ChannelEvent:
+                try:
+                    return next(self._values)
+                except StopIteration:
+                    raise StopAsyncIteration from None
+
+        host = FakeHost()
+        namespace['host'] = host
+        namespace['receive_events'] = FakeReceive(events)
+        consume_events = namespace.get('consume_events')
+        assert _is_async_no_arg(consume_events)
+
+        await consume_events()
+
+        assert len(host.handled) == 10_002
+        assert host.handled.count(events[0].event_id) == 2
 
     async def test_sends_to_original_topic_and_message(self) -> None:
         requests: list[dict[str, object]] = []
@@ -629,7 +792,7 @@ class TestTelegramChannel:
     ) -> None:
         calls = 0
 
-        async def sleep(_delay: float) -> None:
+        async def sleep(_delay: float) -> None:  # pragma: no cover - this test asserts no retry
             pytest.fail('authentication failure must not sleep')
 
         def handler(_request: httpx.Request) -> httpx.Response:
@@ -660,7 +823,7 @@ class TestTelegramChannel:
     async def test_does_not_retry_malformed_rate_limit_envelope(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls = 0
 
-        async def sleep(_delay: float) -> None:
+        async def sleep(_delay: float) -> None:  # pragma: no cover - this test asserts no retry
             pytest.fail('malformed response must not sleep')
 
         def handler(_request: httpx.Request) -> httpx.Response:
@@ -697,7 +860,7 @@ class TestTelegramChannel:
             webhook_secret='webhook-secret',
             allowed_senders={22},
             client=client,
-            api_url='https://telegram.test/root/',
+            api_url='https://telegram.test/bot-decoy/root/',
         )
         event = channel.parse_request(_update(), _headers())
         assert event is not None
@@ -706,10 +869,50 @@ class TestTelegramChannel:
 
         with caplog.at_level(logging.INFO, logger='httpx'):
             await channel.reply(event, 'second')
+            logging.getLogger('httpx').info(
+                'HTTP Request: %s %s "%s %d %s"',
+                'GET',
+                httpx.URL('https://example.com/botinventory/items'),
+                'HTTP/1.1',
+                200,
+                'OK',
+            )
 
-        assert str(requests[0].url) == 'https://telegram.test/root/botbot-secret/sendMessage'
+        assert str(requests[0].url) == 'https://telegram.test/bot-decoy/root/botbot-secret/sendMessage'
         assert 'bot-secret' not in caplog.text
         assert '<redacted>' in caplog.text
+        assert 'https://example.com/botinventory/items' in caplog.text
+        await client.aclose()
+
+    async def test_redacts_overlapping_active_bot_tokens(self, caplog: pytest.LogCaptureFixture) -> None:
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: _response({'ok': True, 'result': {'message_id': 1}}))
+        )
+        _first = TelegramChannel(
+            bot_id=9001,
+            bot_token='first-secret',
+            webhook_secret='webhook-secret',
+            allowed_senders={22},
+            client=client,
+            api_url='https://proxy.test',
+        )
+        second = TelegramChannel(
+            bot_id=9002,
+            bot_token='second-secret',
+            webhook_secret='webhook-secret',
+            allowed_senders={22},
+            client=client,
+            api_url='https://proxy.test/botfirst-secret/tenant',
+        )
+        event = second.parse_request(_update(), _headers())
+        assert event is not None
+
+        with caplog.at_level(logging.INFO, logger='httpx'):
+            await second.reply(event, 'answer')
+
+        assert 'first-secret' not in caplog.text
+        assert 'second-secret' not in caplog.text
+        assert caplog.text.count('<redacted>') == 2
         await client.aclose()
 
     async def test_closes_short_lived_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
