@@ -43,19 +43,26 @@ explicitly in the tool schema.
 
 ## Lifecycle
 
-For an owned sandbox, acquisition stores the logical run ID in E2B metadata. A
-retry searches for the oldest running or paused match before creating. After a
-create, it checks again and kills the new sandbox if another creator won the
-race. The serialized `SandboxRef` contains only the provider and sandbox ID;
-later workers reconnect by ID and never create from `get_sandbox`. Release sends
-a bounded, cancellation-shielded kill directly by ID without reconnecting or
-resuming a paused sandbox, so it works in a different worker and is safe to
-retry. An already missing sandbox counts as successfully released.
+Asking the capability for a sandbox does no I/O. It hands back a backend holding settings
+plus, when there is one, the identity of a sandbox that already exists; the first command or
+file operation creates or attaches, once.
 
-The metadata key `pydantic-ai-run-id` is reserved for this lifecycle identity.
-Other metadata is preserved. E2B does not enforce metadata uniqueness, so the
-post-create canonicalization is best-effort under control-plane propagation
-delay; `sandbox_timeout` remains the server-side cleanup backstop.
+An owned sandbox carries the conversation id in E2B metadata, so a follow-up run finds the
+sandbox the previous one used and continues in the same workspace. The first use searches for
+the oldest running or paused match before creating, which is also what makes a durable retry
+attach rather than provision a second sandbox. After a create it checks again and kills the new
+sandbox if another creator won the race.
+
+The metadata key `pydantic-ai-conversation-id` is reserved for that identity. Other metadata is
+preserved. E2B does not enforce metadata uniqueness, so the post-create canonicalization is
+best-effort under control-plane propagation delay.
+
+Nothing here kills a sandbox. A conversation can span many runs, so the end of a run is not the
+end of the workspace; E2B reaps an idle sandbox at `sandbox_timeout`. If E2B has already reaped
+a conversation's sandbox, the next run gets a fresh, empty one and the old files are gone —
+raise `sandbox_timeout` when a conversation needs to outlive it, or kill the sandbox yourself
+with `E2BSandboxBackend.kill_by_id`, which is bounded, shielded from cancellation, and safe to
+retry.
 
 Attach to a sandbox managed elsewhere by ID when the capability must not own its
 lifetime:
@@ -64,24 +71,19 @@ lifetime:
 E2BSandbox(sandbox_id='sbx-abc123', workdir='/workspace')
 ```
 
-Creation-only settings cannot be combined with `sandbox_id`. Attached sandboxes
-are not killed at run end, and concurrent runs share their filesystem and process
-space. E2B resumes a paused sandbox when connecting to it. The SDK also extends
-the sandbox's remaining lifetime to at least its 300-second default on connect,
-even when no explicit timeout is passed.
+Creation-only settings cannot be combined with `sandbox_id`. Concurrent runs on the same
+sandbox share its filesystem and process space. E2B resumes a paused sandbox when connecting to
+it, so attaching to one restarts it.
 
 ## Direct backend use
 
-`E2BSandboxBackend` implements Pydantic AI's `SandboxBackend` protocol and its
-filesystem and process-start opt-ins:
+`E2BSandboxBackend` implements Pydantic AI's `SandboxBackend` protocol and its optional
+filesystem. Building one does no I/O; the first operation creates the sandbox:
 
 ```python
 from pydantic_ai_harness.e2b_sandbox import E2BSandboxBackend
 
-backend = await E2BSandboxBackend.create(
-    template='base',
-    sandbox_timeout=1800,
-)
+backend = E2BSandboxBackend(template='base', sandbox_timeout=1800)
 try:
     result = await backend.run(['python', '--version'], timeout=60)
     print(result.stdout)
@@ -89,9 +91,12 @@ finally:
     await backend.close(terminate=True)
 ```
 
-Use `connect(sandbox_id)` when you need a fresh handle to an existing sandbox;
-it never provisions a replacement, but it can extend the existing sandbox's
-remaining lifetime as described above.
+Pass `ref=SandboxRef(sandbox_id=...)` to attach to one specific sandbox, or `identity={...}` to
+reuse the oldest sandbox carrying that metadata and create one only if there is none. A `ref`
+whose sandbox is gone raises rather than quietly providing an empty replacement.
+
+`backend.sandbox` is the live `e2b.AsyncSandbox`, for anything E2B-specific. You can only await
+it, so no code path can reach a sandbox that has not been created yet.
 
 ## Limits and cancellation
 

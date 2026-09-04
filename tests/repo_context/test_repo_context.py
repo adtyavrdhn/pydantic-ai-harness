@@ -127,7 +127,7 @@ class TestDiscoverInstructionFiles:
     async def test_unreadable_model_path_does_not_block_capability_setup(self, tmp_path: Path, error: OSError) -> None:
         sandbox = MagicMock(spec=Sandbox)
         sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
-        sandbox.fs.stat = AsyncMock(side_effect=error)
+        sandbox.stat = AsyncMock(side_effect=error)
         cap = RepoContext[object](workspace_dir=tmp_path, expose_inventory_tool=False)
         ctx = _run_context(sandbox=sandbox)
 
@@ -427,7 +427,7 @@ class TestNestedTraversal:
     async def test_unreadable_tool_path_leaves_result_unchanged(self, tmp_path: Path, error: OSError) -> None:
         sandbox = MagicMock(spec=Sandbox)
         sandbox.resolve = AsyncMock(side_effect=(tmp_path.as_posix(), (tmp_path / 'gone').as_posix()))
-        sandbox.fs.stat = AsyncMock(side_effect=error)
+        sandbox.stat = AsyncMock(side_effect=error)
         cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
         call, tool_def, args = _call('list_directory', path='gone')
 

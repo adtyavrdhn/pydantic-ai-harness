@@ -34,6 +34,7 @@ import shlex
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
+from types import ModuleType
 from typing import TYPE_CHECKING
 
 import anyio
@@ -42,10 +43,10 @@ from pydantic_ai.sandboxes import (
     FileEntry,
     SandboxBackend,
     SandboxError,
+    SandboxRef,
     SandboxTimeoutError,
     SandboxUnavailableError,
 )
-from typing_extensions import Self
 
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
 
@@ -127,6 +128,15 @@ class E2BSandboxAuthError(E2BSandboxError, SandboxUnavailableError):
     Fixing this is an operator action (configure `E2B_API_KEY`), not something a retry or a
     new run can do, which is why it is terminal.
     """
+
+
+def _require_e2b() -> ModuleType:
+    """Import the optional `e2b` package, or explain how to install it."""
+    try:
+        import e2b
+    except ImportError as error:
+        raise E2BSandboxError(_MISSING_E2B) from error
+    return e2b
 
 
 def _command_line(command: SandboxCommand, shell: bool) -> str:
@@ -212,7 +222,8 @@ class _E2BProcess:
         """
         pid = self._handle.pid
         try:
-            await self._backend.sandbox.commands.kill(pid)
+            sandbox = await self._backend.sandbox
+            await sandbox.commands.kill(pid)
         except Exception as e:
             raise await self._backend.operation_error(e, f'Could not kill command {pid}') from e
 
@@ -257,40 +268,40 @@ class _E2BFilesystem:
 
     async def read_bytes(self, path: str) -> bytes:
         async with self._translated(path):
-            return bytes(await self._backend.sandbox.files.read(path, 'bytes'))
+            return bytes(await (await self._backend.sandbox).files.read(path, 'bytes'))
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         # E2B creates missing parents and replaces existing contents. Its `write` accepts a
         # file-like object through an untyped `IO`, so pyright reports the member as partially
         # unknown; only the `bytes` half is used here.
         async with self._translated(path):
-            await self._backend.sandbox.files.write(path, data)  # pyright: ignore[reportUnknownMemberType]
+            await (await self._backend.sandbox).files.write(path, data)  # pyright: ignore[reportUnknownMemberType]
 
     async def stat(self, path: str) -> FileEntry:
         async with self._translated(path):
-            return _file_entry(await self._backend.sandbox.files.get_info(path))
+            return _file_entry(await (await self._backend.sandbox).files.get_info(path))
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
         async with self._translated(path):
             # `depth=1` is E2B's non-recursive listing.
-            entries = await self._backend.sandbox.files.list(path, depth=1)
+            entries = await (await self._backend.sandbox).files.list(path, depth=1)
         return [_file_entry(entry) for entry in entries]
 
     async def make_dir(self, path: str) -> None:
         # E2B creates missing parents and reports an existing directory by returning False
         # rather than raising, which is the `mkdir -p` behavior the protocol asks for.
         async with self._translated(path):
-            await self._backend.sandbox.files.make_dir(path)
+            await (await self._backend.sandbox).files.make_dir(path)
 
     async def remove(self, path: str) -> None:
         # One call covers both halves of the protocol's `remove`: E2B deletes a file or a
         # directory with its contents.
         async with self._translated(path):
-            await self._backend.sandbox.files.remove(path)
+            await (await self._backend.sandbox).files.remove(path)
 
     async def exists(self, path: str) -> bool:
         async with self._translated(path):
-            return await self._backend.sandbox.files.exists(path)
+            return await (await self._backend.sandbox).files.exists(path)
 
 
 def _file_entry(entry: e2b.EntryInfo) -> FileEntry:
@@ -306,10 +317,16 @@ class E2BSandboxBackend(SandboxBackend):
     """An [E2B](https://e2b.dev) sandbox as a Pydantic AI [`SandboxBackend`][pydantic_ai.sandboxes.SandboxBackend].
 
     Commands and file operations run inside an E2B microVM, so the host is never exposed.
-    Build one with [`create`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.create] or
-    attach to an existing environment with
-    [`connect`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.connect]; the `E2BSandbox`
-    capability does both for you.
+
+    Building one does no I/O. It holds settings plus, optionally, the identity of a sandbox that
+    already exists; the first operation creates or attaches, once, and everything after that
+    reuses the same environment. Reach the live `e2b.AsyncSandbox` through
+    [`sandbox`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.sandbox], which you can only
+    await — so no operation can run against a sandbox that does not exist yet.
+
+    Nothing here kills a sandbox. E2B reaps one at the `sandbox_timeout` it was created with;
+    call [`close`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.close] with
+    `terminate=True` to end it sooner.
 
     Commands run as one-shot operations, with complete output returned after they finish.
 
@@ -324,73 +341,93 @@ class E2BSandboxBackend(SandboxBackend):
     check on this class instead of at a distant `Sandbox.wrap` call.
 
     Args:
-        sandbox: A live `e2b.AsyncSandbox`. Whoever created it owns killing it.
+        sandbox: A live `e2b.AsyncSandbox` you already have. Whoever created it owns killing it.
+        ref: Identity of an existing sandbox to attach to on first use.
+        identity: E2B metadata that marks one logical workspace. On first use the oldest running
+            sandbox carrying it is reused, and one is created only if there is none. This is what
+            lets several runs share an environment, and what makes a durable retry attach rather
+            than provision a second sandbox. Ignored when `sandbox` or `ref` is given.
+        template: E2B template name or id a newly created sandbox runs; E2B's default when `None`.
+        sandbox_timeout: How long E2B keeps a newly created sandbox alive, in seconds.
         working_dir: Directory commands run in and relative paths resolve against. E2B has no
             create-time working directory, so this is applied per command; `None` uses the
             sandbox's own default, discovered with `pwd` on first use.
-        sandbox_timeout: The lifetime an owned sandbox was created with, used to explain an
-            expired sandbox. `None` for a sandbox this process did not create.
+        env: Environment variables set for the whole sandbox at creation.
+        metadata: E2B metadata recorded on a newly created sandbox.
+        allow_internet_access: Whether a newly created sandbox may reach the internet.
     """
-
-    sandbox: e2b.AsyncSandbox
-    """The underlying `e2b.AsyncSandbox`, for provider-specific functionality."""
 
     def __init__(
         self,
-        sandbox: e2b.AsyncSandbox,
+        sandbox: e2b.AsyncSandbox | None = None,
         *,
-        working_dir: str | None = None,
-        sandbox_timeout: int | None = None,
-    ) -> None:
-        working_dir = absolute_path('working_dir', working_dir)
-        self.sandbox = sandbox
-        self.fs = _E2BFilesystem(self)
-        self._working_dir = working_dir
-        self._sandbox_timeout = sandbox_timeout
-
-    @property
-    def sandbox_id(self) -> str:
-        return self.sandbox.sandbox_id
-
-    @classmethod
-    async def create(
-        cls,
-        *,
+        ref: SandboxRef | None = None,
+        identity: Mapping[str, str] | None = None,
         template: str | None = None,
         sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
         working_dir: str | None = None,
         env: Mapping[str, str] | None = None,
         metadata: Mapping[str, str] | None = None,
         allow_internet_access: bool = True,
-    ) -> Self:
-        """Provision a fresh E2B sandbox. The caller owns killing it with `close`.
+    ) -> None:
+        self._live = sandbox
+        self._ref = ref if sandbox is None else SandboxRef(sandbox_id=sandbox.sandbox_id)
+        self._identity = dict(identity) if identity is not None else None
+        self._template = template
+        self._sandbox_timeout = sandbox_timeout
+        self._env = dict(env) if env is not None else None
+        self._metadata = dict(metadata) if metadata is not None else None
+        self._allow_internet_access = allow_internet_access
+        self._working_dir = absolute_path('working_dir', working_dir)
+        # Set once this backend creates the sandbox, so an expiry message can name the lifetime
+        # that ran out rather than one this process only configured.
+        self._created_timeout: int | None = None
+        self._lock = anyio.Lock()
+        self.fs = _E2BFilesystem(self)
 
-        Args:
-            template: E2B template name or id the sandbox runs; E2B's default when `None`.
-            sandbox_timeout: How long E2B keeps the sandbox alive, in seconds.
-            working_dir: Directory commands run in; the sandbox's own default when `None`.
-            env: Environment variables set for the whole sandbox.
-            metadata: E2B metadata recorded on the sandbox.
-            allow_internet_access: Whether the sandbox may reach the internet.
+    @property
+    def sandbox(self) -> Awaitable[e2b.AsyncSandbox]:
+        """The live `e2b.AsyncSandbox`, created or attached on first use.
+
+        Awaitable and never a plain value: every operation has to go through the step that
+        makes the sandbox exist, so none of them can skip it.
         """
-        try:
-            import e2b
-        except ImportError as e:
-            raise E2BSandboxError(_MISSING_E2B) from e
+        return self._resolve()
 
-        working_dir = absolute_path('working_dir', working_dir)
+    async def _resolve(self) -> e2b.AsyncSandbox:
+        async with self._lock:
+            if self._live is None:
+                # Guarded once, here: everything that touches E2B runs after this.
+                _require_e2b()
+                if self._ref is not None:
+                    self._live = await self._attach(self._ref.sandbox_id)
+                elif self._identity is not None:
+                    self._live = await self._create_or_attach_by_identity(self._identity)
+                else:
+                    self._live = await self._create()
+                self._ref = SandboxRef(sandbox_id=self._live.sandbox_id)
+        return self._live
+
+    @property
+    def ref(self) -> SandboxRef | None:
+        """Identity of the sandbox, or `None` before one has been created."""
+        return self._ref
+
+    async def _create(self) -> e2b.AsyncSandbox:
+        """Provision a fresh E2B sandbox."""
+        import e2b
 
         try:
             # Cancellation can orphan a sandbox until `sandbox_timeout` reaps it. Metadata
             # search makes a durable retry reconnect to that sandbox instead of creating another.
             with anyio.fail_after(_CREATE_TIMEOUT):
                 sandbox = await e2b.AsyncSandbox.create(
-                    template=template,
-                    timeout=sandbox_timeout,
-                    metadata=dict(metadata) if metadata is not None else None,
-                    envs=dict(env) if env is not None else None,
+                    template=self._template,
+                    timeout=self._sandbox_timeout,
+                    metadata=dict(self._metadata) if self._metadata is not None else None,
+                    envs=dict(self._env) if self._env is not None else None,
                     secure=True,
-                    allow_internet_access=allow_internet_access,
+                    allow_internet_access=self._allow_internet_access,
                 )
         except TimeoutError as error:
             raise E2BSandboxError(
@@ -401,50 +438,31 @@ class E2BSandboxBackend(SandboxBackend):
             raise E2BSandboxAuthError(_AUTH_MESSAGE) from e
         except Exception as e:
             raise E2BSandboxError(f'Could not start E2B sandbox: {type(e).__name__}: {e}') from e
-        return cls(sandbox, working_dir=working_dir, sandbox_timeout=sandbox_timeout)
+        self._created_timeout = self._sandbox_timeout
+        return sandbox
 
-    @classmethod
-    async def create_or_connect(
-        cls,
-        *,
-        identity: Mapping[str, str],
-        template: str | None = None,
-        sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
-        working_dir: str | None = None,
-        env: Mapping[str, str] | None = None,
-        metadata: Mapping[str, str] | None = None,
-        allow_internet_access: bool = True,
-    ) -> Self:
-        """Reconnect by metadata or create an owned sandbox once.
+    async def _create_or_attach_by_identity(self, identity: Mapping[str, str]) -> e2b.AsyncSandbox:
+        """Attach to the oldest sandbox carrying `identity`, or create one once.
 
-        This is the retry-safe acquisition API used by the capability and applications that
-        manage durable sandbox lifecycle themselves. E2B does not enforce metadata uniqueness,
-        so a post-create query keeps the oldest match and kills a racing duplicate.
+        E2B does not enforce metadata uniqueness, so a post-create query keeps the oldest match
+        and kills a racing duplicate.
         """
-        existing_id = await cls._find_id(identity)
+        existing_id = await self._find_id(identity)
         if existing_id is not None:
-            return await cls.connect(existing_id, working_dir=working_dir)
-        created = await cls.create(
-            template=template,
-            sandbox_timeout=sandbox_timeout,
-            working_dir=working_dir,
-            env=env,
-            metadata=metadata,
-            allow_internet_access=allow_internet_access,
-        )
-        canonical_id = await cls._find_id(identity)
+            return await self._attach(existing_id)
+        created = await self._create()
+        canonical_id = await self._find_id(identity)
         if canonical_id is None or canonical_id == created.sandbox_id:
             return created
-        await created.close(terminate=True)
-        return await cls.connect(canonical_id, working_dir=working_dir)
+        await _kill_sandbox(created.sandbox_id, created.kill)
+        self._created_timeout = None
+        return await self._attach(canonical_id)
 
-    @classmethod
-    async def _find_id(cls, metadata: Mapping[str, str]) -> str | None:
+    @staticmethod
+    async def _find_id(metadata: Mapping[str, str]) -> str | None:
         """Return the oldest running or paused sandbox ID matching metadata."""
-        try:
-            import e2b
-        except ImportError as error:
-            raise E2BSandboxError(_MISSING_E2B) from error
+        import e2b
+
         try:
             paginator = e2b.AsyncSandbox.list(query=e2b.SandboxQuery(metadata=dict(metadata)))
             oldest: e2b.SandboxInfo | None = None
@@ -458,35 +476,34 @@ class E2BSandboxBackend(SandboxBackend):
             raise E2BSandboxError(f'Could not list E2B sandboxes: {type(error).__name__}: {error}') from error
         return oldest.sandbox_id if oldest is not None else None
 
-    @classmethod
-    async def connect(cls, sandbox_id: str, *, timeout: int | None = None, working_dir: str | None = None) -> Self:
+    async def _attach(self, sandbox_id: str) -> e2b.AsyncSandbox:
         """Attach to an E2B sandbox that already exists, without taking over its lifecycle.
 
         E2B resumes a paused sandbox on connect, so attaching to one that was paused restarts
-        it; a sandbox that is gone raises `E2BSandboxUnavailableError` instead of resolving to
-        a dead environment.
-
-        Args:
-            sandbox_id: The E2B sandbox to attach to.
-            timeout: Extends the sandbox's remaining lifetime to this many seconds when it is
-                longer than what remains. E2B substitutes its 300-second default when `None`,
-                so connecting extends a shorter remaining lifetime to at least 300 seconds.
-            working_dir: Directory commands run in; the sandbox's own default when `None`.
+        it; a sandbox that is gone raises `E2BSandboxUnavailableError` rather than resolving to
+        a dead environment. Nothing is recreated in its place — a run that expected files there
+        must be told they are gone, not handed an empty workspace.
         """
-        try:
-            import e2b
-        except ImportError as e:
-            raise E2BSandboxError(_MISSING_E2B) from e
+        import e2b
 
         try:
-            sandbox = await e2b.AsyncSandbox.connect(sandbox_id, timeout=timeout)
+            # No `timeout=`: E2B substitutes its own 300-second default for `None`, which would
+            # silently extend a shorter remaining lifetime just by looking at the sandbox.
+            return await e2b.AsyncSandbox.connect(sandbox_id)
         except e2b.AuthenticationException as e:
             raise E2BSandboxAuthError(_AUTH_MESSAGE) from e
         except e2b.SandboxNotFoundException as e:
-            raise E2BSandboxUnavailableError(_attached_gone_message(sandbox_id)) from e
+            raise E2BSandboxUnavailableError(_attached_gone_message(repr(sandbox_id))) from e
         except Exception as e:
             raise E2BSandboxError(f'Could not connect to E2B sandbox {sandbox_id!r}: {type(e).__name__}: {e}') from e
-        return cls(sandbox, working_dir=working_dir)
+
+    def _describe(self) -> str:
+        """How to name this sandbox in an error, before or after it exists."""
+        if self._ref is not None:
+            return repr(self._ref.sandbox_id)
+        if self._identity is not None:
+            return f'for {self._identity!r}'
+        return 'that was never started'
 
     async def close(self, *, terminate: bool) -> None:
         """Release this handle, killing the sandbox with it when we own its lifetime.
@@ -497,7 +514,12 @@ class E2BSandboxBackend(SandboxBackend):
         """
         if not terminate:
             return
-        await _kill_sandbox(self.sandbox_id, self.sandbox.kill)
+        sandbox = self._live
+        if sandbox is None or self._ref is None:
+            # Never used, so there is nothing to kill. Resolving one here just to close it
+            # would create the very sandbox being released.
+            return
+        await _kill_sandbox(self._ref.sandbox_id, sandbox.kill)
 
     @staticmethod
     async def kill_by_id(sandbox_id: str) -> None:
@@ -526,7 +548,7 @@ class E2BSandboxBackend(SandboxBackend):
             # one, mis-resolving relative paths with no error.
             if result.exit_code != 0 or not posixpath.isabs(printed):
                 raise E2BSandboxError(
-                    f'Could not determine the working directory of E2B sandbox {self.sandbox_id!r}: '
+                    f'Could not determine the working directory of E2B sandbox {self._describe()}: '
                     f'`pwd` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
                 )
             self._working_dir = printed
@@ -577,7 +599,8 @@ class E2BSandboxBackend(SandboxBackend):
         # `start()` rather than from the moment E2B confirms the command started.
         started = time.monotonic()
         try:
-            handle = await self.sandbox.commands.run(
+            sandbox = await self.sandbox
+            handle = await sandbox.commands.run(
                 line,
                 background=True,
                 envs=dict(env) if env is not None else None,
@@ -589,11 +612,11 @@ class E2BSandboxBackend(SandboxBackend):
         return _E2BProcess(handle, backend=self, deadline=timeout, started=started)
 
     def _unavailable_message(self) -> str:
-        if self._sandbox_timeout is None:
-            return _attached_gone_message(self.sandbox_id)
+        if self._created_timeout is None:
+            return _attached_gone_message(self._describe())
         return (
             'The E2B sandbox is no longer running (it may have reached its '
-            f'sandbox_timeout of {self._sandbox_timeout}s, or been killed). '
+            f'sandbox_timeout of {self._created_timeout}s, or been killed). '
             'Start a new run, or raise sandbox_timeout for longer work.'
         )
 
@@ -625,7 +648,8 @@ class E2BSandboxBackend(SandboxBackend):
         error keeps the extra round trip off successful operations.
         """
         try:
-            running = await self.sandbox.is_running()
+            sandbox = await self.sandbox
+            running = await sandbox.is_running()
         except Exception:
             # The classifying probe can itself fail, including with a raw transport error; fall
             # back to the original error rather than letting the probe abort the run.
@@ -635,9 +659,9 @@ class E2BSandboxBackend(SandboxBackend):
         return E2BSandboxError(f'{context}: {e}')
 
 
-def _attached_gone_message(sandbox_id: str) -> str:
+def _attached_gone_message(described: str) -> str:
     return (
-        f'The E2B sandbox {sandbox_id!r} is no longer running '
+        f'The E2B sandbox {described} is no longer running '
         '(it does not exist, was killed, or expired at its configured lifetime). '
         'Attach to a live sandbox, or create a new one.'
     )
@@ -647,9 +671,9 @@ if TYPE_CHECKING:
     # Pins full structural conformance -- signatures included -- which `isinstance` cannot
     # check. `__new__` rather than a call, because neither SDK object can be constructed
     # without a live sandbox behind it; this block never runs. There is deliberately no
-    _sandbox = e2b.AsyncSandbox.__new__(e2b.AsyncSandbox)
+
     _handle = e2b.AsyncCommandHandle.__new__(e2b.AsyncCommandHandle)
-    _backend = E2BSandboxBackend(_sandbox)
+    _backend = E2BSandboxBackend()
     _backend_conforms: SandboxBackend = _backend
     _filesystem_backend_conforms: SupportsFilesystem = _backend
     _filesystem_conforms: SandboxFilesystem = _backend.fs

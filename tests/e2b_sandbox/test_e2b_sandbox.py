@@ -18,64 +18,81 @@ from pydantic_ai_harness.e2b_sandbox import E2BSandbox, E2BSandboxAuthError, E2B
 from .fake_e2b import FakeE2B
 
 
-def _ctx(run_id: str = 'run-1') -> RunContext[None]:
-    return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id)
+def _ctx(run_id: str = 'run-1', conversation_id: str | None = None) -> RunContext[None]:
+    return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id, conversation_id=conversation_id)
+
+
+async def _resolved(
+    capability: E2BSandbox[None], ctx: RunContext[None], ref: SandboxRef | None = None
+) -> E2BSandboxBackend:
+    """Ask the capability for a backend and touch it, so the create-or-attach actually happens."""
+    backend = capability.get_sandbox(ctx, ref=ref)
+    assert isinstance(backend, E2BSandboxBackend)
+    await backend.sandbox
+    return backend
 
 
 class TestLifecycle:
-    async def test_acquire_is_idempotent_for_one_logical_run(self, fake_e2b: FakeE2B) -> None:
+    async def test_building_a_backend_does_no_io(self, fake_e2b: FakeE2B) -> None:
+        E2BSandbox[None]().get_sandbox(_ctx(), ref=None)
+
+        assert fake_e2b.create_calls == []
+        assert fake_e2b.list_calls == []
+        assert fake_e2b.connect_calls == []
+
+    async def test_one_conversation_reuses_one_sandbox(self, fake_e2b: FakeE2B) -> None:
         capability = E2BSandbox[None]()
 
-        first = await capability.acquire_sandbox(_ctx())
-        second = await capability.acquire_sandbox(_ctx())
+        first = await _resolved(capability, _ctx('run-1', conversation_id='chat-1'))
+        second = await _resolved(capability, _ctx('run-2', conversation_id='chat-1'))
 
-        assert first == second
+        assert first.ref == second.ref
         assert len(fake_e2b.create_calls) == 1
-        assert fake_e2b.create_calls[0].metadata == {'pydantic-ai-run-id': 'run-1'}
+        assert fake_e2b.create_calls[0].metadata == {'pydantic-ai-conversation-id': 'chat-1'}
 
     async def test_user_metadata_is_preserved(self, fake_e2b: FakeE2B) -> None:
-        await E2BSandbox[None](metadata={'owner': 'tests'}).acquire_sandbox(_ctx())
+        await _resolved(E2BSandbox[None](metadata={'owner': 'tests'}), _ctx(conversation_id='chat-1'))
 
         assert fake_e2b.create_calls[0].metadata == {
             'owner': 'tests',
-            'pydantic-ai-run-id': 'run-1',
+            'pydantic-ai-conversation-id': 'chat-1',
         }
 
-    async def test_different_runs_create_different_sandboxes(self, fake_e2b: FakeE2B) -> None:
+    async def test_different_conversations_create_different_sandboxes(self, fake_e2b: FakeE2B) -> None:
         capability = E2BSandbox[None]()
 
-        first = await capability.acquire_sandbox(_ctx('run-1'))
-        second = await capability.acquire_sandbox(_ctx('run-2'))
+        first = await _resolved(capability, _ctx('run-1', conversation_id='chat-1'))
+        second = await _resolved(capability, _ctx('run-2', conversation_id='chat-2'))
 
-        assert first != second
+        assert first.ref != second.ref
         assert len(fake_e2b.create_calls) == 2
 
-    async def test_acquire_chooses_oldest_matching_sandbox(self, fake_e2b: FakeE2B) -> None:
-        metadata = {'pydantic-ai-run-id': 'run-1'}
+    async def test_the_oldest_matching_sandbox_wins(self, fake_e2b: FakeE2B) -> None:
+        metadata = {'pydantic-ai-conversation-id': 'chat-1'}
         oldest = fake_e2b.new_sandbox('oldest', metadata)
         newest = fake_e2b.new_sandbox('newest', metadata)
         latest = fake_e2b.new_sandbox('latest', metadata)
         # E2B 2.34 cannot order this query server-side, so exercise an unordered response.
         fake_e2b.sandboxes[:] = [newest, oldest, latest]
 
-        ref = await E2BSandbox[None]().acquire_sandbox(_ctx())
+        backend = await _resolved(E2BSandbox[None](), _ctx(conversation_id='chat-1'))
 
-        assert ref.sandbox_id == 'oldest'
+        assert backend.ref == SandboxRef(sandbox_id='oldest')
         assert fake_e2b.list_calls == [(metadata, None)]
 
-    async def test_concurrent_creator_loses_to_oldest_sandbox(self, fake_e2b: FakeE2B) -> None:
-        canonical = fake_e2b.new_sandbox('canonical', {'pydantic-ai-run-id': 'run-1'})
+    async def test_a_concurrent_creator_loses_to_the_oldest_sandbox(self, fake_e2b: FakeE2B) -> None:
+        canonical = fake_e2b.new_sandbox('canonical', {'pydantic-ai-conversation-id': 'chat-1'})
         fake_e2b.list_batches = [[], [canonical]]
 
-        ref = await E2BSandbox[None]().acquire_sandbox(_ctx())
+        backend = await _resolved(E2BSandbox[None](), _ctx(conversation_id='chat-1'))
 
-        assert ref.sandbox_id == canonical.sandbox_id
+        assert backend.ref == SandboxRef(sandbox_id=canonical.sandbox_id)
         assert fake_e2b.sandboxes[1].killed is True
 
-    async def test_fresh_create_keeps_its_original_handle(self, fake_e2b: FakeE2B) -> None:
-        ref = await E2BSandbox[None]().acquire_sandbox(_ctx())
+    async def test_a_fresh_create_keeps_its_original_handle(self, fake_e2b: FakeE2B) -> None:
+        backend = await _resolved(E2BSandbox[None](), _ctx(conversation_id='chat-1'))
 
-        assert ref.sandbox_id == fake_e2b.sandboxes[0].sandbox_id
+        assert backend.ref == SandboxRef(sandbox_id=fake_e2b.sandboxes[0].sandbox_id)
         assert fake_e2b.connect_calls == []
 
     @pytest.mark.parametrize('unavailable', [True, False])
@@ -84,62 +101,72 @@ class TestLifecycle:
 
         error_type = SandboxUnavailableError if unavailable else e2b_sandbox.E2BSandboxError
         with pytest.raises(error_type):
-            await E2BSandbox[None]().acquire_sandbox(_ctx())
+            await _resolved(E2BSandbox[None](), _ctx(conversation_id='chat-1'))
 
-    async def test_get_sandbox_reconnects_by_ref(self, fake_e2b: FakeE2B) -> None:
-        backend = await E2BSandbox[None]().get_sandbox(_ctx(), SandboxRef(sandbox_id='sbx-existing'))
+    async def test_a_ref_attaches_to_that_sandbox(self, fake_e2b: FakeE2B) -> None:
+        await _resolved(E2BSandbox[None](), _ctx(), SandboxRef(sandbox_id='sbx-existing'))
 
-        assert isinstance(backend, E2BSandboxBackend)
         assert fake_e2b.connect_calls == [('sbx-existing', None)]
+        assert fake_e2b.create_calls == []
 
-    async def test_release_kills_without_reconnecting(self, fake_e2b: FakeE2B) -> None:
-        capability = E2BSandbox[None]()
-        ref = await capability.acquire_sandbox(_ctx())
+    async def test_a_configured_sandbox_id_attaches_and_creates_nothing(self, fake_e2b: FakeE2B) -> None:
+        backend = await _resolved(E2BSandbox[None](sandbox_id='sbx-existing'), _ctx())
 
-        await capability.release_sandbox(_ctx(), ref)
+        assert backend.ref == SandboxRef(sandbox_id='sbx-existing')
+        assert fake_e2b.create_calls == []
 
-        assert fake_e2b.kill_ids == [ref.sandbox_id]
+    async def test_nothing_kills_the_sandbox_when_a_run_ends(self, fake_e2b: FakeE2B) -> None:
+        # A conversation spans many runs, so the end of one is not the end of the workspace.
+        await _resolved(E2BSandbox[None](), _ctx(conversation_id='chat-1'))
+
+        assert fake_e2b.kill_ids == []
+        assert fake_e2b.sandboxes[0].killed is False
+
+
+class TestKillById:
+    """`kill_by_id` is how an application ends a sandbox itself, without reconnecting first."""
+
+    async def test_kills_without_reconnecting(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.new_sandbox('owned')
+
+        await E2BSandboxBackend.kill_by_id('owned')
+
+        assert fake_e2b.kill_ids == ['owned']
         assert fake_e2b.connect_calls == []
         assert fake_e2b.sandboxes[0].killed is True
 
-    async def test_release_is_idempotent_when_sandbox_is_gone(self, fake_e2b: FakeE2B) -> None:
-        await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(sandbox_id='gone'))
+    async def test_is_idempotent_when_the_sandbox_is_gone(self, fake_e2b: FakeE2B) -> None:
+        await E2BSandboxBackend.kill_by_id('gone')
 
         assert fake_e2b.kill_ids == ['gone']
 
-    async def test_release_is_idempotent_when_sandbox_was_already_killed(self, fake_e2b: FakeE2B) -> None:
+    async def test_is_idempotent_when_the_sandbox_was_already_killed(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.new_sandbox('owned')
-        capability = E2BSandbox[None]()
-        ref = SandboxRef(sandbox_id='owned')
 
-        await capability.release_sandbox(_ctx(), ref)
-        await capability.release_sandbox(_ctx(), ref)
+        await E2BSandboxBackend.kill_by_id('owned')
+        await E2BSandboxBackend.kill_by_id('owned')
 
         assert fake_e2b.kill_ids == ['owned', 'owned']
 
-    async def test_release_kill_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend._TEARDOWN_TIMEOUT', 0.05)
         fake_e2b.kill_hangs = True
 
         with pytest.raises(e2b_sandbox.E2BSandboxError, match='Timed out'):
-            await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(sandbox_id='sbx-hung'))
+            await E2BSandboxBackend.kill_by_id('sbx-hung')
 
-    async def test_release_auth_failure_is_terminal(self, fake_e2b: FakeE2B) -> None:
+    async def test_auth_failure_is_terminal(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.kill_error = fake_e2b.auth_type('bad key')
 
         with pytest.raises(E2BSandboxAuthError, match='E2B rejected the credentials'):
-            await E2BSandbox[None]().release_sandbox(_ctx(), SandboxRef(sandbox_id='sbx-owned'))
+            await E2BSandboxBackend.kill_by_id('sbx-owned')
 
-    async def test_release_kill_completes_under_cancellation(self, fake_e2b: FakeE2B) -> None:
+    async def test_completes_under_cancellation(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.new_sandbox('sbx-owned')
         fake_e2b.kill_gate = anyio.Event()
 
         async with anyio.create_task_group() as task_group:
-            task_group.start_soon(
-                E2BSandbox[None]().release_sandbox,
-                _ctx(),
-                SandboxRef(sandbox_id='sbx-owned'),
-            )
+            task_group.start_soon(E2BSandboxBackend.kill_by_id, 'sbx-owned')
             while not fake_e2b.kill_started:
                 await anyio.sleep(0)
             task_group.cancel_scope.cancel()
@@ -147,29 +174,16 @@ class TestLifecycle:
 
         assert fake_e2b.sandboxes[0].killed is True
 
-    async def test_release_failure_does_not_replace_cancellation(self, fake_e2b: FakeE2B) -> None:
+    async def test_failure_does_not_replace_cancellation(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.kill_gate = anyio.Event()
         fake_e2b.kill_error = RuntimeError('cleanup failed')
 
         async with anyio.create_task_group() as task_group:
-            task_group.start_soon(
-                E2BSandbox[None]().release_sandbox,
-                _ctx(),
-                SandboxRef(sandbox_id='sbx-owned'),
-            )
+            task_group.start_soon(E2BSandboxBackend.kill_by_id, 'sbx-owned')
             while not fake_e2b.kill_started:
                 await anyio.sleep(0)
             task_group.cancel_scope.cancel()
             fake_e2b.kill_gate.set()
-
-    async def test_attached_sandbox_is_not_owned(self, fake_e2b: FakeE2B) -> None:
-        capability = E2BSandbox[None](sandbox_id='sbx-existing')
-
-        ref = await capability.acquire_sandbox(_ctx())
-        await capability.release_sandbox(_ctx(), ref)
-
-        assert ref == SandboxRef(sandbox_id='sbx-existing')
-        assert fake_e2b.sandboxes == []
 
 
 class TestConfiguration:
@@ -198,9 +212,9 @@ class TestConfiguration:
     def test_normalizes_absolute_workdir(self) -> None:
         assert E2BSandbox(workdir='/workspace/../repo').workdir == '/repo'
 
-    def test_reserves_retry_identity_metadata(self) -> None:
+    def test_reserves_the_conversation_metadata_key(self) -> None:
         with pytest.raises(ValueError, match='reserved'):
-            E2BSandbox(metadata={'pydantic-ai-run-id': 'mine'})
+            E2BSandbox(metadata={'pydantic-ai-conversation-id': 'mine'})
 
     @pytest.mark.parametrize(
         'settings',
