@@ -12,7 +12,7 @@ from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
@@ -261,11 +261,16 @@ class TestGoogleWorkspace:
         result = await Agent(
             FunctionModel(model),
             toolsets=[workspace.get_toolset().approval_required()],
+            instructions=workspace.get_instructions(),
             output_type=[str, DeferredToolRequests],
         ).run('Draft mail')
         assert isinstance(result.output, DeferredToolRequests)
         assert [approval.tool_name for approval in result.output.approvals] == ['gmail_create_draft']
         assert not any(isinstance(part, ToolReturnPart) for message in result.all_messages() for part in message.parts)
+        assert any(
+            isinstance(message, ModelRequest) and message.instructions and 'untrusted' in message.instructions
+            for message in result.all_messages()
+        )
 
     async def test_agent_executes_selected_workspace_tool(self, gmail_server: FastMCP):
         agent = Agent(
