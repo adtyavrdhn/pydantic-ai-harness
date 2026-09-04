@@ -318,7 +318,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         # The facade decodes with replacement, so binary detection uses the returned text window.
         if '\ufffd' in window.text or '\x00' in window.text:
-            entry = await ctx.sandbox.fs.stat(resolved)
+            entry = await ctx.sandbox.stat(resolved)
             size = entry.size or 0
             return f'[Binary file: {size} bytes. Use a binary-aware tool to inspect.]'
 
@@ -328,7 +328,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             # against. It comes from the file itself: a window drops the trailing newline and any
             # `\r`, so hashing the window text would report a hash they never accept. A partial
             # window has no whole-file hash to report, so it omits one.
-            content = (await ctx.sandbox.fs.read_bytes(resolved)).decode('utf-8', errors='replace')
+            content = (await ctx.sandbox.read_bytes(resolved)).decode('utf-8', errors='replace')
             header = f'[{path} | {len(lines)} lines | hash:{_content_hash(content)}]\n'
         else:
             header = f'[{path} | lines {offset + 1}-{offset + len(lines)}]\n'
@@ -357,7 +357,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """
         root, resolved = await self._resolve(ctx, path, write=True)
         try:
-            entry = await ctx.sandbox.fs.stat(resolved)
+            entry = await ctx.sandbox.stat(resolved)
         except (FileNotFoundError, NotADirectoryError):
             entry = None
         if entry is not None and entry.is_dir:
@@ -365,7 +365,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         parent = posixpath.dirname(resolved)
         try:
-            parent_entry = await ctx.sandbox.fs.stat(parent)
+            parent_entry = await ctx.sandbox.stat(parent)
         except FileNotFoundError as e:
             parent_rel = self._relative(root, parent)
             raise FileNotFoundError(
@@ -376,7 +376,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             raise FileNotFoundError(f"Parent directory '{parent_rel}' does not exist. Use create_directory first.")
 
         if expected_hash is not None and entry is not None:
-            current = (await ctx.sandbox.fs.read_bytes(resolved)).decode('utf-8', errors='replace')
+            current = (await ctx.sandbox.read_bytes(resolved)).decode('utf-8', errors='replace')
             current_hash = _content_hash(current)
             if current_hash != expected_hash:
                 raise ValueError(
@@ -384,7 +384,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                     f'got hash:{current_hash}). Re-read the file and retry.'
                 )
 
-        await ctx.sandbox.fs.write_bytes(resolved, content.encode('utf-8'))
+        await ctx.sandbox.write_bytes(resolved, content.encode('utf-8'))
         new_hash = _content_hash(content)
         lines = len(content.splitlines())
         return f'Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]'
@@ -417,7 +417,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """
         _, resolved = await self._resolve(ctx, path, write=True)
         try:
-            raw = await ctx.sandbox.fs.read_bytes(resolved)
+            raw = await ctx.sandbox.read_bytes(resolved)
         except FileNotFoundError as e:
             raise FileNotFoundError(f'File not found: {path}') from e
         text = raw.decode('utf-8', errors='replace')
@@ -437,7 +437,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             )
 
         new_content = text.replace(old_text, new_text, 1)
-        await ctx.sandbox.fs.write_bytes(resolved, new_content.encode('utf-8'))
+        await ctx.sandbox.write_bytes(resolved, new_content.encode('utf-8'))
         return f'Edited {path}. [hash:{_content_hash(new_content)}]'
 
     @_recoverable
@@ -453,14 +453,14 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """
         root, resolved = await self._resolve(ctx, path, check_allowed=False)
         try:
-            root_entry = await ctx.sandbox.fs.stat(resolved)
+            root_entry = await ctx.sandbox.stat(resolved)
         except FileNotFoundError as e:
             raise NotADirectoryError(f'Not a directory: {path}') from e
         if not root_entry.is_dir:
             raise NotADirectoryError(f'Not a directory: {path}')
 
         entries: list[str] = []
-        for entry in sorted(await ctx.sandbox.fs.list_dir(resolved), key=lambda item: item.path):
+        for entry in sorted(await ctx.sandbox.list_dir(resolved), key=lambda item: item.path):
             rel = self._relative(root, entry.path)
             if self._is_hidden(rel) or not self._is_accessible(rel):
                 continue
@@ -536,7 +536,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             raise ValueError(f'Pattern {pattern!r} must be relative to the search path, not absolute.')
         root, resolved = await self._resolve(ctx, path, check_allowed=False)
         try:
-            root_entry = await ctx.sandbox.fs.stat(resolved)
+            root_entry = await ctx.sandbox.stat(resolved)
         except FileNotFoundError as e:
             raise NotADirectoryError(f'Not a directory: {path}') from e
         if not root_entry.is_dir:
@@ -564,7 +564,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 matches.append(f'[... truncated at {self._max_find_results} matches]')
                 break
             try:
-                entry = await ctx.sandbox.fs.stat(absolute)
+                entry = await ctx.sandbox.stat(absolute)
             except FileNotFoundError:  # deleted mid-walk
                 continue
             matches.append(f'{rel}{"/" if entry.is_dir else ""}')
@@ -582,7 +582,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             Confirmation message.
         """
         _, resolved = await self._resolve(ctx, path, write=True)
-        await ctx.sandbox.fs.make_dir(resolved)
+        await ctx.sandbox.make_dir(resolved)
         return f'Created directory: {path}'
 
     @_recoverable
@@ -598,7 +598,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """
         _, resolved = await self._resolve(ctx, path)
         try:
-            entry = await ctx.sandbox.fs.stat(resolved)
+            entry = await ctx.sandbox.stat(resolved)
         except FileNotFoundError as e:
             raise FileNotFoundError(f'Path not found: {path}') from e
 
@@ -608,7 +608,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             f'size: {entry.size or 0} bytes',
         ]
         if not entry.is_dir:
-            raw = await ctx.sandbox.fs.read_bytes(resolved)
+            raw = await ctx.sandbox.read_bytes(resolved)
             is_bin = _is_binary(raw)
             parts.append(f'binary: {is_bin}')
             if not is_bin:

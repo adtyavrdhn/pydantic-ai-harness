@@ -25,6 +25,7 @@ from pydantic_ai.sandboxes import (
     SandboxCommand,
     SandboxError,
     SandboxFilesystem,
+    SandboxRef,
     SandboxResult,
     SandboxTimeoutError,
     SandboxUnavailableError,
@@ -460,8 +461,6 @@ class _ControllableFilesystem:
 
 
 class _RecordingLocalBackend:
-    provider = 'recording-local'
-
     def __init__(self, backend: LocalSandbox) -> None:
         self.backend = backend
         self.fs = _ControllableFilesystem(backend.fs)
@@ -473,7 +472,7 @@ class _RecordingLocalBackend:
         self.kill_failure_stderr = 'kill failed'
         self.hold_on_term = False
         self.tail_failure = False
-        self.sandbox_id = backend.sandbox_id
+        self.ref = backend.ref
 
     async def working_dir(self) -> str:
         return await self.backend.working_dir()
@@ -505,8 +504,7 @@ class _RecordingLocalBackend:
 
 
 class _FailingBackend:
-    provider = 'failing'
-    sandbox_id = 'failing-1'
+    ref = SandboxRef(sandbox_id='failing-1')
 
     def __init__(self, error: BaseException) -> None:
         self.error = error
@@ -662,7 +660,7 @@ class TestBackgroundCommands:
         toolset = background_toolset(tmp_path)
         ctx = run_context(sandbox)
         started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='printf problem >&2; sleep 30'))
-        await sandbox.fs.write_bytes(f'/tmp/harness_{started_id}_ec', b'junk')
+        await sandbox.write_bytes(f'/tmp/harness_{started_id}_ec', b'junk')
 
         with anyio.fail_after(5):
             while True:
@@ -677,8 +675,8 @@ class TestBackgroundCommands:
         toolset = background_toolset(tmp_path)
         ctx = run_context(sandbox)
         started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
-        await sandbox.fs.remove(f'/tmp/harness_{started_id}_out')
-        await sandbox.fs.remove(f'/tmp/harness_{started_id}_err')
+        await sandbox.remove(f'/tmp/harness_{started_id}_out')
+        await sandbox.remove(f'/tmp/harness_{started_id}_err')
 
         result = await call_tool(toolset, ctx, 'check_command', command_id=started_id)
         assert result == '(no output yet)\n[status: running]'
@@ -742,7 +740,7 @@ class TestBackgroundCommands:
             started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
             backend.fs.remove_error = RuntimeError('cleanup failed')
             # The protocol members the shell tools never consult still work through the facade.
-            assert sandbox.sandbox_id == local.sandbox_id
+            assert sandbox.ref == local.ref
             assert await sandbox.working_dir() == str(tmp_path)
 
             with pytest.raises(RuntimeError, match='cleanup failed'):

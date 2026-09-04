@@ -480,7 +480,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         if bg.finished:
             return
         try:
-            value = (await bg.sandbox.fs.read_bytes(bg.exit_code_path)).decode('utf-8', errors='replace').strip()
+            value = (await bg.sandbox.read_bytes(bg.exit_code_path)).decode('utf-8', errors='replace').strip()
         except FileNotFoundError:
             return
         try:
@@ -522,7 +522,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         errors: list[Exception] = []
         for path in (bg.stdout_path, bg.stderr_path, bg.exit_code_path):
             try:
-                await bg.sandbox.fs.remove(path)
+                await bg.sandbox.remove(path)
             except FileNotFoundError:
                 pass
             except Exception as e:

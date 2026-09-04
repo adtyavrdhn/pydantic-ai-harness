@@ -21,6 +21,7 @@ from pydantic_ai.sandboxes import (
     SandboxCommand,
     SandboxError,
     SandboxFileEntry,
+    SandboxRef,
     SandboxResult,
     SandboxTimeoutError,
     SandboxUnavailableError,
@@ -115,8 +116,7 @@ class _ErrorFilesystem:
 class _ErrorBackend:
     """A backend whose filesystem and commands always raise the same error."""
 
-    provider = 'error'
-    sandbox_id = 'error-1'
+    ref = SandboxRef(sandbox_id='error-1')
 
     def __init__(self, error: Exception) -> None:
         self.error = error
@@ -140,13 +140,11 @@ class _ErrorBackend:
 class _TimeoutBackend:
     """A real local filesystem whose command execution times out."""
 
-    provider = 'timeout'
-
     def __init__(self, backend: LocalSandbox, error: SandboxTimeoutError) -> None:
         self.backend = backend
         self.fs = backend.fs
         self.error = error
-        self.sandbox_id = backend.sandbox_id
+        self.ref = backend.ref
 
     async def working_dir(self) -> str:
         return await self.backend.working_dir()
@@ -166,8 +164,7 @@ class _TimeoutBackend:
 class _ResultBackend:
     """A real local filesystem, with a canned result for every command."""
 
-    provider = 'result'
-    sandbox_id = 'result-1'
+    ref = SandboxRef(sandbox_id='result-1')
 
     def __init__(self, backend: LocalSandbox, result: CommandResult) -> None:
         self.backend = backend
