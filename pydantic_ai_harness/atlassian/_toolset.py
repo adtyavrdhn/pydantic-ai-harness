@@ -35,7 +35,7 @@ try:
     from pydantic_ai.mcp import CallToolFunc, MCPToolset, MCPToolsetClient
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
-        'MCP support is required for the Atlassian capability. Install it with: uv add "pydantic-ai-slim[mcp]"'
+        'MCP support is required for the Atlassian capability. Install it with: uv add "pydantic-ai-harness[atlassian]"'
     ) from _import_error
 
 _ATLASSIAN_MCP_URL = 'https://mcp.atlassian.com/v2/mcp?tools=all'

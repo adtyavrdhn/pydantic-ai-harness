@@ -12,6 +12,7 @@ pytest.importorskip('fastmcp')
 
 from fastmcp.client.auth import BearerAuth, OAuth
 from fastmcp.client.transports import StreamableHttpTransport
+from pydantic import AnyUrl
 from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.capabilities import PrefixTools
@@ -58,8 +59,10 @@ class TestAtlassian:
         representation = repr(capability)
         assert 'bearer-secret' not in representation
 
-    @pytest.mark.parametrize('client', ['http://attacker.invalid/mcp', 'https://proxy.example/mcp'])
-    def test_rejects_url_client_to_keep_credentials_on_the_official_endpoint(self, client: str):
+    @pytest.mark.parametrize(
+        'client', ['http://attacker.invalid/mcp', 'https://proxy.example/mcp', AnyUrl('https://proxy.example/mcp')]
+    )
+    def test_rejects_url_client_to_keep_credentials_on_the_official_endpoint(self, client: str | AnyUrl):
         with pytest.raises(UserError, match='cannot be a URL'):
             AtlassianToolset(cloud_id='site-1', client=client, authorization_token='secret')
         with pytest.raises(UserError, match='cannot be a URL'):
@@ -86,6 +89,7 @@ class TestAtlassian:
         ('build', 'match'),
         [
             (lambda: AtlassianToolset(cloud_id=''), '`cloud_id` must not be empty'),
+            (lambda: Atlassian(cloud_id=''), '`cloud_id` must not be empty'),
             (lambda: AtlassianToolset(cloud_id='site-1', products=()), '`products` must contain'),
             (
                 lambda: AtlassianToolset(cloud_id='site-1', products=('compass',)),  # pyright: ignore[reportArgumentType]
