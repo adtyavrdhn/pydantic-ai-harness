@@ -15,8 +15,9 @@ uv add "pydantic-ai-harness[atlassian]" "pydantic-ai-slim[openai]"
 
 ## Setup
 
-Your Atlassian organization administrator must allow Rovo MCP, and the account you sign in with must have access to
-the Jira site and data you want the agent to use.
+Your organization needs a paid Jira, Confluence, Service Collection, or Teamwork Collection Cloud subscription and a
+verified business domain. An organization administrator must enable Rovo, allow Rovo MCP, and give the account you sign
+in with access to the site and data you want the agent to use.
 
 Find the site's `cloudId` by opening `https://<your-site>.atlassian.net/_edge/tenant_info`, then set it with your model
 credential:
