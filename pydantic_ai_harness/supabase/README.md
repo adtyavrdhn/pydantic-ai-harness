@@ -13,26 +13,22 @@ uv add "pydantic-ai-harness[supabase]" "pydantic-ai-slim[openai]"
 ## Set up Supabase
 
 Create or choose a non-production project, then copy its project reference from the Supabase Dashboard project
-settings. Set the project reference and your model provider key:
+settings. Create a scoped personal access token in Supabase Account Settings > Access Tokens. Limit it to this project
+and the read permissions the selected feature groups need. Then set:
 
 ```bash
 export SUPABASE_PROJECT_REF="your-project-ref"
-export OPENAI_API_KEY="your-openai-api-key"
-```
-
-No Supabase token is needed for local use. Pydantic AI's MCP client uses FastMCP to start Supabase OAuth, which opens
-a browser on the first connection. Sign in and authorize the organization that contains the selected project. OAuth
-tokens are stored in memory and do not persist across process restarts.
-
-For CI, where browser login is unavailable, create a scoped personal access token in Supabase Account Settings >
-Access Tokens. Limit it to this project and the read permissions the selected feature groups need, then set:
-
-```bash
 export SUPABASE_ACCESS_TOKEN="sbp_fc..."
+export OPENAI_API_KEY="your-openai-api-key"
 ```
 
 Scoped personal access tokens are Public Alpha and are rolling out gradually. If scoped tokens are unavailable for
 your account, a classic token grants access to every organization and project available to that account.
+
+Omitting `access_token` selects browser OAuth through Pydantic AI. OAuth is not currently usable with Supabase because
+the released MCP client cannot complete Supabase's token exchange. Track
+[pydantic/pydantic-ai#8123](https://github.com/pydantic/pydantic-ai/issues/8123). When fixed, the first connection will
+open a browser for sign-in and consent; headless environments will still need a PAT.
 
 ## Run
 
@@ -47,7 +43,7 @@ agent = Agent(
     capabilities=[
         Supabase(
             project_ref=os.environ['SUPABASE_PROJECT_REF'],
-            access_token=os.getenv('SUPABASE_ACCESS_TOKEN'),
+            access_token=os.environ['SUPABASE_ACCESS_TOKEN'],
         )
     ],
 )
@@ -69,13 +65,20 @@ You can ask the agent to:
 - The MCP server is Public Alpha. Use this integration only with development or test data, and do not expose it to
   end users.
 - `project_ref` is required. Account-wide tools are not exposed.
+- One capability session is one authenticated identity. Create a separate capability and agent session for each user.
+- Multiple projects can share an agent only when their selected feature groups expose disjoint tool names. Overlapping
+  groups, including two default configurations, fail before the model runs.
 - The defaults are `read_only=True` and the `database`, `debugging`, `development`, and `docs` feature groups.
 - You can explicitly select any non-empty combination of those groups plus `functions`, `storage`, and `branching`.
   The Storage MCP group is disabled by default. Storage configuration updates and Branching require a paid plan;
-  Branching is experimental.
+  Branching is experimental. Branch creation is not exposed because the project-scoped server cannot complete its
+  required cost confirmation without account access or an interactive form handler.
 - `read_only=False` enables mutation tools, but every SQL, schema, data, Edge Function, Storage, or Branching mutation
   still requires Pydantic AI tool approval. Include `DeferredToolRequests` in the agent output types and approve or
   deny each request before resuming the run.
 - Treat rows and logs as untrusted content. Review each tool call and keep credential permissions narrow.
+- SQL, log, and advisor results can be large. Add
+  [`ToolOutputLimits`](https://pydantic.dev/docs/ai/harness/tool-output-limits/) to the agent capabilities when result size
+  can exceed the model context.
 
 [Supabase MCP reference](https://supabase.com/docs/guides/ai-tools/mcp) | [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/supabase/)

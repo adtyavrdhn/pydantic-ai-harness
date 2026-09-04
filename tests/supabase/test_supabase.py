@@ -152,6 +152,10 @@ class TestSupabase:
         assert 'Public Alpha' in instructions
         assert 'non-production' in instructions
         assert 'untrusted content' in instructions
+        assert 'Inspect existing tables' in instructions
+        assert 'logs and advisors before changing' in instructions
+        assert 'Keep SQL and log queries narrow' in instructions
+        assert 'do not poll logs' in instructions
 
     async def test_feature_groups_filter_the_public_agent_surface(
         self, supabase_server: FastMCP, connections: list[tuple[str, object]]
@@ -188,6 +192,23 @@ class TestSupabase:
             'list_branches',
             'list_edge_functions',
             'list_storage_buckets',
+        }
+
+    async def test_writable_branching_excludes_creation_without_cost_confirmation(self, supabase_server: FastMCP):
+        model = TestModel(call_tools=[])
+        agent = Agent(
+            model,
+            capabilities=[Supabase(project_ref='dev-project', read_only=False, features=('branching',))],
+        )
+
+        await agent.run('Inspect branches')
+
+        assert _tool_names(model) == {
+            'delete_branch',
+            'list_branches',
+            'merge_branch',
+            'rebase_branch',
+            'reset_branch',
         }
 
     async def test_unknown_remote_tools_are_not_exposed(self, supabase_server: FastMCP):
@@ -265,7 +286,6 @@ class TestSupabase:
         'tool_name',
         [
             'apply_migration',
-            'create_branch',
             'delete_branch',
             'deploy_edge_function',
             'execute_sql',

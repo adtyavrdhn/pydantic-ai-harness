@@ -150,7 +150,7 @@ def _register_optional_tools(server: FastMCP, calls: list[str]) -> None:
 
 def _register_branching_tools(server: FastMCP, calls: list[str]) -> None:
     @server.tool()
-    def create_branch(name: str) -> str:
+    def create_branch(name: str) -> str:  # pragma: no cover - capability must never expose this incomplete flow
         """Create a database branch."""
         calls.append(f'create_branch:{name}')
         return name
