@@ -28,7 +28,8 @@ export OPENAI_API_KEY="your-openai-api-key"
 Give the Linear key the `Read` permission for the default read-only connection. To use interactive OAuth instead, pass
 `auth='oauth'` and omit `LINEAR_ACCESS_TOKEN`. FastMCP handles OAuth and opens a browser for Linear authorization on the
 first run. For a headless job, use a bearer token. To reuse OAuth authorization across runs, inject a FastMCP client
-configured with encrypted persistent token storage; FastMCP's default token storage is in memory.
+configured with encrypted persistent token storage that is independently namespaced for each user and workspace;
+FastMCP's default token storage is in memory.
 
 ## Run an agent
 
