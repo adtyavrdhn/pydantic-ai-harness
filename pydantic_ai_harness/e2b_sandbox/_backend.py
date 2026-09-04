@@ -52,11 +52,7 @@ from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, r
 
 if TYPE_CHECKING:
     import e2b
-    from pydantic_ai.sandboxes import (
-        SandboxCommand,
-        SandboxFilesystem,
-        SupportsFilesystem,
-    )
+    from pydantic_ai.sandboxes import SandboxCommand, SupportsFilesystem
 
 __all__ = (
     'E2BSandboxAuthError',
@@ -243,67 +239,6 @@ async def _kill_quietly(process: _E2BProcess) -> None:
                 pass
 
 
-class _E2BFilesystem:
-    """E2B's sandbox filesystem API behind the `SandboxFilesystem` protocol."""
-
-    def __init__(self, backend: E2BSandboxBackend) -> None:
-        self._backend = backend
-
-    @asynccontextmanager
-    async def _translated(self, path: str) -> AsyncGenerator[None]:
-        """Map E2B's filesystem exceptions onto the ones the protocol promises.
-
-        A missing path is the builtin `FileNotFoundError` every backend raises. Everything
-        else goes through the shared classification, which can still find a dead sandbox or
-        rejected credentials behind it.
-        """
-        import e2b
-
-        try:
-            yield
-        except e2b.FileNotFoundException as e:
-            raise FileNotFoundError(f'No such file or directory in the E2B sandbox: {path!r}') from e
-        except Exception as e:
-            raise await self._backend.operation_error(e, f'Could not access {path!r} in the sandbox') from e
-
-    async def read_bytes(self, path: str) -> bytes:
-        async with self._translated(path):
-            return bytes(await (await self._backend.sandbox).files.read(path, 'bytes'))
-
-    async def write_bytes(self, path: str, data: bytes) -> None:
-        # E2B creates missing parents and replaces existing contents. Its `write` accepts a
-        # file-like object through an untyped `IO`, so pyright reports the member as partially
-        # unknown; only the `bytes` half is used here.
-        async with self._translated(path):
-            await (await self._backend.sandbox).files.write(path, data)  # pyright: ignore[reportUnknownMemberType]
-
-    async def stat(self, path: str) -> FileEntry:
-        async with self._translated(path):
-            return _file_entry(await (await self._backend.sandbox).files.get_info(path))
-
-    async def list_dir(self, path: str) -> Sequence[FileEntry]:
-        async with self._translated(path):
-            # `depth=1` is E2B's non-recursive listing.
-            entries = await (await self._backend.sandbox).files.list(path, depth=1)
-        return [_file_entry(entry) for entry in entries]
-
-    async def make_dir(self, path: str) -> None:
-        # E2B creates missing parents and reports an existing directory by returning False
-        # rather than raising, which is the `mkdir -p` behavior the protocol asks for.
-        async with self._translated(path):
-            await (await self._backend.sandbox).files.make_dir(path)
-
-    async def remove(self, path: str) -> None:
-        # One call covers both halves of the protocol's `remove`: E2B deletes a file or a
-        # directory with its contents.
-        async with self._translated(path):
-            await (await self._backend.sandbox).files.remove(path)
-
-    async def exists(self, path: str) -> bool:
-        async with self._translated(path):
-            return await (await self._backend.sandbox).files.exists(path)
-
-
 def _file_entry(entry: e2b.EntryInfo) -> FileEntry:
     import e2b
 
@@ -383,7 +318,6 @@ class E2BSandboxBackend(SandboxBackend):
         # that ran out rather than one this process only configured.
         self._created_timeout: int | None = None
         self._lock = anyio.Lock()
-        self.fs = _E2BFilesystem(self)
 
     @property
     def sandbox(self) -> Awaitable[e2b.AsyncSandbox]:
@@ -412,6 +346,47 @@ class E2BSandboxBackend(SandboxBackend):
     def ref(self) -> SandboxRef | None:
         """Identity of the sandbox, or `None` before one has been created."""
         return self._ref
+
+    @asynccontextmanager
+    async def _translated_filesystem_error(self, path: str) -> AsyncGenerator[None]:
+        """Map E2B's filesystem exceptions onto the ones the protocol promises."""
+        import e2b
+
+        try:
+            yield
+        except e2b.FileNotFoundException as e:
+            raise FileNotFoundError(f'No such file or directory in the E2B sandbox: {path!r}') from e
+        except Exception as e:
+            raise await self.operation_error(e, f'Could not access {path!r} in the sandbox') from e
+
+    async def read_bytes(self, path: str) -> bytes:
+        async with self._translated_filesystem_error(path):
+            return bytes(await (await self.sandbox).files.read(path, 'bytes'))
+
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        async with self._translated_filesystem_error(path):
+            await (await self.sandbox).files.write(path, data)  # pyright: ignore[reportUnknownMemberType]
+
+    async def stat(self, path: str) -> FileEntry:
+        async with self._translated_filesystem_error(path):
+            return _file_entry(await (await self.sandbox).files.get_info(path))
+
+    async def list_dir(self, path: str) -> Sequence[FileEntry]:
+        async with self._translated_filesystem_error(path):
+            entries = await (await self.sandbox).files.list(path, depth=1)
+        return [_file_entry(entry) for entry in entries]
+
+    async def make_dir(self, path: str) -> None:
+        async with self._translated_filesystem_error(path):
+            await (await self.sandbox).files.make_dir(path)
+
+    async def remove(self, path: str) -> None:
+        async with self._translated_filesystem_error(path):
+            await (await self.sandbox).files.remove(path)
+
+    async def exists(self, path: str) -> bool:
+        async with self._translated_filesystem_error(path):
+            return await (await self.sandbox).files.exists(path)
 
     async def _create(self) -> e2b.AsyncSandbox:
         """Provision a fresh E2B sandbox."""
@@ -681,4 +656,3 @@ if TYPE_CHECKING:
     _backend = E2BSandboxBackend()
     _backend_conforms: SandboxBackend = _backend
     _filesystem_backend_conforms: SupportsFilesystem = _backend
-    _filesystem_conforms: SandboxFilesystem = _backend.fs
