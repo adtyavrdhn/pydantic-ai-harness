@@ -77,6 +77,10 @@ _DEFAULT_INSTRUCTIONS = (
 )
 
 
+def _belongs_to_selected_service(name: object, selected_prefixes: tuple[str, ...]) -> bool:
+    return isinstance(name, str) and name.startswith(selected_prefixes)
+
+
 @dataclass
 class GoogleWorkspace(AbstractCapability[AgentDepsT]):
     """Tools from selected official Google Workspace remote MCP servers.
@@ -140,7 +144,9 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
             self.allowed_tools = tuple(self.allowed_tools)
         if self.allowed_tools is not None:
             selected_prefixes = tuple(f'{service}_' for service in services)
-            invalid = next((name for name in self.allowed_tools if not name.startswith(selected_prefixes)), None)
+            invalid = next(
+                (name for name in self.allowed_tools if not _belongs_to_selected_service(name, selected_prefixes)), None
+            )
             if invalid is not None:
                 raise UserError(f'Allowed tool {invalid!r} does not belong to a selected service.')
 
