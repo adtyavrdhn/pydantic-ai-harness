@@ -35,4 +35,9 @@ def linear_server() -> Iterator[FastMCP]:
         """Create a Linear issue."""
         return {'id': 'ENG-124', 'title': title}
 
+    @server.tool()
+    def fail_issue() -> None:
+        """Fail while reading a Linear issue."""
+        raise RuntimeError('provider exploded')
+
     yield server

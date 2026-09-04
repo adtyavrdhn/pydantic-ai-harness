@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from httpx import Auth
 from pydantic import AnyUrl
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
@@ -87,12 +88,16 @@ class Linear(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build the Linear MCP toolset, with an exact-name filter when configured."""
         if isinstance(self.client, MCPToolset):
+            if self.auth is not None:
+                raise UserError('`auth` cannot be used with a prebuilt `MCPToolset`; configure auth on its client.')
             toolset: AbstractToolset[AgentDepsT] = self.client
         else:
             client = self.client or (LINEAR_READ_ONLY_MCP_URL if self.read_only else LINEAR_MCP_URL)
             is_http_url = isinstance(client, AnyUrl) or (
                 isinstance(client, str) and urlsplit(client).scheme.lower() in ('http', 'https')
             )
+            if self.auth is not None and not is_http_url:
+                raise UserError('`auth` cannot be used with a prebuilt client; configure auth on that client.')
             toolset = MCPToolset(
                 client,
                 id=self.id or 'linear',

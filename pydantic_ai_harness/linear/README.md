@@ -108,5 +108,7 @@ linear = Linear(client=client)
 ```
 
 You can also pass a prebuilt `pydantic_ai.mcp.MCPToolset`. Injected clients and toolsets keep their own endpoint and
-authentication, so `read_only` does not constrain them. `allowed_tools` and the Linear instructions still apply. Build
-one client or toolset per user and authentication context rather than sharing credentials between users.
+authentication, so `read_only` does not constrain them. Do not also pass `auth`; configure authentication on the
+injected connection. Set `read_only=False` for an injected read-write connection so the provider instructions include
+mutation guidance. `allowed_tools` still applies. Build one client or toolset per user and authentication context rather
+than sharing credentials between users.

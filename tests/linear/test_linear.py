@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 from fastmcp import Client
 from fastmcp.client.transports import FastMCPTransport, StreamableHttpTransport
+from pydantic import AnyUrl
 from pydantic_ai import Agent
 from pydantic_ai.agent.spec import AgentSpec
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.messages import ModelMessage, ModelRequest, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, RetryPromptPart, TextPart, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FilteredToolset
 
@@ -49,6 +53,24 @@ class TestLinear:
     def test_serialization_name(self):
         assert Linear.get_serialization_name() == 'Linear'
 
+    def test_from_spec_forwards_serializable_options(self):
+        capability = Linear.from_spec(
+            id='tenant-linear',
+            description='Tenant issues',
+            defer_loading=True,
+            read_only=False,
+            auth='token',
+            allowed_tools=['create_issue'],
+            include_instructions=False,
+        )
+        assert capability.id == 'tenant-linear'
+        assert capability.description == 'Tenant issues'
+        assert capability.defer_loading is True
+        assert capability.read_only is False
+        assert capability.auth == 'token'
+        assert capability.allowed_tools == ['create_issue']
+        assert capability.include_instructions is False
+
     def test_default_uses_documented_read_only_endpoint(self):
         transport = _http_transport(Linear())
         assert transport.url == LINEAR_READ_ONLY_MCP_URL
@@ -74,6 +96,14 @@ class TestLinear:
         assert transport.url == 'https://proxy.example/mcp'
         assert transport.auth is not None
 
+    def test_any_url_client_receives_auth_and_custom_id(self):
+        capability = Linear(client=AnyUrl('https://proxy.example/mcp'), auth='token', id='tenant-linear')
+        toolset = capability.get_toolset()
+        assert isinstance(toolset, MCPToolset)
+        assert toolset.id == 'tenant-linear'
+        assert isinstance(toolset.client.transport, StreamableHttpTransport)
+        assert toolset.client.transport.auth is not None
+
     def test_no_auth_is_supported(self):
         transport = _http_transport(Linear(auth=None))
         assert transport.auth is None
@@ -83,6 +113,26 @@ class TestLinear:
         result = await agent.run('Read ENG-123')
         assert _tool_call_names(result.all_messages()) == {'get_issue'}
         assert 'Fix the build' in result.output
+
+    async def test_server_failure_reaches_model_as_retry(self, linear_server: FastMCP):
+        def model_fn(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            retry = next(
+                (
+                    part
+                    for message in messages
+                    for part in message.parts
+                    if isinstance(part, RetryPromptPart) and part.tool_name == 'fail_issue'
+                ),
+                None,
+            )
+            if retry is None:
+                return ModelResponse(parts=[ToolCallPart(tool_name='fail_issue', args={})])
+            assert 'provider exploded' in str(retry.content)
+            return ModelResponse(parts=[TextPart('recovered')])
+
+        agent = Agent(FunctionModel(model_fn), capabilities=[Linear(client=linear_server)])
+        result = await agent.run('Read the issue')
+        assert result.output == 'recovered'
 
     async def test_allowed_tools_are_exact_names(self, linear_server: FastMCP):
         agent = Agent(
@@ -105,19 +155,37 @@ class TestLinear:
         assert isinstance(toolset, FilteredToolset)
         assert isinstance(toolset.wrapped, MCPToolset)
 
-    def test_prebuilt_client_is_preserved(self, linear_server: FastMCP):
+    @pytest.mark.parametrize('prebuild_toolset', [False, True])
+    async def test_prebuilt_connection_runs_through_agent(self, linear_server: FastMCP, prebuild_toolset: bool):
         client = Client(linear_server)
-        toolset = Linear(client=client).get_toolset()
-        assert isinstance(toolset, MCPToolset)
-        assert toolset.client is client
+        connection = MCPToolset(client, id='tenant-linear') if prebuild_toolset else client
+        capability = Linear(client=connection, allowed_tools=['get_issue'])
+        toolset = capability.get_toolset()
+        assert isinstance(toolset, FilteredToolset)
+        assert isinstance(toolset.wrapped, MCPToolset)
+        assert toolset.wrapped.client is client
         assert isinstance(client.transport, FastMCPTransport)
 
-    def test_prebuilt_toolset_is_preserved(self, linear_server: FastMCP):
-        prebuilt = MCPToolset(linear_server, id='tenant-linear')
-        assert Linear(client=prebuilt).get_toolset() is prebuilt
+        result = await Agent(TestModel(), capabilities=[capability]).run('Read an issue')
+        assert _tool_call_names(result.all_messages()) == {'get_issue'}
+
+    @pytest.mark.parametrize('prebuild_toolset', [False, True])
+    def test_auth_with_prebuilt_connection_is_rejected(self, linear_server: FastMCP, prebuild_toolset: bool):
+        client = Client(linear_server)
+        connection = MCPToolset(client) if prebuild_toolset else client
+        with pytest.raises(UserError, match='configure auth on'):
+            Linear(client=connection, auth='token').get_toolset()
+
+    def test_non_url_client_without_auth_is_supported(self, tmp_path: Path):
+        script = tmp_path / 'server.py'
+        script.write_text('', encoding='utf-8')
+        toolset = Linear(client=script).get_toolset()
+        assert isinstance(toolset, MCPToolset)
 
     async def test_short_provider_instructions(self, linear_server: FastMCP):
-        result = await Agent(TestModel(), capabilities=[Linear(client=linear_server)]).run('Read ENG-123')
+        result = await Agent(TestModel(call_tools=['get_issue']), capabilities=[Linear(client=linear_server)]).run(
+            'Read ENG-123'
+        )
         instructions = _request_instructions(result.all_messages())
         assert 'Linear' in instructions
         assert 'identifiers' in instructions
@@ -129,7 +197,8 @@ class TestLinear:
         assert 'Before changing Linear data' in _request_instructions(result.all_messages())
 
     async def test_instructions_can_be_disabled(self, linear_server: FastMCP):
-        result = await Agent(TestModel(), capabilities=[Linear(client=linear_server, include_instructions=False)]).run(
-            'Read issues'
-        )
+        result = await Agent(
+            TestModel(call_tools=['get_issue']),
+            capabilities=[Linear(client=linear_server, include_instructions=False)],
+        ).run('Read issues')
         assert 'Linear tools' not in _request_instructions(result.all_messages())
