@@ -98,13 +98,6 @@ def github_server(github_calls: list[tuple[str, dict[str, object]]]) -> FastMCP:
         return 'octocat'  # pragma: no cover
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
-    def create_issue(owner: str, repo: str, title: str) -> dict[str, str]:
-        """Create an issue."""
-        arguments: dict[str, object] = {'owner': owner, 'repo': repo, 'title': title}
-        github_calls.append(('create_issue', arguments))
-        return {'owner': owner, 'repo': repo, 'title': title}
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
     def fork_repository(owner: str, repo: str, organization: str | None = None) -> dict[str, str | None]:
         """Fork a repository to an optional destination organization."""
         return {'owner': owner, 'repo': repo, 'organization': organization}  # pragma: no cover
@@ -140,6 +133,38 @@ def github_server(github_calls: list[tuple[str, dict[str, object]]]) -> FastMCP:
             'related_owner': related_owner,
             'related_repo': related_repo,
         }
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def issue_write(
+        method: str,
+        owner: str,
+        repo: str,
+        issue_number: int | None = None,
+        parent_issue_number: int | None = None,
+        parent_owner: str | None = None,
+        parent_repo: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, object]:
+        """Create an issue with an optional cross-repository parent."""
+        arguments: dict[str, object] = {
+            'method': method,
+            'owner': owner,
+            'repo': repo,
+            'issue_number': issue_number,
+            'parent_issue_number': parent_issue_number,
+            'title': title,
+            'parent_owner': parent_owner,
+            'parent_repo': parent_repo,
+        }
+        github_calls.append(('issue_write', arguments))
+        return arguments
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def list_issue_fields(owner: str, repo: str | None = None) -> dict[str, str | None]:
+        """List repository or organization issue fields."""
+        arguments: dict[str, object] = {'owner': owner, 'repo': repo}
+        github_calls.append(('list_issue_fields', arguments))
+        return {'owner': owner, 'repo': repo}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
     def sub_issue_write(owner: str, repo: str, issue_number: int, sub_issue_id: int) -> dict[str, object]:

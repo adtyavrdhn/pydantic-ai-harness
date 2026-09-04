@@ -163,6 +163,7 @@ class TestGitHub:
         assert seen_tools == [
             {
                 'get_file_contents',
+                'list_issue_fields',
                 'pull_request_read',
                 'search_code',
                 'search_commits',
@@ -194,8 +195,8 @@ class TestGitHub:
                 return ModelResponse(
                     parts=[
                         ToolCallPart(
-                            tool_name='create_issue',
-                            args={'owner': 'pydantic', 'repo': 'pydantic-ai', 'title': 'Bug'},
+                            tool_name='issue_write',
+                            args={'method': 'create', 'owner': 'pydantic', 'repo': 'pydantic-ai', 'title': 'Bug'},
                             tool_call_id='write-1',
                         )
                     ]
@@ -209,14 +210,28 @@ class TestGitHub:
         )
         result = await agent.run('Create an issue')
         assert isinstance(result.output, DeferredToolRequests)
-        assert [call.tool_name for call in result.output.approvals] == ['create_issue']
+        assert [call.tool_name for call in result.output.approvals] == ['issue_write']
 
         resumed = await agent.run(
             message_history=result.all_messages(),
             deferred_tool_results=DeferredToolResults(approvals={'write-1': True}),
         )
         assert resumed.output == 'done'
-        assert github_calls == [('create_issue', {'owner': 'pydantic', 'repo': 'pydantic-ai', 'title': 'Bug'})]
+        assert github_calls == [
+            (
+                'issue_write',
+                {
+                    'method': 'create',
+                    'owner': 'pydantic',
+                    'repo': 'pydantic-ai',
+                    'issue_number': None,
+                    'parent_issue_number': None,
+                    'title': 'Bug',
+                    'parent_owner': None,
+                    'parent_repo': None,
+                },
+            )
+        ]
 
     async def test_denied_write_does_not_reach_github(
         self, github_server: FastMCP, github_calls: list[tuple[str, dict[str, object]]]
@@ -226,8 +241,8 @@ class TestGitHub:
                 return ModelResponse(
                     parts=[
                         ToolCallPart(
-                            tool_name='create_issue',
-                            args={'owner': 'pydantic', 'repo': 'pydantic-ai', 'title': 'Bug'},
+                            tool_name='issue_write',
+                            args={'method': 'create', 'owner': 'pydantic', 'repo': 'pydantic-ai', 'title': 'Bug'},
                             tool_call_id='write-1',
                         )
                     ]
@@ -255,13 +270,13 @@ class TestGitHub:
                 return ModelResponse(
                     parts=[
                         ToolCallPart(
-                            tool_name='create_issue',
-                            args={'owner': 'pydantic', 'repo': 'pydantic-ai', 'title': 'Approved'},
+                            tool_name='issue_write',
+                            args={'method': 'create', 'owner': 'pydantic', 'repo': 'pydantic-ai', 'title': 'Approved'},
                             tool_call_id='write-approved',
                         ),
                         ToolCallPart(
-                            tool_name='create_issue',
-                            args={'owner': 'pydantic', 'repo': 'pydantic-ai', 'title': 'Denied'},
+                            tool_name='issue_write',
+                            args={'method': 'create', 'owner': 'pydantic', 'repo': 'pydantic-ai', 'title': 'Denied'},
                             tool_call_id='write-denied',
                         ),
                     ]
@@ -280,7 +295,21 @@ class TestGitHub:
             deferred_tool_results=DeferredToolResults(approvals={'write-approved': True, 'write-denied': False}),
         )
         assert resumed.output == 'done'
-        assert github_calls == [('create_issue', {'owner': 'pydantic', 'repo': 'pydantic-ai', 'title': 'Approved'})]
+        assert github_calls == [
+            (
+                'issue_write',
+                {
+                    'method': 'create',
+                    'owner': 'pydantic',
+                    'repo': 'pydantic-ai',
+                    'issue_number': None,
+                    'parent_issue_number': None,
+                    'title': 'Approved',
+                    'parent_owner': None,
+                    'parent_repo': None,
+                },
+            )
+        ]
 
     async def test_two_scopes_collide_instead_of_merging_access_policy(self, github_server: FastMCP):
         agent = Agent(
@@ -301,8 +330,8 @@ class TestGitHub:
                 return ModelResponse(
                     parts=[
                         ToolCallPart(
-                            tool_name='create_issue',
-                            args={'owner': 'other', 'repo': 'repo', 'title': 'Bug'},
+                            tool_name='issue_write',
+                            args={'method': 'create', 'owner': 'other', 'repo': 'repo', 'title': 'Bug'},
                         )
                     ]
                 )
@@ -455,6 +484,27 @@ class TestGitHubToolset:
                     tools['get_file_contents'],
                 )
 
+    async def test_repository_scope_requires_owner_and_repo_together(
+        self, github_server: FastMCP, run_context: RunContext[None]
+    ):
+        toolset = GitHub[None](repository='pydantic/pydantic-ai', client=github_server).get_toolset()
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            with pytest.raises(ModelRetry, match='both owner and repository'):
+                await toolset.call_tool(
+                    'list_issue_fields',
+                    {'owner': 'pydantic'},
+                    run_context,
+                    tools['list_issue_fields'],
+                )
+            result = await toolset.call_tool(
+                'list_issue_fields',
+                {'owner': 'pydantic', 'repo': 'pydantic-ai'},
+                run_context,
+                tools['list_issue_fields'],
+            )
+        assert 'pydantic-ai' in str(result)
+
     @pytest.mark.parametrize('tool_name', ['search_code', 'search_commits', 'search_issues', 'search_pull_requests'])
     async def test_repository_scope_is_added_to_search(
         self, tool_name: str, github_server: FastMCP, run_context: RunContext[None]
@@ -534,6 +584,27 @@ class TestGitHubToolset:
             with pytest.raises(ModelRetry, match='outside'):
                 await toolset.call_tool('search_issues', {'query': query}, run_context, tools['search_issues'])
 
+    @pytest.mark.parametrize(
+        ('repository', 'organization', 'arguments'),
+        [
+            ('pydantic/pydantic-ai', None, {'query': 'bug', 'owner': 'pydantic'}),
+            (None, 'pydantic', {'query': 'bug', 'repo': 'pydantic-ai'}),
+        ],
+    )
+    async def test_search_scope_requires_paired_repository_arguments(
+        self,
+        repository: str | None,
+        organization: str | None,
+        arguments: dict[str, object],
+        github_server: FastMCP,
+        run_context: RunContext[None],
+    ):
+        toolset = GitHub[None](repository=repository, organization=organization, client=github_server).get_toolset()
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            with pytest.raises(ModelRetry, match='both owner and repository'):
+                await toolset.call_tool('search_issues', arguments, run_context, tools['search_issues'])
+
     async def test_repository_scope_rejects_conflicting_search_arguments(
         self, github_server: FastMCP, run_context: RunContext[None]
     ):
@@ -577,6 +648,7 @@ class TestGitHubToolset:
             tools = await toolset.get_tools(run_context)
             assert set(tools) == {
                 'get_file_contents',
+                'list_issue_fields',
                 'list_teams',
                 'pull_request_read',
                 'search_code',
@@ -587,7 +659,11 @@ class TestGitHubToolset:
             with pytest.raises(ModelRetry, match='pydantic'):
                 await toolset.call_tool('list_teams', {'org': 'other'}, run_context, tools['list_teams'])
             result = await toolset.call_tool('list_teams', {'org': 'PYDANTIC'}, run_context, tools['list_teams'])
+            issue_fields = await toolset.call_tool(
+                'list_issue_fields', {'owner': 'pydantic'}, run_context, tools['list_issue_fields']
+            )
         assert 'PYDANTIC' in str(result)
+        assert 'pydantic' in str(issue_fields)
 
     async def test_organization_scope_allows_only_repository_tools_owned_by_org(
         self,
@@ -619,7 +695,6 @@ class TestGitHubToolset:
         ('repository', 'organization', 'hidden_tool'),
         [
             ('pydantic/pydantic-ai', None, 'fork_repository'),
-            ('pydantic/pydantic-ai', None, 'issue_dependency_write'),
             ('pydantic/pydantic-ai', None, 'add_sub_issue'),
             ('pydantic/pydantic-ai', None, 'remove_sub_issue'),
             ('pydantic/pydantic-ai', None, 'reprioritize_sub_issue'),
@@ -643,6 +718,104 @@ class TestGitHubToolset:
         ).get_toolset()
         async with toolset:
             assert hidden_tool not in await toolset.get_tools(run_context)
+
+    @pytest.mark.parametrize(
+        ('tool_name', 'arguments'),
+        [
+            (
+                'issue_write',
+                {
+                    'method': 'create',
+                    'owner': 'pydantic',
+                    'repo': 'pydantic-ai',
+                    'title': 'Scoped issue',
+                    'parent_issue_number': 1,
+                    'parent_owner': 'other',
+                    'parent_repo': 'repo',
+                },
+            ),
+            (
+                'issue_dependency_write',
+                {
+                    'owner': 'pydantic',
+                    'repo': 'pydantic-ai',
+                    'related_owner': 'other',
+                    'related_repo': 'repo',
+                },
+            ),
+            (
+                'issue_write',
+                {
+                    'method': 'create',
+                    'owner': 'pydantic',
+                    'repo': 'pydantic-ai',
+                    'title': 'Scoped issue',
+                    'parent_issue_number': 1,
+                    'parent_owner': 'pydantic',
+                    'parent_repo': 'other',
+                },
+            ),
+        ],
+    )
+    async def test_repository_scope_rejects_cross_repository_secondary_target(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+        github_server: FastMCP,
+        run_context: RunContext[None],
+    ):
+        toolset = GitHub[None](
+            repository='pydantic/pydantic-ai', access='write', require_approval=False, client=github_server
+        ).get_toolset()
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            with pytest.raises(ModelRetry, match='secondary target'):
+                await toolset.call_tool(tool_name, arguments, run_context, tools[tool_name])
+
+    async def test_repository_scope_allows_same_repository_parent(
+        self, github_server: FastMCP, run_context: RunContext[None]
+    ):
+        toolset = GitHub[None](
+            repository='pydantic/pydantic-ai', access='write', require_approval=False, client=github_server
+        ).get_toolset()
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            result = await toolset.call_tool(
+                'issue_write',
+                {
+                    'method': 'create',
+                    'owner': 'pydantic',
+                    'repo': 'pydantic-ai',
+                    'title': 'Scoped issue',
+                    'parent_issue_number': 1,
+                    'parent_owner': 'PYDANTIC',
+                    'parent_repo': 'PYDANTIC-AI',
+                },
+                run_context,
+                tools['issue_write'],
+            )
+        assert 'Scoped issue' in str(result)
+
+    async def test_parent_target_fields_must_be_paired(self, github_server: FastMCP, run_context: RunContext[None]):
+        toolset = GitHub[None](
+            repository='pydantic/pydantic-ai', access='write', require_approval=False, client=github_server
+        ).get_toolset()
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            with pytest.raises(ModelRetry, match='must provide `parent_owner` and `parent_repo` together'):
+                await toolset.call_tool(
+                    'issue_write',
+                    {
+                        'method': 'create',
+                        'owner': 'pydantic',
+                        'repo': 'pydantic-ai',
+                        'title': 'Scoped issue',
+                        'parent_issue_number': 1,
+                        'parent_owner': 'pydantic',
+                    },
+                    run_context,
+                    tools['issue_write'],
+                )
 
     async def test_organization_scope_is_added_to_search(self, github_server: FastMCP, run_context: RunContext[None]):
         toolset = GitHub[None](organization='pydantic', client=github_server).get_toolset()
@@ -700,9 +873,9 @@ class TestGitHubToolset:
         async with toolset:
             tools = await toolset.get_tools(run_context)
             result = await toolset.call_tool(
-                'create_issue',
-                {'owner': 'pydantic', 'repo': 'pydantic-ai', 'title': 'Bug'},
+                'issue_write',
+                {'method': 'create', 'owner': 'pydantic', 'repo': 'pydantic-ai', 'title': 'Bug'},
                 run_context,
-                tools['create_issue'],
+                tools['issue_write'],
             )
         assert 'Bug' in str(result)

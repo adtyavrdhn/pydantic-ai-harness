@@ -64,7 +64,6 @@ AccessMode = Literal['read', 'write']
 
 _DEFAULT_TOOLSETS = ('repos', 'issues', 'pull_requests')
 _SUPPORTED_TOOLSETS = frozenset(_DEFAULT_TOOLSETS)
-_ALTERNATE_TARGET_FIELDS = frozenset({'related_owner', 'related_repo'})
 _OPAQUE_TARGET_TOOL_NAMES = frozenset(
     {'add_sub_issue', 'remove_sub_issue', 'reprioritize_sub_issue', 'sub_issue_write'}
 )
@@ -206,10 +205,8 @@ class GitHubToolset(MCPToolset[AgentDepsT]):
         parsed_properties = _object_mapping(properties)
         property_names = set(parsed_properties) if parsed_properties is not None else set[str]()
         target_names = property_names & {'owner', 'repo', 'org', 'organization', 'enterprise'}
-        if (
-            property_names & _ALTERNATE_TARGET_FIELDS
-            or 'enterprise' in target_names
-            or ({'owner', 'repo'} & target_names and {'org', 'organization'} & target_names)
+        if 'enterprise' in target_names or (
+            {'owner', 'repo'} & target_names and {'org', 'organization'} & target_names
         ):
             return False
         if tool.tool_def.name in _SEARCH_TOOL_NAMES and 'query' in property_names:
@@ -232,6 +229,7 @@ class GitHubToolset(MCPToolset[AgentDepsT]):
 
     def _scope_args(self, name: str, tool_args: dict[str, object]) -> dict[str, object]:
         scoped = dict(tool_args)
+        self._validate_secondary_targets(name, scoped)
         if name in _SEARCH_TOOL_NAMES:
             self._validate_scope_arguments(name, scoped, require_relevant=False)
             query = scoped.get('query')
@@ -250,7 +248,30 @@ class GitHubToolset(MCPToolset[AgentDepsT]):
         self._validate_scope_arguments(name, scoped, require_relevant=True)
         return scoped
 
+    def _validate_secondary_targets(self, name: str, scoped: Mapping[str, object]) -> None:
+        for owner_key, repo_key, require_pair in (
+            ('parent_owner', 'parent_repo', True),
+            ('related_owner', 'related_repo', False),
+        ):
+            owner_present = owner_key in scoped
+            repo_present = repo_key in scoped
+            if require_pair and owner_present != repo_present:
+                raise ModelRetry(f'`{name}` must provide `{owner_key}` and `{repo_key}` together.')
+            if owner_present:
+                value = scoped[owner_key]
+                if not isinstance(value, str) or value.casefold() != self._owner.casefold():
+                    target = self.repository or self.organization
+                    raise ModelRetry(f'`{name}` must keep its secondary target within GitHub scope {target!r}.')
+            if repo_present:
+                value = scoped[repo_key]
+                if not isinstance(value, str) or (self._repo is not None and value.casefold() != self._repo.casefold()):
+                    target = self.repository or self.organization
+                    raise ModelRetry(f'`{name}` must keep its secondary target within GitHub scope {target!r}.')
+
     def _validate_scope_arguments(self, name: str, scoped: Mapping[str, object], *, require_relevant: bool) -> None:
+        if ('owner' in scoped) != ('repo' in scoped) and (self._repo is not None or 'repo' in scoped):
+            target = self.repository or self.organization
+            raise ModelRetry(f'`{name}` must identify both owner and repository within GitHub scope {target!r}.')
         expected = {'owner': self._owner}
         if self._repo is not None:
             expected['repo'] = self._repo
@@ -265,6 +286,6 @@ class GitHubToolset(MCPToolset[AgentDepsT]):
             if not isinstance(value, str) or value.casefold() != expected_value.casefold():
                 target = self.repository or self.organization
                 raise ModelRetry(f'`{name}` must stay within the configured GitHub scope {target!r}.')
-        if require_relevant and not relevant:
+        if require_relevant and (not relevant or (self._repo is not None and not set(expected) <= scoped.keys())):
             target = self.repository or self.organization
             raise ModelRetry(f'`{name}` does not identify the configured GitHub scope {target!r}.')
