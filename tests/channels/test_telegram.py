@@ -9,7 +9,7 @@ import pytest
 from pydantic import TypeAdapter
 from pydantic_ai import Agent
 
-from pydantic_ai_harness.channels import ChannelEvent, ChannelHost
+from pydantic_ai_harness.channels import ChannelEvent, ChannelHost, InMemoryConversationStore
 from pydantic_ai_harness.channels.telegram import (
     TelegramChannel,
     TelegramError,
@@ -80,6 +80,7 @@ class TestTelegramChannel:
             sender_id='telegram:user:22',
             text='hello',
             reply_to_id='telegram:message:33',
+            delivery_id='-100123',
         )
 
     async def test_scopes_claims_and_history_to_bot(self) -> None:
@@ -176,6 +177,7 @@ class TestTelegramChannel:
             {'message_id': True, 'from': {'id': 22, 'is_bot': False}, 'chat': {'id': 1}, 'text': 'hello'},
             {'message_id': -1, 'from': {'id': 22, 'is_bot': False}, 'chat': {'id': 1}, 'text': 'hello'},
             {'message_id': 1, 'from': {'id': 22, 'is_bot': False}, 'chat': {'id': True}, 'text': 'hello'},
+            {'message_id': 1, 'from': {'id': 22, 'is_bot': False}, 'chat': {'id': 0}, 'text': 'hello'},
             {
                 'message_id': 1,
                 'message_thread_id': 0,
@@ -184,6 +186,7 @@ class TestTelegramChannel:
                 'text': 'hello',
             },
             {'message_id': 1, 'from': {'id': True, 'is_bot': False}, 'chat': {'id': 1}, 'text': 'hello'},
+            {'message_id': 1, 'from': {'id': 0, 'is_bot': False}, 'chat': {'id': 1}, 'text': 'hello'},
             {'message_id': 1, 'from': {'id': 22}, 'chat': {'id': 1}, 'text': 'hello'},
             {
                 'message_id': 1,
@@ -195,6 +198,13 @@ class TestTelegramChannel:
             {
                 'message_id': 1,
                 'sender_chat': {'id': True},
+                'from': {'id': 22, 'is_bot': False},
+                'chat': {'id': 1},
+                'text': 'hello',
+            },
+            {
+                'message_id': 1,
+                'sender_chat': {'id': 0},
                 'from': {'id': 22, 'is_bot': False},
                 'chat': {'id': 1},
                 'text': 'hello',
@@ -327,6 +337,48 @@ class TestTelegramChannel:
         assert not client.is_closed
         await client.aclose()
 
+    async def test_topics_keep_separate_history_and_share_raw_chat_delivery(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(_BODY_ADAPTER.validate_python(json.loads(request.content)))
+            return _response({'ok': True, 'result': {'message_id': len(requests)}})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        channel = _channel(client)
+        store = InMemoryConversationStore()
+        host = ChannelHost(Agent('test'), channel, store=store)
+        first = channel.parse_request(_update(topic_id=44, text='first topic'), _headers())
+        second = channel.parse_request(
+            _update(update_id=12, message_id=34, topic_id=45, text='second topic'), _headers()
+        )
+        assert first is not None
+        assert second is not None
+
+        first_result = await host.handle(first)
+        second_result = await host.handle(second)
+
+        assert first.conversation_id != second.conversation_id
+        assert first.delivery_id == second.delivery_id == '-100123'
+        assert await store.load(first.conversation_id) == first_result.all_messages()
+        assert await store.load(second.conversation_id) == second_result.all_messages()
+        assert len(first_result.all_messages()) == len(second_result.all_messages())
+        assert requests == [
+            {
+                'chat_id': -100123,
+                'message_thread_id': 44,
+                'reply_parameters': {'message_id': 33},
+                'text': first_result.output,
+            },
+            {
+                'chat_id': -100123,
+                'message_thread_id': 45,
+                'reply_parameters': {'message_id': 34},
+                'text': second_result.output,
+            },
+        ]
+        await client.aclose()
+
     async def test_chunks_text_at_telegram_limit(self) -> None:
         requests: list[dict[str, object]] = []
 
@@ -341,6 +393,7 @@ class TestTelegramChannel:
             conversation_id='telegram:bot:9001:chat:7',
             sender_id='telegram:user:22',
             text='prompt',
+            delivery_id='7',
         )
 
         await channel.reply(event, 'a' * 4097)
@@ -496,6 +549,7 @@ class TestTelegramChannel:
             conversation_id='telegram:bot:9001:chat:7',
             sender_id='telegram:user:22',
             text='prompt',
+            delivery_id='7',
         )
 
         for _ in range(6):
@@ -540,6 +594,7 @@ class TestTelegramChannel:
                     sender_id='telegram:user:22',
                     text='prompt',
                     reply_to_id='slack:message:2',
+                    delivery_id='7',
                 ),
                 'answer',
             )
@@ -551,9 +606,22 @@ class TestTelegramChannel:
                     sender_id='telegram:user:22',
                     text='prompt',
                     reply_to_id='telegram:message:0',
+                    delivery_id='7',
                 ),
                 'answer',
             )
+        for delivery_id in (None, '0', 'not-a-chat', '8'):
+            with pytest.raises(TelegramError, match='delivery_id'):
+                await channel.reply(
+                    ChannelEvent(
+                        event_id='telegram:bot:9001:update:1',
+                        conversation_id='telegram:bot:9001:chat:7',
+                        sender_id='telegram:user:22',
+                        text='prompt',
+                        delivery_id=delivery_id,
+                    ),
+                    'answer',
+                )
         await client.aclose()
 
     async def test_does_not_retry_authentication_failure_with_retry_after(
@@ -736,5 +804,7 @@ class TestTelegramChannel:
             )
         with pytest.raises(TypeError, match='allowed_senders'):
             TelegramChannel(bot_id=9001, bot_token='token', webhook_secret='secret', allowed_senders={True})
+        with pytest.raises(ValueError, match='allowed_senders'):
+            TelegramChannel(bot_id=9001, bot_token='token', webhook_secret='secret', allowed_senders={0})
         with pytest.raises(ValueError, match='api_url'):
             TelegramChannel(bot_id=9001, bot_token='token', webhook_secret='secret', allowed_senders={22}, api_url='')

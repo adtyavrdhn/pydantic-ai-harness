@@ -34,6 +34,7 @@ _SECRET_PATTERN = re.compile(r'[A-Za-z0-9_-]{1,256}')
 _CONVERSATION_PATTERN = re.compile(
     r'telegram:bot:([1-9][0-9]*):chat:(-?[1-9][0-9]*)(?::(topic|direct-topic):([1-9][0-9]*))?'
 )
+_DELIVERY_PATTERN = re.compile(r'-?[1-9][0-9]*')
 _MESSAGE_PATTERN = re.compile(r'telegram:message:([1-9][0-9]*)')
 _TELEGRAM_URL_PATTERN = re.compile(r'(https?://[^\s]*?/bot)[^/\s]+(/[^\s]+)')
 _JSON_ADAPTER: TypeAdapter[object] = TypeAdapter(object)
@@ -109,6 +110,8 @@ class TelegramChannel:
         sender_values: Collection[object] = allowed_senders
         if any(not _is_integer_id(sender_id) for sender_id in sender_values):
             raise TypeError('allowed_senders must contain only integer Telegram IDs')
+        if any(sender_id == 0 for sender_id in allowed_senders):
+            raise ValueError('allowed_senders must contain only nonzero Telegram IDs')
         sender_ids = frozenset(allowed_senders)
         if not sender_ids:
             raise ValueError('allowed_senders must contain at least one Telegram ID')
@@ -162,6 +165,7 @@ class TelegramChannel:
             sender_id=f'telegram:{sender_kind}:{sender_id}',
             text=text,
             reply_to_id=f'telegram:message:{message_id}',
+            delivery_id=str(chat_id),
         )
 
     def _sender(self, message: Mapping[str, object]) -> tuple[str, int] | None:
@@ -171,7 +175,7 @@ class TelegramChannel:
             if sender_chat is None:
                 raise TelegramError('Telegram webhook payload has invalid sender-chat identity')
             sender_chat_id = sender_chat.get('id')
-            if not _is_integer_id(sender_chat_id):
+            if not _is_integer_id(sender_chat_id) or sender_chat_id == 0:
                 raise TelegramError('Telegram webhook payload has invalid sender-chat identity')
             return 'chat', sender_chat_id
 
@@ -181,7 +185,7 @@ class TelegramChannel:
             raise TelegramError('Telegram webhook payload has no sender identity')
         sender_id = sender.get('id')
         is_bot = sender.get('is_bot')
-        if not _is_integer_id(sender_id) or not isinstance(is_bot, bool):
+        if not _is_integer_id(sender_id) or sender_id == 0 or not isinstance(is_bot, bool):
             raise TelegramError('Telegram webhook payload has invalid sender identity')
         if is_bot:
             return None
@@ -197,7 +201,10 @@ class TelegramChannel:
         """
         if not text:
             raise ValueError('text must not be empty')
-        chat_id, topic_kind, topic_id = _decode_conversation(event.conversation_id, bot_id=self._bot_id)
+        conversation_chat_id, topic_kind, topic_id = _decode_conversation(event.conversation_id, bot_id=self._bot_id)
+        chat_id = _decode_delivery(event.delivery_id)
+        if chat_id != conversation_chat_id:
+            raise TelegramError('event delivery_id does not match its Telegram conversation_id')
         message_id = _decode_message(event.reply_to_id)
 
         chunks = [text[start : start + _MAX_TEXT_CHARS] for start in range(0, len(text), _MAX_TEXT_CHARS)]
@@ -326,7 +333,7 @@ def _message_identity(message: Mapping[str, object]) -> tuple[int, str | None, i
     if chat is None or message_id < 0:
         raise TelegramError('Telegram webhook payload has invalid message identity')
     chat_id = chat.get('id')
-    if not _is_integer_id(chat_id):
+    if not _is_integer_id(chat_id) or chat_id == 0:
         raise TelegramError('Telegram webhook payload has invalid chat identity')
 
     topic_id = message.get('message_thread_id')
@@ -377,6 +384,12 @@ def _decode_message(reply_to_id: str | None) -> int | None:
     if match is None:
         raise TelegramError('event reply_to_id is not a Telegram message identity')
     return int(match.group(1))
+
+
+def _decode_delivery(delivery_id: str | None) -> int:
+    if delivery_id is None or _DELIVERY_PATTERN.fullmatch(delivery_id) is None:
+        raise TelegramError('event delivery_id is not a Telegram chat identity')
+    return int(delivery_id)
 
 
 def _retry_after(envelope: Mapping[str, object]) -> float | None:

@@ -1,6 +1,6 @@
 # Channels
 
-Channels let a Pydantic AI agent answer Slack mentions and continue each Slack thread with its own message history.
+Channels let a Pydantic AI agent answer verified Slack and Telegram messages while keeping separate history for each conversation.
 
 ## Install
 
@@ -138,7 +138,6 @@ Expose port 8000 through your HTTPS host, invite the bot to a channel, and menti
 - The caller owns FastAPI, the queue, OAuth, and any injected `httpx.AsyncClient`.
 - While Harness is on 0.x releases, minor releases may change this API. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
-[Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/channels/)
 ## Telegram webhook
 
 Telegram lets a text-output agent answer allowed users in Telegram chats and topics through Bot API webhooks.
@@ -275,3 +274,4 @@ uv run uvicorn telegram_bot:app --host 0.0.0.0 --port 8000
 - The caller owns Starlette, the queue, and any injected `httpx.AsyncClient`. Store the BotFather token and webhook
   secret as application secrets.
 
+[Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/channels/)
