@@ -52,7 +52,8 @@ linear = Linear(auth='oauth')
 ```
 
 FastMCP owns the browser flow and token storage. Its default OAuth helper warns when it uses in-memory token storage.
-For persistent or per-user storage, inject a preconfigured FastMCP client as shown below.
+For persistent storage, inject a preconfigured FastMCP client. Use a separate or independently namespaced token store
+for each user and Linear workspace.
 
 ## Enable updates
 
@@ -115,7 +116,9 @@ You can also pass a prebuilt `pydantic_ai.mcp.MCPToolset`. Injected clients and 
 authentication, so `read_only` does not constrain them. Do not also pass `auth`; configure authentication on the
 injected connection. Set `read_only=False` for an injected read-write connection so the provider instructions include
 mutation guidance. `allowed_tools` still applies. Build one client or toolset per user and authentication context rather
-than sharing credentials between users.
+than sharing credentials between users, and isolate each persistent OAuth token store by user and workspace. A `Linear`
+instance or agent that holds bearer or OAuth auth represents one authentication context and should not be shared across
+tenants. URL clients that receive `auth` directly must use HTTPS.
 
 ## API reference
 

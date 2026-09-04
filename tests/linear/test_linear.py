@@ -71,6 +71,28 @@ class TestLinear:
         assert capability.allowed_tools == ['create_issue']
         assert capability.include_instructions is False
 
+    async def test_agent_from_spec_runs_linear(self, linear_server: FastMCP, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            'pydantic_ai_harness.linear._capability.LINEAR_READ_ONLY_MCP_URL',
+            linear_server,
+        )
+        agent = Agent.from_spec(
+            {
+                'capabilities': [
+                    {
+                        'Linear': {
+                            'allowed_tools': ['get_issue'],
+                        }
+                    }
+                ]
+            },
+            custom_capability_types=[Linear],
+            model=TestModel(),
+        )
+        result = await agent.run('Read an issue')
+        assert _tool_call_names(result.all_messages()) == {'get_issue'}
+        assert 'identifiers' in _request_instructions(result.all_messages())
+
     def test_default_uses_documented_read_only_endpoint(self):
         transport = _http_transport(Linear())
         assert transport.url == LINEAR_READ_ONLY_MCP_URL
@@ -103,6 +125,11 @@ class TestLinear:
         assert toolset.id == 'tenant-linear'
         assert isinstance(toolset.client.transport, StreamableHttpTransport)
         assert toolset.client.transport.auth is not None
+
+    @pytest.mark.parametrize('client', ['http://proxy.example/mcp', AnyUrl('http://proxy.example/mcp')])
+    def test_authenticated_http_url_is_rejected(self, client: str | AnyUrl):
+        with pytest.raises(UserError, match='must use HTTPS'):
+            Linear(client=client, auth='lin_api_secret').get_toolset()
 
     def test_no_auth_is_supported(self):
         transport = _http_transport(Linear(auth=None))
