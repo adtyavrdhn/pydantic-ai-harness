@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from .spend import SpendLimits
     from .stackone import StackOne
     from .step_persistence import StepPersistence
+    from .stripe import Stripe
     from .subagents import SubAgent, SubAgents
     from .system_reminders import SystemReminders
     from .tool_output_limits import ToolOutputLimits
@@ -101,6 +102,7 @@ __all__ = [
     'SlidingWindowCompaction',
     'SpendLimits',
     'StackOne',
+    'Stripe',
     'StepPersistence',
     'SubAgent',
     'SubAgents',
@@ -146,6 +148,7 @@ _CAPABILITY_EXPORTS = {
     'SlidingWindowCompaction': 'compaction',
     'SpendLimits': 'spend',
     'StackOne': 'stackone',
+    'Stripe': 'stripe',
     'StepPersistence': 'step_persistence',
     'SubAgents': 'subagents',
     'SummarizingCompaction': 'compaction',
