@@ -187,9 +187,10 @@ class NotionToolset(MCPToolset[AgentDepsT]):
 
     async def __aexit__(self, *args: Any) -> bool | None:
         """Track when the caller-owned MCP client session closes."""
-        result = await super().__aexit__(*args)
-        self._notion_running_count -= 1
-        return result
+        try:
+            return await super().__aexit__(*args)
+        finally:
+            self._notion_running_count -= 1
 
     async def get_instructions(self, ctx: RunContext[AgentDepsT]) -> InstructionPart | None:
         """Return policy instructions that survive toolset wrappers such as approval."""
@@ -274,7 +275,9 @@ class NotionToolset(MCPToolset[AgentDepsT]):
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
         """Return conservative read tools plus explicitly selected mutations."""
         attribution = await self._ensure_attribution()
-        selected = _READ_TOOL_NAMES | set(self.mutation_tools)
+        selected = set(_READ_TOOL_NAMES) | set(self.mutation_tools)
+        if not self._ai_search_available:
+            selected.discard('notion-ai-search')
         tools = await super().get_tools(ctx)
         return {
             name: replace(
@@ -300,9 +303,8 @@ class NotionToolset(MCPToolset[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
         tool: ToolsetTool[AgentDepsT],
     ) -> Any:
-        """Bind every selected mutation to the initially attributed workspace and user."""
-        if name in self.mutation_tools:
-            identity = await self._fetch_identity()
-            if (identity.workspace.id, identity.user.id) != self._identity_key:
-                raise UserError('Notion mutation refused because the connection identity changed after tool discovery.')
+        """Bind every tool call to the initially attributed workspace and user."""
+        identity = await self._fetch_identity()
+        if (identity.workspace.id, identity.user.id) != self._identity_key:
+            raise UserError('Notion connection identity changed after tool discovery; tool invocation refused.')
         return await super().call_tool(name, tool_args, ctx, tool)

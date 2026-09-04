@@ -235,4 +235,9 @@ def rotating_identity_server() -> FastMCP:
         """Return an update result that must not be reached."""
         return {'page_id': page_id, 'command': command, 'new_str': new_str}
 
+    @server.tool(name='notion-search')
+    def search(query: str) -> list[dict[str, str]]:
+        """Return a result that must not be reached after identity changes."""
+        return [{'id': 'page-1', 'title': query}]
+
     return server

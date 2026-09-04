@@ -74,8 +74,8 @@ async def test_page_search_update_flow_uses_fake_server_and_approval(
     assert notion_state['page_content'] == 'Shipped'
     assert notion_state['calls'][:3] == [
         ('notion-fetch', {'id': 'self'}),
+        ('notion-fetch', {'id': 'self'}),
         ('notion-ai-search', {'query': 'launch plan'}),
-        ('notion-fetch', {'id': 'page-1'}),
     ]
 
 

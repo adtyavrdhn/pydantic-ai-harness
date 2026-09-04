@@ -175,6 +175,7 @@ class TestNotion:
         assert result.output == 'Found the launch plan in Acme for Ada.'
         assert notion_state['calls'] == [
             ('notion-fetch', {'id': 'self'}),
+            ('notion-fetch', {'id': 'self'}),
             ('notion-ai-search', {'query': 'launch plan'}),
         ]
 
@@ -204,6 +205,7 @@ class TestNotion:
             nonlocal step
             assert info.instructions is not None
             assert 'ai_search_available=False' in info.instructions
+            assert 'notion-ai-search' not in {tool.name for tool in info.function_tools}
             if step == 0:
                 step += 1
                 return ModelResponse(parts=[ToolCallPart('notion-search', {'query': 'launch plan'}, 'search')])
@@ -317,9 +319,19 @@ class TestNotion:
             capabilities=[Notion(client=rotating_identity_server, mutations='notion-update-page')],
         )
         with pytest.raises(
-            UserError, match='mutation refused because the connection identity changed after tool discovery'
+            UserError, match='connection identity changed after tool discovery; tool invocation refused'
         ):
             await agent.run('Replace the launch plan')
+
+    async def test_read_rechecks_identity_immediately_before_execution(self, rotating_identity_server: FastMCP) -> None:
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ToolCallPart('notion-search', {'query': 'private page'}, 'search-1')])
+
+        agent = Agent(FunctionModel(model), capabilities=[Notion(client=rotating_identity_server)])
+        with pytest.raises(
+            UserError, match='connection identity changed after tool discovery; tool invocation refused'
+        ):
+            await agent.run('Find the private page')
 
     async def test_instructions_can_be_disabled(self, notion_server: FastMCP) -> None:
         seen: list[str] = []
