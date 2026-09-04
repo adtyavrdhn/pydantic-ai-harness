@@ -243,6 +243,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     'InputGuardrail': Anonymous('several guards is the design'),
     'OutputGuardrail': Anonymous('several guards is the design'),
     'PromptInjectionDefender': Anonymous('one per `tool_filter`; several scopes compose'),
+    'BackgroundTools': Anonymous('one per tool selector; several disjoint scopes compose'),
     'ToolGuardrail': Anonymous('several guards is the design'),
     'ManagedPrompt': Anonymous('one per prompt name'),
     'RepoContext': Anonymous('one per workspace root'),
