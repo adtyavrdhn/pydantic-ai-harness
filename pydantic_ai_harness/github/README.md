@@ -60,7 +60,7 @@ The repository also includes this as [`examples/github_pr_review.py`](../../exam
 - Read files, commits, branches, releases, issues, and pull requests.
 - Search code, commits, issues, and pull requests within the configured scope.
 - Review a pull request and cite relevant files.
-- With write access, create or update issues, branches, files, and pull requests.
+- With write access, create branches; create or update issues, files, and pull requests.
 
 ## Operational constraints
 
