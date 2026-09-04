@@ -6,7 +6,7 @@ import errno
 import math
 import os
 import shutil
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -24,7 +24,7 @@ from pydantic_ai.sandboxes import (
     Sandbox,
     SandboxCommand,
     SandboxError,
-    SandboxFilesystem,
+    SandboxFileEntry,
     SandboxRef,
     SandboxResult,
     SandboxTimeoutError,
@@ -446,24 +446,10 @@ class TestCodeModeInterop:
         assert 'async def stop_command' in run_code_description
 
 
-class _ControllableFilesystem:
-    def __init__(self, filesystem: SandboxFilesystem) -> None:
-        self.filesystem = filesystem
-        self.remove_error: RuntimeError | None = None
-
-    async def read_bytes(self, path: str) -> bytes:
-        return await self.filesystem.read_bytes(path)
-
-    async def remove(self, path: str) -> None:
-        if self.remove_error is not None:
-            raise self.remove_error
-        await self.filesystem.remove(path)
-
-
 class _RecordingLocalBackend:
     def __init__(self, backend: LocalSandbox) -> None:
         self.backend = backend
-        self.fs = _ControllableFilesystem(backend.fs)
+        self.remove_error: RuntimeError | None = None
         self.environments: list[Mapping[str, str] | None] = []
         self.timeouts: list[float | None] = []
         self.run_error: Exception | None = None
@@ -472,10 +458,36 @@ class _RecordingLocalBackend:
         self.kill_failure_stderr = 'kill failed'
         self.hold_on_term = False
         self.tail_failure = False
-        self.ref = backend.ref
+
+    @property
+    def ref(self) -> SandboxRef | None:
+        return self.backend.ref
 
     async def working_dir(self) -> str:
         return await self.backend.working_dir()
+
+    async def read_bytes(self, path: str) -> bytes:
+        return await self.backend.read_bytes(path)
+
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        await self.backend.write_bytes(path, data)
+
+    async def stat(self, path: str) -> SandboxFileEntry:
+        return await self.backend.stat(path)
+
+    async def list_dir(self, path: str) -> Sequence[SandboxFileEntry]:
+        return await self.backend.list_dir(path)
+
+    async def make_dir(self, path: str) -> None:
+        await self.backend.make_dir(path)
+
+    async def remove(self, path: str) -> None:
+        if self.remove_error is not None:
+            raise self.remove_error
+        await self.backend.remove(path)
+
+    async def exists(self, path: str) -> bool:
+        return await self.backend.exists(path)
 
     async def run(
         self,
@@ -738,7 +750,7 @@ class TestBackgroundCommands:
             toolset = background_toolset(tmp_path)
             ctx = run_context(sandbox)
             started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
-            backend.fs.remove_error = RuntimeError('cleanup failed')
+            backend.remove_error = RuntimeError('cleanup failed')
             # The protocol members the shell tools never consult still work through the facade.
             assert sandbox.ref == local.ref
             assert await sandbox.working_dir() == str(tmp_path)
@@ -749,7 +761,7 @@ class TestBackgroundCommands:
             assert await call_tool(toolset, ctx, 'check_command', command_id=started_id) == (
                 '(no output yet)\n[status: running]'
             )
-            backend.fs.remove_error = None
+            backend.remove_error = None
             await toolset.__aexit__(None, None, None)
 
             started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))

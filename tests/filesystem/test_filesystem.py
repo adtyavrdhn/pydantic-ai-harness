@@ -106,21 +106,32 @@ class _ErrorFilesystem:
     async def read_bytes(self, path: str) -> bytes:
         raise self.error
 
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        raise self.error
+
     async def stat(self, path: str) -> SandboxFileEntry:
+        raise self.error
+
+    async def list_dir(self, path: str) -> Sequence[SandboxFileEntry]:
         raise self.error
 
     async def make_dir(self, path: str) -> None:
         raise self.error
 
+    async def remove(self, path: str) -> None:
+        raise self.error
 
-class _ErrorBackend:
+    async def exists(self, path: str) -> bool:
+        raise self.error
+
+
+class _ErrorBackend(_ErrorFilesystem):
     """A backend whose filesystem and commands always raise the same error."""
 
     ref = SandboxRef(sandbox_id='error-1')
 
     def __init__(self, error: Exception) -> None:
-        self.error = error
-        self.fs = _ErrorFilesystem(error)
+        super().__init__(error)
 
     async def working_dir(self) -> str:
         return '/work'
@@ -137,12 +148,37 @@ class _ErrorBackend:
         raise self.error
 
 
-class _TimeoutBackend:
+class _LocalFilesystemBackend:
+    def __init__(self, backend: LocalSandbox) -> None:
+        self.backend = backend
+
+    async def read_bytes(self, path: str) -> bytes:
+        return await self.backend.read_bytes(path)
+
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        await self.backend.write_bytes(path, data)
+
+    async def stat(self, path: str) -> SandboxFileEntry:
+        return await self.backend.stat(path)
+
+    async def list_dir(self, path: str) -> Sequence[SandboxFileEntry]:
+        return await self.backend.list_dir(path)
+
+    async def make_dir(self, path: str) -> None:
+        await self.backend.make_dir(path)
+
+    async def remove(self, path: str) -> None:
+        await self.backend.remove(path)
+
+    async def exists(self, path: str) -> bool:
+        return await self.backend.exists(path)
+
+
+class _TimeoutBackend(_LocalFilesystemBackend):
     """A real local filesystem whose command execution times out."""
 
     def __init__(self, backend: LocalSandbox, error: SandboxTimeoutError) -> None:
-        self.backend = backend
-        self.fs = backend.fs
+        super().__init__(backend)
         self.error = error
         self.ref = backend.ref
 
@@ -161,14 +197,13 @@ class _TimeoutBackend:
         raise self.error
 
 
-class _ResultBackend:
+class _ResultBackend(_LocalFilesystemBackend):
     """A real local filesystem, with a canned result for every command."""
 
     ref = SandboxRef(sandbox_id='result-1')
 
     def __init__(self, backend: LocalSandbox, result: CommandResult) -> None:
-        self.backend = backend
-        self.fs = backend.fs
+        super().__init__(backend)
         self.result = result
 
     async def working_dir(self) -> str:
