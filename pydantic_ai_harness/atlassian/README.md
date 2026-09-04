@@ -50,16 +50,18 @@ print(result.output)
   `'jira_service_management'`.
 - Read selected Bitbucket repositories, branches, commits, pull requests, and pipelines when `products` includes
   `'bitbucket'` and the workspace is linked to an Atlassian organization.
-- Create or update selected Jira, Confluence, JSM, and Bitbucket records after you set `access='read_write'` and approve
-  each requested write.
+- Create or update selected Jira, Confluence, JSM, and Bitbucket records after you set `access='read_write'` on
+  `Atlassian` and approve each requested write.
 
 ## Operational constraints
 
 - The default is Jira-only and exposes reviewed read and search tools. Set `products=(...)` to add the other product
   families.
-- Writes require `access='read_write'` and approval. Jira permanent deletes also require `access='destructive'` and
-  approval. `require_approval=False` is for callers that supply another approval policy or intentionally allow
-  unattended changes.
+- `Atlassian` requires `access='read_write'` for writes and `access='destructive'` for Jira permanent deletes, then
+  requests approval for each mutation by default. `require_approval=False` is for callers that supply another approval
+  policy or intentionally allow unattended changes.
+- Direct `AtlassianToolset` use controls tool exposure and site scope but does not request approval. Wrap it with
+  `.approval_required()` when mutations need approval.
 - Every product call must use the configured `cloud_id`; Harness checks it before the request reaches Atlassian.
 - OAuth consent is site-scoped. API-token credentials are not site-scoped by Atlassian, so the `cloud_id` check remains
   important. Use `authorization_token=` only for an Atlassian service-account API key sent as a Bearer token. Personal
