@@ -15,16 +15,23 @@ from pydantic_ai_harness.e2b_sandbox._backend import (
     E2BSandboxBackend,
 )
 
-_RUN_ID_METADATA_KEY = 'pydantic-ai-run-id'
+_CONVERSATION_METADATA_KEY = 'pydantic-ai-conversation-id'
 
 
 @dataclass(kw_only=True)
 class E2BSandbox(AbstractCapability[AgentDepsT]):
     """Supply an isolated [E2B](https://e2b.dev) sandbox through `ctx.sandbox`.
 
-    Owned acquisition records the logical run ID as E2B metadata and reconnects
-    to an existing match before creating. Set `sandbox_id` to attach to an
-    environment managed elsewhere without taking ownership of its lifetime.
+    One sandbox is created or reused per conversation, marked with the conversation id in E2B
+    metadata, so a follow-up run continues in the workspace the previous one left behind. Reusing
+    an existing match also makes creation safe to retry across durable workers: a retry attaches
+    to the sandbox the first attempt made rather than provisioning a second one.
+
+    Nothing here kills a sandbox. A conversation can span many runs, so the end of a run is not
+    the end of the workspace; E2B reaps an idle sandbox at `sandbox_timeout`. Raise that for
+    longer work, or kill one yourself through `result.sandbox`.
+
+    Set `sandbox_id` to attach to an environment managed elsewhere instead.
 
     This capability supplies execution only. Compose it with tools or
     capabilities that consume
@@ -60,8 +67,11 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
             self.env = dict(self.env)
         if self.metadata is not None:
             self.metadata = dict(self.metadata)
-            if _RUN_ID_METADATA_KEY in self.metadata:
-                raise ValueError(f'metadata key {_RUN_ID_METADATA_KEY!r} is reserved for retry-safe acquisition.')
+            if _CONVERSATION_METADATA_KEY in self.metadata:
+                raise ValueError(
+                    f'metadata key {_CONVERSATION_METADATA_KEY!r} is reserved: it is how a follow-up '
+                    "run finds the conversation's sandbox again."
+                )
         if self.sandbox_id is None:
             return
         conflicts = [
@@ -81,31 +91,20 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
                 'attaches to an existing one.'
             )
 
-    async def acquire_sandbox(self, ctx: RunContext[AgentDepsT]) -> SandboxRef:
-        """Create or reuse the sandbox for this logical run."""
+    def get_sandbox(self, ctx: RunContext[AgentDepsT], *, ref: SandboxRef | None) -> SandboxBackend:
+        """Build the backend for this run. No I/O here: it attaches or creates on first use."""
+        if ref is not None:
+            # An environment the run was pointed at explicitly, or one an earlier run left behind.
+            return E2BSandboxBackend(ref=ref, working_dir=self.workdir)
         if self.sandbox_id is not None:
-            return SandboxRef(sandbox_id=self.sandbox_id)
-        if ctx.run_id is None:  # pragma: no cover - core assigns it before acquisition
-            raise RuntimeError('E2B sandbox acquisition requires a run ID.')
-        metadata = dict(self.metadata or ())
-        metadata[_RUN_ID_METADATA_KEY] = ctx.run_id
-        backend = await E2BSandboxBackend.create_or_connect(
-            identity={_RUN_ID_METADATA_KEY: ctx.run_id},
+            return E2BSandboxBackend(ref=SandboxRef(sandbox_id=self.sandbox_id), working_dir=self.workdir)
+        identity = {_CONVERSATION_METADATA_KEY: ctx.conversation_id or ctx.run_id or ''}
+        return E2BSandboxBackend(
+            identity=identity,
             template=self.template,
             sandbox_timeout=self.sandbox_timeout,
             working_dir=self.workdir,
             env=self.env,
-            metadata=metadata,
+            metadata={**(self.metadata or {}), **identity},
             allow_internet_access=self.allow_internet_access,
         )
-        return SandboxRef(sandbox_id=backend.sandbox_id)
-
-    async def get_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> SandboxBackend | None:
-        """Reconnect to a referenced E2B sandbox without provisioning one."""
-        return await E2BSandboxBackend.connect(ref.sandbox_id, working_dir=self.workdir)
-
-    async def release_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> None:
-        """Kill an owned sandbox; leave an attached sandbox to its owner."""
-        if self.sandbox_id is not None:
-            return
-        await E2BSandboxBackend.kill_by_id(ref.sandbox_id)

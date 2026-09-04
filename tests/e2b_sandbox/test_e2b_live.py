@@ -60,8 +60,9 @@ def _unique(prefix: str) -> str:
 
 @asynccontextmanager
 async def _owned(**settings: object) -> AsyncGenerator[E2BSandboxBackend]:
-    """Create a sandbox and kill it on the way out, as the capability's hooks do."""
-    backend = await E2BSandboxBackend.create(**settings)  # type: ignore[arg-type]
+    """Create a sandbox and kill it on the way out, so a live run leaves nothing behind."""
+    backend = E2BSandboxBackend(**settings)  # type: ignore[arg-type]
+    await backend.sandbox
     try:
         yield backend
     finally:
@@ -309,10 +310,11 @@ class TestRealLifecycle:
     async def test_kill_actually_destroys_the_sandbox(self) -> None:
         """Validates the fake-encoded assumption that closing an owned sandbox destroys the real one."""
         async with _owned(sandbox_timeout=120) as owner:
-            sandbox_id = owner.sandbox_id
+            ref = owner.ref
+        assert ref is not None
 
         with pytest.raises(E2BSandboxUnavailableError):
-            await E2BSandboxBackend.connect(sandbox_id)
+            await E2BSandboxBackend(ref=ref).sandbox
 
     async def test_connect_reuses_state_and_leaves_the_sandbox_running(self) -> None:
         """Validates the fake-encoded assumption that connecting reuses state and does not take ownership."""
@@ -320,8 +322,8 @@ class TestRealLifecycle:
         async with _owned(sandbox_timeout=120) as owner:
             await owner.fs.write_bytes(marker, b'shared')
 
-            attached = await E2BSandboxBackend.connect(owner.sandbox_id)
-            assert attached.sandbox_id == owner.sandbox_id
+            attached = E2BSandboxBackend(ref=owner.ref)
+            assert (await attached.sandbox).sandbox_id == (await owner.sandbox).sandbox_id
             assert await attached.fs.read_bytes(marker) == b'shared'
             await attached.close(terminate=False)
 
@@ -336,7 +338,7 @@ class TestRealLifecycle:
         marker = f'/tmp/{_unique("paused")}.txt'
         async with _owned(sandbox_timeout=120) as owner:
             await owner.fs.write_bytes(marker, b'before-pause')
-            await owner.sandbox.beta_pause()
+            await (await owner.sandbox).beta_pause()
 
-            attached = await E2BSandboxBackend.connect(owner.sandbox_id)
+            attached = E2BSandboxBackend(ref=owner.ref)
             assert await attached.fs.read_bytes(marker) == b'before-pause'
