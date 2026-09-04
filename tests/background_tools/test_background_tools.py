@@ -393,6 +393,19 @@ class TestBackgroundTools:
         assert _ack_seen(result.all_messages())
         assert _follow_up_seen(result.all_messages(), 'completed.\nResult: sync result')
 
+    async def test_sync_background_tool_can_enqueue_from_worker_thread(self) -> None:
+        agent = Agent(_model_calling('sync_bg'), capabilities=[BackgroundTools()])
+
+        @agent.tool(metadata={'background': True})
+        def sync_bg(ctx: RunContext[object]) -> str:  # pyright: ignore[reportUnusedFunction]
+            ctx.enqueue('message from sync background tool')
+            return 'sync result'
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert _follow_up_seen(result.all_messages(), 'message from sync background tool')
+
     async def test_background_tool_uses_context_cancel_to_stop_the_run(self) -> None:
         first_started = asyncio.Event()
         second_started = asyncio.Event()
