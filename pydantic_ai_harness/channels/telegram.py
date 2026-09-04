@@ -59,10 +59,11 @@ class TelegramWebhookError(TelegramError):
 class TelegramPartialDeliveryError(TelegramError):
     """A multi-message reply fails after at least one chunk is confirmed."""
 
-    def __init__(self, message: str, *, sent_chunks: int) -> None:
-        """Record how many chunks Telegram confirmed before the failure."""
+    def __init__(self, message: str, *, sent_chunks: int, retry_after: int | None = None) -> None:
+        """Record confirmed chunks and any Telegram-provided retry delay."""
         super().__init__(message)
         self.sent_chunks = sent_chunks
+        self.retry_after = retry_after
 
 
 class TelegramRateLimitError(TelegramError):
@@ -233,10 +234,10 @@ class TelegramChannel:
     async def reply(self, event: ChannelEvent, text: str) -> None:
         """Reply in Telegram, splitting text at the provider limit.
 
-        A flood-control response is retried once after Telegram's `retry_after` delay. Transport
-        failures and other provider errors are surfaced without retry because delivery may already
+        A flood-control delay of at most 60 seconds is retried once. Larger and repeated delays are
+        surfaced without retry. Transport failures are also surfaced because delivery may already
         have happened. If a later chunk fails, `TelegramPartialDeliveryError.sent_chunks` reports
-        how many preceding chunks Telegram confirmed.
+        how many preceding chunks Telegram confirmed and `retry_after` preserves a rate-limit delay.
         """
         if not text:
             raise ValueError('text must not be empty')
@@ -266,6 +267,7 @@ class TelegramChannel:
                 raise TelegramPartialDeliveryError(
                     f'Telegram reply failed after {index} of {len(chunks)} chunks were confirmed: {exc}',
                     sent_chunks=index,
+                    retry_after=exc.retry_after if isinstance(exc, TelegramRateLimitError) else None,
                 ) from None
 
     async def _send_with_one_flood_retry(self, payload: Mapping[str, object]) -> None:

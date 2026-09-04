@@ -588,6 +588,38 @@ class TestTelegramChannel:
             await channel.reply(event, 'a' * 4097)
 
         assert exc_info.value.sent_chunks == 1
+        assert exc_info.value.retry_after is None
+        assert calls == 2
+        await client.aclose()
+
+    async def test_preserves_rate_limit_after_partial_delivery(self) -> None:
+        calls = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                return _response(
+                    {
+                        'ok': False,
+                        'error_code': 429,
+                        'description': 'Too Many Requests',
+                        'parameters': {'retry_after': 2_282},
+                    },
+                    status_code=429,
+                )
+            return _response({'ok': True, 'result': {'message_id': calls}})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        channel = _channel(client)
+        event = channel.parse_request(_update(), _headers())
+        assert event is not None
+
+        with pytest.raises(TelegramPartialDeliveryError, match='1 of 2') as exc_info:
+            await channel.reply(event, 'a' * 4097)
+
+        assert exc_info.value.sent_chunks == 1
+        assert exc_info.value.retry_after == 2_282
         assert calls == 2
         await client.aclose()
 
