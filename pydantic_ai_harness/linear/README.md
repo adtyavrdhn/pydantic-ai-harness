@@ -1,116 +1,62 @@
 # Linear
 
-Use `Linear` when an agent needs to read or update issues, projects, and teams through Linear's hosted MCP server. The
-default connection uses Linear's server-enforced read-only endpoint.
-
-[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/linear/)
+`Linear` lets an agent read or update issues, projects, comments, and teams through Linear's hosted MCP server.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
-## Installation
-
-Install Harness with Linear MCP support and the model provider you use:
+## Install
 
 ```bash
 uv add "pydantic-ai-harness[linear]" "pydantic-ai-slim[openai]"
 ```
 
-## Read Linear data
+## Set up credentials
 
-Linear accepts OAuth, OAuth access tokens, and Linear API keys. This example uses a caller-owned bearer token:
+For bearer authentication, create a Linear API key under **Settings > Security & access > Personal API keys**, then
+set the Linear and OpenAI credentials:
+
+```bash
+export LINEAR_ACCESS_TOKEN="your-linear-api-key"
+export OPENAI_API_KEY="your-openai-api-key"
+```
+
+Give the Linear key the `Read` permission for the default read-only connection. To use interactive OAuth instead, pass
+`auth='oauth'` and omit `LINEAR_ACCESS_TOKEN`. FastMCP handles OAuth and opens a browser for Linear authorization on the
+first run. Its default OAuth token storage is in memory, so applications that need persistence should inject a
+preconfigured FastMCP client with a persistent token store.
+
+## Run an agent
 
 ```python
 import os
 
 from pydantic_ai import Agent
-from pydantic_ai_harness import Linear
+from pydantic_ai_harness.linear import Linear
 
 agent = Agent(
     'openai:gpt-5.6-sol',
     capabilities=[Linear(auth=os.environ['LINEAR_ACCESS_TOKEN'])],
 )
-result = agent.run_sync('Summarize ENG-123 and its latest comments')
+result = agent.run_sync('Summarize my assigned issues that were updated this week')
 print(result.output)
 ```
 
-`read_only=True` selects `https://mcp.linear.app/mcp/readonly`. This is an endpoint-level boundary, not only a prompt
-instruction or local tool filter. Create a Linear API key with only the `Read` permission for an additional credential
-boundary.
+## What to ask
 
-For interactive OAuth, pass `auth='oauth'`:
+- Summarize an issue and its latest comments.
+- List issues assigned to you or updated in a date range.
+- Find projects, teams, or related issues.
+- Create or update issues when read-write access is enabled.
 
-```python
-from pydantic_ai_harness import Linear
+## Operational constraints
 
-linear = Linear(auth='oauth')
-```
+- `read_only=True` is the default and selects Linear's server-enforced read-only endpoint. Set `read_only=False` and use
+  a credential with write access to enable updates.
+- `allowed_tools` narrows the exposed tools by exact name. It does not replace endpoint or credential permissions.
+- Mutation tools do not require human approval automatically. Use `linear.get_toolset().approval_required()` when a
+  person must approve calls.
+- An injected FastMCP client or `MCPToolset` owns its endpoint and authentication. Do not also pass `auth`, and do not
+  share authenticated clients between users or workspaces.
+- URL clients that receive `auth` directly must use HTTPS.
 
-FastMCP owns the browser flow and token storage. Its default OAuth helper warns when it uses in-memory token storage.
-For persistent storage, inject a preconfigured FastMCP client. Use a separate or independently namespaced token store
-for each user and Linear workspace.
-
-## Enable updates
-
-Select Linear's read-write endpoint explicitly:
-
-```python
-import os
-
-from pydantic_ai_harness import Linear
-
-linear = Linear(
-    read_only=False,
-    auth=os.environ['LINEAR_ACCESS_TOKEN'],
-    allowed_tools=['create_issue', 'update_issue'],
-)
-```
-
-`allowed_tools` matches complete MCP tool names exactly. `None` exposes every tool returned by the selected endpoint;
-an empty sequence exposes none. It is useful for narrowing the model's tool surface, while the endpoint and token
-permissions remain the access boundary.
-
-Mutation tools do not require approval automatically. Wrap the toolset with Pydantic AI's
-[tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval) when a person must confirm
-calls:
-
-```python
-import os
-
-from pydantic_ai import Agent
-from pydantic_ai_harness import Linear
-
-linear = Linear(
-    read_only=False,
-    auth=os.environ['LINEAR_ACCESS_TOKEN'],
-    allowed_tools=['create_issue'],
-)
-agent = Agent(
-    'openai:gpt-5.6-sol',
-    instructions=linear.get_instructions(),
-    toolsets=[linear.get_toolset().approval_required()],
-)
-```
-
-Handle the deferred approval requests as described in the linked guide.
-
-## Inject a client or toolset
-
-Pass a prebuilt FastMCP client when the host owns HTTP settings or per-user credentials:
-
-```python
-import os
-
-from fastmcp import Client
-from pydantic_ai_harness import LINEAR_READ_ONLY_MCP_URL, Linear
-
-client = Client(LINEAR_READ_ONLY_MCP_URL, auth=os.environ['LINEAR_ACCESS_TOKEN'])
-linear = Linear(client=client)
-```
-
-You can also pass a prebuilt `pydantic_ai.mcp.MCPToolset`. Injected clients and toolsets keep their own endpoint and
-authentication, so `read_only` does not constrain them. Do not also pass `auth`; configure authentication on the
-injected connection. Set `read_only=False` for an injected read-write connection so the provider instructions include
-mutation guidance. `allowed_tools` still applies. Build one client or toolset per user and authentication context rather
-than sharing credentials between users, and isolate each persistent OAuth token store by user and workspace. A `Linear`
-instance or agent that holds bearer or OAuth auth represents one authentication context and should not be shared across
-tenants. URL clients that receive `auth` directly must use HTTPS.
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/linear/)

@@ -36,7 +36,6 @@ if TYPE_CHECKING:
         OutputGuardrailFunc,
         ToolGuardrail,
     )
-    from .linear import LINEAR_MCP_URL, LINEAR_READ_ONLY_MCP_URL, Linear
     from .localstack import LocalStack
     from .logfire import ManagedPrompt
     from .macroscope import Macroscope
@@ -82,9 +81,6 @@ __all__ = [
     'InputGuardrail',
     'InputGuardrailFunc',
     'LLM_API_KEY_ENV_PATTERNS',
-    'LINEAR_MCP_URL',
-    'LINEAR_READ_ONLY_MCP_URL',
-    'Linear',
     'LocalStack',
     'Macroscope',
     'ManagedPrompt',
@@ -135,7 +131,6 @@ _CAPABILITY_EXPORTS = {
     'FallbackCompaction': 'compaction',
     'FileSystem': 'filesystem',
     'LocalStack': 'localstack',
-    'Linear': 'linear',
     'Macroscope': 'macroscope',
     'ManagedPrompt': 'logfire',
     'Memory': 'memory',
@@ -168,8 +163,6 @@ _CONSTANT_EXPORTS = {
     'DEFAULT_ALLOWED_COMMANDS': 'coder',
     'DEFAULT_RESEARCHER_INSTRUCTIONS': 'researcher',
     'LLM_API_KEY_ENV_PATTERNS': 'shell',
-    'LINEAR_MCP_URL': 'linear',
-    'LINEAR_READ_ONLY_MCP_URL': 'linear',
     'READ_ONLY_TOOL_NAMES': 'filesystem',
     'SubAgent': 'subagents',
 }

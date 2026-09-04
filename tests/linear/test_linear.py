@@ -9,11 +9,19 @@ import pytest
 from fastmcp import Client
 from fastmcp.client.transports import FastMCPTransport, StreamableHttpTransport
 from pydantic import AnyUrl
-from pydantic_ai import Agent
+from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, RetryPromptPart, TextPart, ToolCallPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    RetryPromptPart,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+)
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FilteredToolset
@@ -231,6 +239,36 @@ class TestLinear:
             TestModel(), capabilities=[Linear(client=linear_server, read_only=False, allowed_tools=['create_issue'])]
         ).run('Create an issue')
         assert 'Before changing Linear data' in _request_instructions(result.all_messages())
+
+    async def test_approval_wrapper_defers_and_resumes_mutation(self, linear_server: FastMCP):
+        responses = iter(
+            [
+                ModelResponse(
+                    parts=[ToolCallPart('create_issue', {'title': 'Fix CI'}, tool_call_id='create-approval')]
+                ),
+                ModelResponse(parts=[TextPart('created')]),
+            ]
+        )
+        agent = Agent(
+            FunctionModel(lambda _messages, _info: next(responses)),
+            toolsets=[Linear(client=linear_server, read_only=False).get_toolset().approval_required()],
+            output_type=[str, DeferredToolRequests],
+        )
+
+        deferred = await agent.run('Create an issue')
+        assert isinstance(deferred.output, DeferredToolRequests)
+        assert [approval.tool_name for approval in deferred.output.approvals] == ['create_issue']
+
+        resumed = await agent.run(
+            message_history=deferred.all_messages(),
+            deferred_tool_results=DeferredToolResults(approvals={'create-approval': True}),
+        )
+        assert resumed.output == 'created'
+        assert any(
+            isinstance(part, ToolReturnPart) and part.tool_name == 'create_issue'
+            for message in resumed.all_messages()
+            for part in message.parts
+        )
 
     async def test_instructions_can_be_disabled(self, linear_server: FastMCP):
         result = await Agent(
