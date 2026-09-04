@@ -164,6 +164,25 @@ def _object_dict(value: object) -> dict[str, object]:
     return _OBJECT_DICT.validate_python(value)
 
 
+def _resolve_schema(root: dict[str, object], schema: object, seen: frozenset[str] = frozenset()) -> object:
+    field = _object_dict(schema)
+    reference = field.get('$ref')
+    if not isinstance(reference, str) or not reference.startswith('#/') or reference in seen:
+        return schema
+    target: object = root
+    for raw_part in reference[2:].split('/'):
+        part = raw_part.replace('~1', '/').replace('~0', '~')
+        target_dict = _object_dict(target)
+        if part not in target_dict:
+            return schema
+        target = target_dict[part]
+    resolved_target = _resolve_schema(root, target, seen | {reference})
+    if not isinstance(resolved_target, dict):
+        return schema
+    resolved = _OBJECT_DICT.validate_python(resolved_target)
+    return {**resolved, **{key: value for key, value in field.items() if key != '$ref'}}
+
+
 def _annotations(tool: ToolsetTool[AgentDepsT]) -> dict[str, object]:
     metadata = tool.tool_def.metadata or {}
     value: object = metadata.get('annotations')
@@ -190,7 +209,9 @@ def _is_read_only(
 
 
 def _properties(tool: ToolsetTool[AgentDepsT]) -> dict[str, object]:
-    value: object = tool.tool_def.parameters_json_schema.get('properties')
+    root = tool.tool_def.parameters_json_schema
+    resolved_root = _object_dict(_resolve_schema(root, root))
+    value: object = resolved_root.get('properties')
     return _object_dict(value)
 
 
@@ -223,6 +244,10 @@ def _fraction(value: object) -> Fraction | None:
 def _union_constraints(variants: list[object]) -> _PageConstraints | None:
     numeric_variants: list[_PageConstraints] = []
     for variant in variants:
+        if variant is False:
+            continue
+        if variant is True:
+            return None
         variant_schema = _object_dict(variant)
         if variant_schema.get('type') == 'null':
             continue
@@ -285,8 +310,23 @@ def _discrete_constraints(field: dict[str, object]) -> _PageConstraints | None:
 
 def _page_constraints(schema: object) -> _PageConstraints | None:
     field = _object_dict(schema)
-    if field.get('type', 'integer') not in ('integer', 'number') or any(
-        keyword in field for keyword in ('not', 'if', 'then', 'else')
+    if not field:
+        return None
+    field_type = field.get('type', 'integer')
+    if isinstance(field_type, list):
+        raw_types = _OBJECT_LIST.validate_python(field_type)
+        if not all(isinstance(item, str) for item in raw_types):
+            return None
+        types = [item for item in raw_types if isinstance(item, str)]
+        field_type = (
+            next((item for item in types if item != 'null'), None)
+            if set(types) <= {'integer', 'number', 'null'}
+            else None
+        )
+    if (
+        '$ref' in field
+        or field_type not in ('integer', 'number')
+        or any(keyword in field for keyword in ('not', 'if', 'then', 'else'))
     ):
         return None
     range_constraints = _range_constraints(field)
@@ -319,13 +359,14 @@ def _page_limit(schema: object, configured: int) -> int | None:
 
 def _pagination_fields(tool: ToolsetTool[AgentDepsT]) -> list[tuple[tuple[str, ...], object]]:
     properties = _properties(tool)
+    root = tool.tool_def.parameters_json_schema
     fields: list[tuple[tuple[str, ...], object]] = [
-        ((key,), properties[key]) for key in _PAGE_KEYS if key in properties
+        ((key,), _resolve_schema(root, properties[key])) for key in _PAGE_KEYS if key in properties
     ]
     for container_key in _PAGE_CONTAINER_KEYS:
-        container = _object_dict(properties.get(container_key))
+        container = _object_dict(_resolve_schema(root, properties.get(container_key)))
         nested = _object_dict(container.get('properties'))
-        fields.extend(((container_key, key), nested[key]) for key in _PAGE_KEYS if key in nested)
+        fields.extend(((container_key, key), _resolve_schema(root, nested[key])) for key in _PAGE_KEYS if key in nested)
     return fields
 
 
@@ -531,35 +572,60 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
         return _supports_result_limit(tool, self.max_results)
 
     def _bounded_schema(self, tool: ToolsetTool[AgentDepsT]) -> ObjectJsonSchema:
-        schema = dict(tool.tool_def.parameters_json_schema)
+        root = tool.tool_def.parameters_json_schema
+        schema = {**root, **_object_dict(_resolve_schema(root, root))}
+        schema.pop('$ref', None)
         properties = _properties(tool)
         bounded_properties: ObjectJsonSchema = dict(properties)
         for key in _PAGE_KEYS:
-            bounded = _bounded_page_schema(properties.get(key), self.max_results)
+            bounded = _bounded_page_schema(_resolve_schema(root, properties.get(key)), self.max_results)
             if bounded is not None:
                 bounded_properties[key] = bounded
         for container_key in _PAGE_CONTAINER_KEYS:
-            container = _object_dict(properties.get(container_key))
+            container = _object_dict(_resolve_schema(root, properties.get(container_key)))
             nested = _object_dict(container.get('properties'))
             if not nested:
                 continue
             bounded_nested = dict(nested)
             for key in _PAGE_KEYS:
-                bounded = _bounded_page_schema(nested.get(key), self.max_results)
+                bounded = _bounded_page_schema(_resolve_schema(root, nested.get(key)), self.max_results)
                 if bounded is not None:
                     bounded_nested[key] = bounded
             container['properties'] = bounded_nested
             bounded_properties[container_key] = container
         schema['properties'] = bounded_properties
         required = schema.get('required')
-        if isinstance(required, list):
-            required_keys = _STRING_LIST.validate_python(required)
-            injected: set[str] = set()
-            if self.account_id is not None:
-                injected.update(_scope_keys(tool, _ACCOUNT_KEYS))
-            if self.zone_id is not None:
-                injected.update(_scope_keys(tool, _ZONE_KEYS))
-            schema['required'] = [key for key in required_keys if key not in injected]
+        required_keys = _STRING_LIST.validate_python(required) if isinstance(required, list) else []
+        scoped_keys: set[str] = set()
+        required_scope_keys: list[str] = []
+        read_only = _is_read_only(
+            self.server,
+            tool,
+            official_client=self._official_client,
+            trust_server_annotations=self._trust_server_annotations,
+        )
+        boundaries = (
+            (_ACCOUNT_KEYS, self.account_id),
+            (_ZONE_KEYS, self.zone_id),
+        )
+        for candidates, configured in boundaries:
+            if configured is None:
+                continue
+            declared = _scope_keys(tool, candidates)
+            scoped_keys.update(declared)
+            if not read_only:
+                selected = declared[0]
+                required_scope_keys.append(selected)
+                for key in declared[1:]:
+                    bounded_properties.pop(key, None)
+                field = _object_dict(bounded_properties[selected])
+                field['const'] = configured
+                field['default'] = configured
+                bounded_properties[selected] = field
+        schema['properties'] = bounded_properties
+        schema['required'] = list(
+            dict.fromkeys([*(key for key in required_keys if key not in scoped_keys), *required_scope_keys])
+        )
         return schema
 
     def _pin_scope(
@@ -571,10 +637,11 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
         boundary: str,
     ) -> None:
         declared = _scope_keys(tool, candidates)
+        selected = next((key for key in declared if key in args), declared[0] if declared else None)
         for key in candidates:
             if key in args and args[key] != configured:
                 raise ModelRetry(f'The requested operation is outside the configured Cloudflare {boundary} boundary.')
-            if key in declared:
+            if key == selected:
                 args[key] = configured
             else:
                 args.pop(key, None)
@@ -598,6 +665,7 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
     def _scoped_args(self, tool_args: dict[str, Any], tool: ToolsetTool[AgentDepsT]) -> dict[str, Any]:
         args = dict(tool_args)
         properties = _properties(tool)
+        root = tool.tool_def.parameters_json_schema
         if self.account_id is not None:
             self._pin_scope(args, tool, _ACCOUNT_KEYS, self.account_id, 'account')
         if self.zone_id is not None and not _is_api_safe_tool(self.server, tool, official_client=self._official_client):
@@ -607,11 +675,13 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
         for key in _PAGE_KEYS:
             if key not in properties:
                 continue
-            self._bound_page_arg(args, key, properties[key])
+            self._bound_page_arg(args, key, _resolve_schema(root, properties[key]))
         for container_key in _PAGE_CONTAINER_KEYS:
-            container = _object_dict(properties.get(container_key))
+            container = _object_dict(_resolve_schema(root, properties.get(container_key)))
             nested_properties = _object_dict(container.get('properties'))
             if not any(key in nested_properties for key in _PAGE_KEYS):
+                continue
+            if container_key not in args or args[container_key] is None:
                 continue
             raw_nested_args = args.get(container_key)
             if raw_nested_args is not None and not isinstance(raw_nested_args, dict):
@@ -620,7 +690,10 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
             for key in _PAGE_KEYS:
                 if key in nested_properties:
                     self._bound_page_arg(
-                        nested_args, key, nested_properties[key], display_name=f'{container_key}.{key}'
+                        nested_args,
+                        key,
+                        _resolve_schema(root, nested_properties[key]),
+                        display_name=f'{container_key}.{key}',
                     )
             args[container_key] = nested_args
         return args
@@ -643,16 +716,26 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
             official_client=self._official_client,
             trust_server_annotations=self._trust_server_annotations,
         )
-        if not read_only and not ctx.tool_call_approved:
-            raise ApprovalRequired
         local_error: str | None = None
         scoped_args = tool_args
         try:
             scoped_args = self._scoped_args(tool_args, authoritative_tool)
         except ModelRetry as error:
-            local_error = _bounded_text(error.message, max_bytes=self.max_output_bytes, max_lines=self.max_output_lines)
+            local_error = _bounded_error_text(
+                error.message, max_bytes=self.max_output_bytes, max_lines=self.max_output_lines
+            )
         if local_error is not None:
             raise ModelRetry(local_error) from None
+        if not read_only and not ctx.tool_call_approved:
+            if scoped_args != tool_args:
+                message = _bounded_error_text(
+                    'Repeat the mutation with the configured Cloudflare scope and result limits shown in the tool schema '
+                    'so the approval request contains the exact provider arguments.',
+                    max_bytes=self.max_output_bytes,
+                    max_lines=self.max_output_lines,
+                )
+                raise ModelRetry(message)
+            raise ApprovalRequired
         provider_error: str | None = None
         result: object | None = None
         try:

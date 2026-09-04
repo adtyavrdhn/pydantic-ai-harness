@@ -25,6 +25,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_core import to_json
 
 from pydantic_ai_harness.cloudflare import Cloudflare, CloudflareServer, CloudflareToolset
 
@@ -190,7 +191,7 @@ class TestCloudflareToolset:
                 await toolset.call_tool(
                     'list_records', {'account_id': 'a1', 'zoneId': 'other'}, run_context, tools['list_records']
                 )
-            assert len(str(exc_info.value).encode()) <= 64
+            assert len(to_json({'error': str(exc_info.value)})) <= 64
         assert details == 'zone:a1:z1'
         assert str(result).startswith('a1:z1:0')
 
@@ -244,7 +245,7 @@ class TestCloudflareToolset:
         tools = await toolset.get_tools(run_context)
         assert tools['camel_scope'].tool_def.parameters_json_schema['required'] == []
         assert await toolset.call_tool('camel_scope', {}, run_context, tools['camel_scope']) == 'scoped'
-        assert captured_args == {'account_id': 'a1', 'accountId': 'a1', 'zoneId': 'z1', 'zone': 'z1'}
+        assert captured_args == {'account_id': 'a1', 'zoneId': 'z1'}
         with pytest.raises(ModelRetry, match='outside the configured Cloudflare account'):
             await toolset.call_tool('camel_scope', {'accountId': 'other'}, run_context, tools['camel_scope'])
         with pytest.raises(ModelRetry, match='outside the configured Cloudflare account'):
@@ -276,9 +277,19 @@ class TestCloudflareToolset:
         )
         async with toolset:
             tools = await toolset.get_tools(run_context)
-            with pytest.raises(ApprovalRequired):
+            schema = tools['delete_record'].tool_def.parameters_json_schema
+            assert schema['properties']['zoneId']['const'] == 'z1'
+            assert {'account_id', 'zoneId'} <= set(schema['required'])
+            with pytest.raises(ModelRetry, match='Repeat the mutation'):
                 await toolset.call_tool(
                     'delete_record', {'account_id': 'a1', 'record_id': 'r1'}, run_context, tools['delete_record']
+                )
+            with pytest.raises(ApprovalRequired):
+                await toolset.call_tool(
+                    'delete_record',
+                    {'account_id': 'a1', 'zoneId': 'z1', 'record_id': 'r1'},
+                    run_context,
+                    tools['delete_record'],
                 )
 
     async def test_pagination_schema_and_calls_are_bounded(
@@ -349,13 +360,25 @@ class TestCloudflareToolset:
         await toolset.call_tool('nested_limits', {}, run_context, tools['nested_limits'])
         assert calls == [
             {
-                'query': {'limit': 7},
-                'keysQuery': {'limit': 7},
-                'valuesQuery': {'limit': 7},
                 'k': 7,
                 'limitPerGroup': 7,
             }
         ]
+        await toolset.call_tool(
+            'nested_limits',
+            {'query': {}, 'keysQuery': {}, 'valuesQuery': {}},
+            run_context,
+            tools['nested_limits'],
+        )
+        assert calls[-1] == {
+            'query': {'limit': 7},
+            'keysQuery': {'limit': 7},
+            'valuesQuery': {'limit': 7},
+            'k': 7,
+            'limitPerGroup': 7,
+        }
+        await toolset.call_tool('nested_limits', {'query': None}, run_context, tools['nested_limits'])
+        assert calls[-1]['query'] is None
         with pytest.raises(ModelRetry, match='`query.limit` cannot exceed'):
             await toolset.call_tool('nested_limits', {'query': {'limit': 8}}, run_context, tools['nested_limits'])
         with pytest.raises(ModelRetry, match='`query` must be an object'):
@@ -503,6 +526,137 @@ class TestCloudflareToolset:
         limit_schema = tools['simple_limited'].tool_def.parameters_json_schema['properties']['limit']
         assert limit_schema['maximum'] == 3
         assert limit_schema['default'] == 3
+
+    async def test_nullable_boolean_and_referenced_pagination_schemas(
+        self,
+        alternate_schema_server: FastMCP,
+        run_context: RunContext[None],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = CloudflareToolset[None](client=alternate_schema_server, trust_server_annotations=True)
+        async with source:
+            base = (await source.get_tools(run_context))['simple_limited']
+
+        def with_schema(name: str, schema: dict[str, object]) -> ToolsetTool[None]:
+            return replace(base, tool_def=replace(base.tool_def, name=name, parameters_json_schema=schema))
+
+        nullable = with_schema(
+            'nullable',
+            {'type': 'object', 'properties': {'limit': {'type': ['integer', 'null'], 'minimum': 1}}},
+        )
+        false_branch = with_schema(
+            'false_branch',
+            {
+                'type': 'object',
+                'properties': {'limit': {'anyOf': [False, {'type': 'integer', 'maximum': 10}]}},
+            },
+        )
+        true_branch = with_schema(
+            'true_branch',
+            {
+                'type': 'object',
+                'properties': {'limit': {'anyOf': [True, {'type': 'integer', 'maximum': 10}]}},
+            },
+        )
+        field_ref = with_schema(
+            'field_ref',
+            {
+                'type': 'object',
+                '$defs': {'PageLimit': {'type': 'integer', 'minimum': 1, 'maximum': 3}},
+                'properties': {'limit': {'$ref': '#/$defs/PageLimit'}},
+            },
+        )
+        root_ref = with_schema(
+            'root_ref',
+            {
+                '$ref': '#/$defs/Arguments',
+                '$defs': {
+                    'Arguments': {
+                        'type': 'object',
+                        'properties': {'limit': {'$ref': '#/$defs/PageLimit'}},
+                    },
+                    'PageLimit': {'type': 'integer', 'minimum': 1, 'maximum': 4},
+                },
+            },
+        )
+        unresolved_ref = with_schema(
+            'unresolved_ref',
+            {'type': 'object', 'properties': {'limit': {'$ref': '#/$defs/Missing'}}},
+        )
+        boolean_ref = with_schema(
+            'boolean_ref',
+            {
+                'type': 'object',
+                '$defs': {'PageLimit': False},
+                'properties': {'limit': {'$ref': '#/$defs/PageLimit'}},
+            },
+        )
+        empty_schema = with_schema('empty_schema', {'type': 'object', 'properties': {'limit': {}}})
+        malformed_types = with_schema(
+            'malformed_types',
+            {'type': 'object', 'properties': {'limit': {'type': ['integer', 1]}}},
+        )
+        aliased_mutation = with_schema(
+            'aliased_mutation',
+            {
+                'type': 'object',
+                'properties': {
+                    'account_id': {'type': 'string'},
+                    'accountId': {'type': 'string'},
+                    'zoneId': {'type': 'string'},
+                    'zone': {'type': 'string'},
+                },
+            },
+        )
+        aliased_mutation = replace(
+            aliased_mutation,
+            tool_def=replace(
+                aliased_mutation.tool_def,
+                metadata={'annotations': {'readOnlyHint': False, 'destructiveHint': True}},
+            ),
+        )
+
+        async def fake_get_tools(_toolset: MCPToolset[None], _ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
+            return {
+                'nullable': nullable,
+                'false_branch': false_branch,
+                'true_branch': true_branch,
+                'field_ref': field_ref,
+                'root_ref': root_ref,
+                'unresolved_ref': unresolved_ref,
+                'boolean_ref': boolean_ref,
+                'empty_schema': empty_schema,
+                'malformed_types': malformed_types,
+                'aliased_mutation': aliased_mutation,
+            }
+
+        monkeypatch.setattr(MCPToolset, 'get_tools', fake_get_tools)
+        toolset = CloudflareToolset[None](
+            server=CloudflareServer.DNS_ANALYTICS,
+            api_token='secret',
+            max_results=5,
+        )
+        tools = await toolset.get_tools(run_context)
+        assert set(tools) == {'nullable', 'false_branch', 'field_ref', 'root_ref'}
+        assert tools['nullable'].tool_def.parameters_json_schema['properties']['limit']['default'] == 5
+        assert tools['false_branch'].tool_def.parameters_json_schema['properties']['limit']['default'] == 5
+        assert tools['field_ref'].tool_def.parameters_json_schema['properties']['limit']['default'] == 3
+        assert tools['root_ref'].tool_def.parameters_json_schema['properties']['limit']['default'] == 4
+        with pytest.raises(ModelRetry, match='cannot exceed.*3'):
+            await toolset.call_tool('field_ref', {'limit': 4}, run_context, tools['field_ref'])
+
+        mutation_toolset = CloudflareToolset[None](
+            server=CloudflareServer.DNS_ANALYTICS,
+            api_token='secret',
+            account_id='a1',
+            zone_id='z1',
+            allow_mutations=True,
+        )
+        mutation_tools = await mutation_toolset.get_tools(run_context)
+        assert set(mutation_tools) == {'aliased_mutation'}
+        mutation_schema = mutation_tools['aliased_mutation'].tool_def.parameters_json_schema
+        assert set(mutation_schema['properties']) == {'account_id', 'zoneId'}
+        assert mutation_schema['required'] == ['account_id', 'zoneId']
 
     async def test_text_within_limits_is_unchanged(
         self, alternate_schema_server: FastMCP, run_context: RunContext[None]
@@ -954,7 +1108,9 @@ class TestCloudflareCapability:
         def model(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
             if any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
                 return ModelResponse(parts=[TextPart('deleted')])
-            return ModelResponse(parts=[ToolCallPart('delete_record', {'account_id': 'a1', 'record_id': 'r1'})])
+            return ModelResponse(
+                parts=[ToolCallPart('delete_record', {'account_id': 'a1', 'zoneId': 'z1', 'record_id': 'r1'})]
+            )
 
         agent = Agent(
             FunctionModel(model),
@@ -972,6 +1128,7 @@ class TestCloudflareCapability:
         pending = await agent.run('delete')
         assert isinstance(pending.output, DeferredToolRequests)
         approval = pending.output.approvals[0]
+        assert approval.args_as_dict() == {'account_id': 'a1', 'zoneId': 'z1', 'record_id': 'r1'}
         resumed = await agent.run(
             message_history=pending.all_messages(),
             deferred_tool_results=DeferredToolResults(approvals={approval.tool_call_id: True}),
