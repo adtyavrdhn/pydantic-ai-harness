@@ -100,8 +100,14 @@ print(result.output)
 - The managed endpoints are `us-east-1` and `eu-central-1`. `endpoint_region` selects the unauthenticated endpoint;
   an authenticated transport selects its endpoint in its URL or proxy arguments.
 - `access='read_only'` is the default. It hides every tool not explicitly marked `readOnlyHint=true`.
-- `access='approval_required'` exposes non-read tools through Pydantic AI's deferred approval flow. Denied calls do not run.
+- `access='approval_required'` exposes non-read tools through Pydantic AI's deferred approval flow. Denied calls do not
+  run. Each new non-read call, including a model-initiated retry, requires approval.
 - `access='unrestricted'` removes the Harness approval gate; IAM still applies.
+- Managed tool names repeat across scopes. Wrap each `AWS` instance in Pydantic AI's `PrefixTools` with a unique prefix
+  when one agent uses multiple accounts or target Regions.
+- `AWS` does not choose a result-reduction policy. Add
+  [`ToolOutputLimits`](https://pydantic.dev/docs/ai/harness/tool-output-limits/) to the agent when large results could
+  exceed its model context.
 - A supplied transport must point to the managed AWS MCP Server. Use [LocalStack](../localstack/) for emulated AWS.
 - Without SigV4 `AWS_REGION` metadata, AWS operations default to `us-east-1`.
 - The server is GA with no additional service fee. Normal AWS resource and data-transfer charges still apply.

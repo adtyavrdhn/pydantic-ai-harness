@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 from fastmcp.client.transports import FastMCPTransport, StreamableHttpTransport
+from mcp.server.fastmcp.server import FastMCP
+from mcp.types import ToolAnnotations
 from pydantic_ai import Agent, DeferredToolResults, ToolDenied
 from pydantic_ai.agent.spec import AgentSpec
+from pydantic_ai.capabilities import PrefixTools
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import (
@@ -27,9 +29,6 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import DeferredToolRequests
 
 from pydantic_ai_harness.aws import AWS
-
-if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
 
 pytestmark = pytest.mark.anyio
 
@@ -136,14 +135,60 @@ capabilities:
         capability = AWS('123456789012', 'us-west-2')
         assert capability.id == 'aws-123456789012-us-west-2-us-east-1'
 
-    def test_two_scopes_stay_distinct(self):
+    def test_two_scope_ids_stay_distinct(self):
         first = AWS('123456789012', 'us-west-2')
         second = AWS('210987654321', 'eu-west-1')
         assert (first.id, second.id) == (
             'aws-123456789012-us-west-2-us-east-1',
             'aws-210987654321-eu-west-1-us-east-1',
         )
-        assert isinstance(Agent(TestModel(), capabilities=[first, second]), Agent)
+
+    async def test_prefixed_scopes_route_to_separate_transports(self, aws_server: tuple[FastMCP, list[str]]):
+        first_server, first_calls = aws_server
+        second_server = FastMCP('aws-managed-second')
+        second_calls: list[str] = []
+
+        @second_server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+        def aws___list_regions() -> list[str]:
+            second_calls.append('list')
+            return ['eu-west-1']
+
+        def call_both_scopes(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            returns = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
+            if not returns:
+                return ModelResponse(parts=[ToolCallPart('first_aws___list_regions', {}, tool_call_id='call-1')])
+            if len(returns) == 1:
+                return ModelResponse(parts=[ToolCallPart('second_aws___list_regions', {}, tool_call_id='call-2')])
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent = Agent(
+            FunctionModel(call_both_scopes),
+            capabilities=[
+                PrefixTools(
+                    AWS(
+                        '123456789012',
+                        'us-west-2',
+                        authentication='sigv4',
+                        managed_transport=FastMCPTransport(first_server),
+                    ),
+                    prefix='first',
+                ),
+                PrefixTools(
+                    AWS(
+                        '210987654321',
+                        'eu-west-1',
+                        authentication='sigv4',
+                        managed_transport=FastMCPTransport(second_server),
+                    ),
+                    prefix='second',
+                ),
+            ],
+        )
+        result = await agent.run('list both scopes')
+
+        assert result.output == 'done'
+        assert first_calls == ['list']
+        assert second_calls == ['list']
 
     def test_direct_unauthenticated_transport(self):
         toolset = AWS('123456789012', 'us-west-2', endpoint_region='eu-central-1').get_toolset()
@@ -187,6 +232,77 @@ capabilities:
         result = await agent.run('inspect AWS')
         assert result.output == 'aws___list_regions,aws___failing_read'
         assert calls == []
+
+    async def test_default_access_rejects_hidden_write_call(self, aws_server: tuple[FastMCP, list[str]]):
+        server, calls = aws_server
+        turns = 0
+
+        def attempt_hidden_write(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            nonlocal turns
+            turns += 1
+            if turns == 1:
+                return ModelResponse(parts=[ToolCallPart('aws___run_script', {'code': 'create_bucket()'})])
+            return ModelResponse(parts=[TextPart('blocked')])
+
+        agent = Agent(
+            FunctionModel(attempt_hidden_write),
+            capabilities=[
+                AWS(
+                    '123456789012',
+                    'us-west-2',
+                    authentication='sigv4',
+                    managed_transport=FastMCPTransport(server),
+                )
+            ],
+        )
+        result = await agent.run('create a bucket')
+
+        assert result.output == 'blocked'
+        assert calls == []
+        retries = [
+            part for message in result.all_messages() for part in message.parts if isinstance(part, RetryPromptPart)
+        ]
+        assert len(retries) == 1
+        assert 'Unknown tool name' in str(retries[0].content)
+
+    async def test_empty_managed_catalog_fails_explicitly(self):
+        server = FastMCP('aws-managed-empty')
+        agent = Agent(
+            TestModel(),
+            capabilities=[
+                AWS(
+                    '123456789012',
+                    'us-west-2',
+                    authentication='sigv4',
+                    managed_transport=FastMCPTransport(server),
+                )
+            ],
+        )
+
+        with pytest.raises(UserError, match='returned no tools.*throttled initialization'):
+            await agent.run('inspect AWS')
+
+    async def test_read_only_fails_if_server_has_no_safe_tools(self):
+        server = FastMCP('aws-managed-no-safe-tools')
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+        def aws___run_script() -> str:  # pragma: no cover - fail-closed filtering must make this unreachable
+            return 'created'  # pragma: no cover
+
+        agent = Agent(
+            TestModel(),
+            capabilities=[
+                AWS(
+                    '123456789012',
+                    'us-west-2',
+                    authentication='sigv4',
+                    managed_transport=FastMCPTransport(server),
+                )
+            ],
+        )
+
+        with pytest.raises(UserError, match='no tools explicitly marked read-only'):
+            await agent.run('inspect AWS')
 
     async def test_approval_required_defers_non_read_tool(self, aws_server: tuple[FastMCP, list[str]]):
         server, calls = aws_server
@@ -259,6 +375,39 @@ capabilities:
 
         assert resumed.output == 'done'
         assert calls == []
+
+    async def test_failed_mutation_requires_fresh_approval_before_retry(self, aws_server: tuple[FastMCP, list[str]]):
+        server, calls = aws_server
+
+        def retry_mutation(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            retry_seen = any(isinstance(part, RetryPromptPart) for message in messages for part in message.parts)
+            call_id = 'call-2' if retry_seen else 'call-1'
+            return ModelResponse(parts=[ToolCallPart('aws___failing_write', {}, tool_call_id=call_id)])
+
+        agent = Agent(
+            FunctionModel(retry_mutation),
+            output_type=[str, DeferredToolRequests],
+            capabilities=[
+                AWS(
+                    '123456789012',
+                    'us-west-2',
+                    access='approval_required',
+                    authentication='sigv4',
+                    managed_transport=FastMCPTransport(server),
+                )
+            ],
+        )
+        deferred = await agent.run('change AWS')
+        assert isinstance(deferred.output, DeferredToolRequests)
+
+        retried = await agent.run(
+            message_history=deferred.all_messages(),
+            deferred_tool_results=DeferredToolResults(approvals={'call-1': True}),
+        )
+
+        assert isinstance(retried.output, DeferredToolRequests)
+        assert [call.tool_call_id for call in retried.output.approvals] == ['call-2']
+        assert calls == ['failing-write']
 
     async def test_approval_required_allows_read_tool(self, aws_server: tuple[FastMCP, list[str]]):
         server, calls = aws_server
@@ -359,5 +508,6 @@ capabilities:
         instructions = _request_instructions(result.all_messages())
         assert '123456789012' in instructions
         assert 'ap-south-1' in instructions
+        assert 'inspect current state' in instructions
         assert 'real AWS, not the LocalStack emulator' in instructions
         assert 'Ignore the declared AWS scope' not in instructions

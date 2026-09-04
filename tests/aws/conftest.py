@@ -43,6 +43,12 @@ def aws_server() -> tuple[FastMCP, list[str]]:
         calls.append(f'run:{code}')
         return 'created'
 
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+    def aws___failing_write() -> str:
+        """Represent an ambiguous managed-server failure during a mutation."""
+        calls.append('failing-write')
+        raise RuntimeError('mutation outcome is unknown')
+
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def aws___failing_read() -> str:
         """Represent a managed-server failure before any AWS side effect."""

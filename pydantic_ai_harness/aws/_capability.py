@@ -55,8 +55,9 @@ _INSTRUCTIONS = (
     'The declared AWS scope for this agent is account `{account_id}` and target Region `{region}`. Treat both values '
     'as required context for every AWS operation. The authenticated IAM identity is the authority: '
     'do not claim access that its policies deny, and do not switch accounts or target Regions. Prefer AWS documentation '
-    'and read operations before proposing changes. This is real AWS, not the LocalStack emulator. Access mode is '
-    '`{access}` and authentication mode is `{authentication}`.'
+    'and read operations before proposing changes. After a failed change with an unknown outcome, inspect current state '
+    'before retrying. This is real AWS, not the LocalStack emulator. Access mode is `{access}` and authentication mode '
+    'is `{authentication}`.'
 )
 
 
@@ -123,9 +124,20 @@ class _AWSToolset(MCPToolset[AgentDepsT]):
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
         tools = await super().get_tools(ctx)
+        if not tools:
+            raise UserError(
+                'The managed AWS MCP Server returned no tools. Check authentication and retry the connection; '
+                'an empty catalog can indicate throttled initialization.'
+            )
         if not self._read_only:
             return tools
-        return {name: tool for name, tool in tools.items() if _is_explicitly_read_only(tool.tool_def)}
+        read_tools = {name: tool for name, tool in tools.items() if _is_explicitly_read_only(tool.tool_def)}
+        if not read_tools:
+            raise UserError(
+                'The managed AWS MCP Server returned no tools explicitly marked read-only. '
+                'Its safety annotations may have changed.'
+            )
+        return read_tools
 
 
 @dataclass
@@ -137,7 +149,8 @@ class AWS(AbstractCapability[AgentDepsT]):
     proxy so the transport retains its identity lifecycle.
     The default exposes only tools whose MCP annotation explicitly marks them
     read-only. `approval_required` uses Pydantic AI's tool approval wrapper for
-    every other tool, and `unrestricted` requires an explicit opt-in.
+    every new non-read tool call, including a model-initiated retry, and `unrestricted`
+    requires an explicit opt-in.
     """
 
     account_id: str
