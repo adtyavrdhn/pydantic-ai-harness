@@ -59,5 +59,4 @@ repos:
         entry: env PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run --no-sync pyright
         types: [python]
         language: system
-        pass_filenames: false
-        require_serial: true
+        pass_filenames: true
