@@ -370,11 +370,15 @@ class TestGitHubToolset:
         with pytest.raises(UserError, match='absolute HTTPS URL'):
             GitHub(repository='pydantic/pydantic-ai', url=url).get_toolset()
 
-    def test_rejects_reserved_headers(self):
-        with pytest.raises(UserError, match='x-mcp-readonly'):
+    @pytest.mark.parametrize(
+        'header',
+        ['x-mcp-features', 'x-mcp-insiders', 'x-mcp-readonly', 'x-mcp-tools', 'x-mcp-toolsets'],
+    )
+    def test_rejects_reserved_headers(self, header: str):
+        with pytest.raises(UserError, match=header.lower()):
             GitHub(
                 repository='pydantic/pydantic-ai',
-                headers={'x-mcp-readonly': 'false'},
+                headers={header: 'unsafe'},
             ).get_toolset()
 
     def test_rejects_ambiguous_auth_headers(self):
@@ -434,17 +438,30 @@ class TestGitHubToolset:
             result = await toolset.call_tool(tool_name, {'query': 'Agent'}, run_context, tools[tool_name])
         assert 'repo:pydantic/pydantic-ai' in str(result)
 
-    async def test_matching_search_scope_is_not_duplicated(self, github_server: FastMCP, run_context: RunContext[None]):
+    @pytest.mark.parametrize(
+        ('query', 'expected_count'),
+        [
+            ('Agent repo:PYDANTIC/PYDANTIC-AI', 2),
+            ('Agent NOT repo:pydantic/pydantic-ai', 2),
+        ],
+    )
+    async def test_search_always_appends_positive_scope(
+        self,
+        query: str,
+        expected_count: int,
+        github_server: FastMCP,
+        run_context: RunContext[None],
+    ):
         toolset = GitHub[None](repository='pydantic/pydantic-ai', client=github_server).get_toolset()
         async with toolset:
             tools = await toolset.get_tools(run_context)
             result = await toolset.call_tool(
                 'search_code',
-                {'query': 'Agent repo:PYDANTIC/PYDANTIC-AI'},
+                {'query': query},
                 run_context,
                 tools['search_code'],
             )
-        assert str(result).count('repo:') == 1
+        assert str(result).count('repo:') == expected_count
 
     async def test_search_requires_string_query(self, github_server: FastMCP, run_context: RunContext[None]):
         toolset = GitHub[None](repository='pydantic/pydantic-ai', client=github_server).get_toolset()
@@ -466,6 +483,29 @@ class TestGitHubToolset:
                     run_context,
                     tools['search_code'],
                 )
+
+    @pytest.mark.parametrize(
+        ('repository', 'organization', 'query'),
+        [
+            ('pydantic/pydantic-ai', None, 'bug org:psf'),
+            ('pydantic/pydantic-ai', None, 'bug user:octocat'),
+            (None, 'pydantic', 'bug repo:psf/requests'),
+            (None, 'pydantic', 'bug user:octocat'),
+        ],
+    )
+    async def test_scope_rejects_cross_kind_search_qualifier(
+        self,
+        repository: str | None,
+        organization: str | None,
+        query: str,
+        github_server: FastMCP,
+        run_context: RunContext[None],
+    ):
+        toolset = GitHub[None](repository=repository, organization=organization, client=github_server).get_toolset()
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            with pytest.raises(ModelRetry, match='outside'):
+                await toolset.call_tool('search_issues', {'query': query}, run_context, tools['search_issues'])
 
     async def test_repository_scope_rejects_conflicting_search_arguments(
         self, github_server: FastMCP, run_context: RunContext[None]
@@ -553,7 +593,10 @@ class TestGitHubToolset:
         [
             ('pydantic/pydantic-ai', None, 'fork_repository'),
             ('pydantic/pydantic-ai', None, 'issue_dependency_write'),
-            ('pydantic/pydantic-ai', None, 'issue_write'),
+            ('pydantic/pydantic-ai', None, 'add_sub_issue'),
+            ('pydantic/pydantic-ai', None, 'remove_sub_issue'),
+            ('pydantic/pydantic-ai', None, 'reprioritize_sub_issue'),
+            ('pydantic/pydantic-ai', None, 'sub_issue_write'),
             (None, 'pydantic', 'repository_ruleset_read'),
         ],
     )

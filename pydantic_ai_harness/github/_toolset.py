@@ -9,17 +9,25 @@ External contract, verified 2026-09-04:
 - `X-MCP-Readonly: true` removes write tools and takes precedence over tool
   selection. Every tool registration in the official server must explicitly
   declare its MCP `readOnlyHint` annotation.
+- `X-MCP-Tools`, `X-MCP-Features`, and `X-MCP-Insiders` can expand the exposed
+  tool surface, so caller-supplied values are not accepted.
+- The consolidated and granular sub-issue mutation tools accept an opaque
+  `sub_issue_id` that does not identify its repository, so repository scope
+  cannot be enforced for those tools and they are not exposed.
 - Generic MCP hosts can authenticate with a PAT bearer token. OAuth requires
   the host to configure a GitHub App or OAuth App.
 
 Sources:
 https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md
 https://github.com/github/github-mcp-server/blob/main/docs/server-configuration.md
+https://github.com/github/github-mcp-server/blob/main/docs/feature-flags.md
+https://github.com/github/github-mcp-server/blob/main/README.md
 https://github.com/github/github-mcp-server/blob/main/pkg/toolvalidation/readonlyhint.go
 
-Re-check the endpoint and headers in the two remote-server docs, then confirm
-the annotation check still covers all registrations before changing safety
-classification.
+Re-check the endpoint and headers in the remote server, server configuration,
+and feature flag docs. Confirm the sub-issue tool names and schemas in the tool
+catalog and that the annotation check still covers all registrations before
+changing safety classification.
 """
 
 from __future__ import annotations
@@ -52,10 +60,13 @@ AccessMode = Literal['read', 'write']
 
 _DEFAULT_TOOLSETS = ('repos', 'issues', 'pull_requests')
 _SUPPORTED_TOOLSETS = frozenset(_DEFAULT_TOOLSETS)
-_ALTERNATE_TARGET_FIELDS = frozenset({'parent_owner', 'parent_repo', 'related_owner', 'related_repo'})
-_RESERVED_HEADERS = frozenset({'x-mcp-readonly', 'x-mcp-toolsets'})
+_ALTERNATE_TARGET_FIELDS = frozenset({'related_owner', 'related_repo'})
+_OPAQUE_TARGET_TOOL_NAMES = frozenset(
+    {'add_sub_issue', 'remove_sub_issue', 'reprioritize_sub_issue', 'sub_issue_write'}
+)
+_RESERVED_HEADERS = frozenset({'x-mcp-features', 'x-mcp-insiders', 'x-mcp-readonly', 'x-mcp-tools', 'x-mcp-toolsets'})
 _SEARCH_TOOL_NAMES = frozenset({'search_code', 'search_commits', 'search_issues', 'search_pull_requests'})
-_QUALIFIER_RE = re.compile(r'(?<!\S)(repo|org):([^\s]+)', re.IGNORECASE)
+_QUALIFIER_RE = re.compile(r'(?<![A-Za-z0-9_])(repo|org|user):([^\s)]+)', re.IGNORECASE)
 _BOOLEAN_OR_RE = re.compile(r'\bOR\b')
 _TOOLSET_RE = re.compile(r'^[a-z0-9_]+$')
 _SCOPE_COMPONENT_RE = re.compile(r'^[^\s/:]+$')
@@ -175,6 +186,8 @@ class GitHubToolset(MCPToolset[AgentDepsT]):
         }
 
     def _tool_matches_scope(self, tool: ToolsetTool[AgentDepsT]) -> bool:
+        if tool.tool_def.name in _OPAQUE_TARGET_TOOL_NAMES:
+            return False
         properties = tool.tool_def.parameters_json_schema.get('properties')
         parsed_properties = _object_mapping(properties)
         property_names = set(parsed_properties) if parsed_properties is not None else set[str]()
@@ -215,13 +228,9 @@ class GitHubToolset(MCPToolset[AgentDepsT]):
             qualifier_name = 'repo' if self._repo is not None else 'org'
             qualifier_value = f'{self._owner}/{self._repo}' if self._repo is not None else self._owner
             for found_name, found_value in _QUALIFIER_RE.findall(query):
-                if found_name.lower() == qualifier_name and found_value.casefold() != qualifier_value.casefold():
+                if found_name.lower() != qualifier_name or found_value.casefold() != qualifier_value.casefold():
                     raise ModelRetry(f'`{name}` cannot search outside the configured GitHub scope {qualifier_value!r}.')
-            if not any(
-                found_name.lower() == qualifier_name and found_value.casefold() == qualifier_value.casefold()
-                for found_name, found_value in _QUALIFIER_RE.findall(query)
-            ):
-                scoped['query'] = f'{query} {qualifier_name}:{qualifier_value}'
+            scoped['query'] = f'{query} {qualifier_name}:{qualifier_value}'
             return scoped
 
         self._validate_scope_arguments(name, scoped, require_relevant=True)

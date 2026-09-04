@@ -41,7 +41,7 @@ def github_calls() -> list[tuple[str, dict[str, object]]]:
 
 
 @pytest.fixture
-def github_server(github_calls: list[tuple[str, dict[str, object]]]) -> FastMCP:
+def github_server(github_calls: list[tuple[str, dict[str, object]]]) -> FastMCP:  # noqa: C901
     from mcp.server.fastmcp.server import FastMCP, Settings  # noqa: PLC0415
     from mcp.types import ToolAnnotations  # noqa: PLC0415
 
@@ -95,7 +95,7 @@ def github_server(github_calls: list[tuple[str, dict[str, object]]]) -> FastMCP:
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def get_me() -> str:
         """Get the current user."""
-        return 'octocat'
+        return 'octocat'  # pragma: no cover
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
     def create_issue(owner: str, repo: str, title: str) -> dict[str, str]:
@@ -107,7 +107,7 @@ def github_server(github_calls: list[tuple[str, dict[str, object]]]) -> FastMCP:
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
     def fork_repository(owner: str, repo: str, organization: str | None = None) -> dict[str, str | None]:
         """Fork a repository to an optional destination organization."""
-        return {'owner': owner, 'repo': repo, 'organization': organization}
+        return {'owner': owner, 'repo': repo, 'organization': organization}  # pragma: no cover
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def repository_ruleset_read(
@@ -118,7 +118,13 @@ def github_server(github_calls: list[tuple[str, dict[str, object]]]) -> FastMCP:
         enterprise: str | None = None,
     ) -> dict[str, str | None]:
         """Read a ruleset selected by a target-level discriminator."""
-        return {'level': level, 'owner': owner, 'repo': repo, 'org': org, 'enterprise': enterprise}
+        return {  # pragma: no cover
+            'level': level,
+            'owner': owner,
+            'repo': repo,
+            'org': org,
+            'enterprise': enterprise,
+        }
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
     def issue_dependency_write(
@@ -128,7 +134,7 @@ def github_server(github_calls: list[tuple[str, dict[str, object]]]) -> FastMCP:
         related_repo: str,
     ) -> dict[str, str]:
         """Write an issue dependency that can target another repository."""
-        return {
+        return {  # pragma: no cover
             'owner': owner,
             'repo': repo,
             'related_owner': related_owner,
@@ -136,13 +142,48 @@ def github_server(github_calls: list[tuple[str, dict[str, object]]]) -> FastMCP:
         }
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
-    def issue_write(owner: str, repo: str, parent_owner: str, parent_repo: str) -> dict[str, str]:
-        """Write an issue that can use a parent from another repository."""
-        return {'owner': owner, 'repo': repo, 'parent_owner': parent_owner, 'parent_repo': parent_repo}
+    def sub_issue_write(owner: str, repo: str, issue_number: int, sub_issue_id: int) -> dict[str, object]:
+        """Change a sub-issue relationship using an opaque target ID."""
+        return {  # pragma: no cover
+            'owner': owner,
+            'repo': repo,
+            'issue_number': issue_number,
+            'sub_issue_id': sub_issue_id,
+        }
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def add_sub_issue(owner: str, repo: str, issue_number: int, sub_issue_id: int) -> dict[str, object]:
+        """Add a sub-issue using an opaque target ID."""
+        return {  # pragma: no cover
+            'owner': owner,
+            'repo': repo,
+            'issue_number': issue_number,
+            'sub_issue_id': sub_issue_id,
+        }
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def remove_sub_issue(owner: str, repo: str, issue_number: int, sub_issue_id: int) -> dict[str, object]:
+        """Remove a sub-issue using an opaque target ID."""
+        return {  # pragma: no cover
+            'owner': owner,
+            'repo': repo,
+            'issue_number': issue_number,
+            'sub_issue_id': sub_issue_id,
+        }
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def reprioritize_sub_issue(owner: str, repo: str, issue_number: int, sub_issue_id: int) -> dict[str, object]:
+        """Reprioritize a sub-issue using an opaque target ID."""
+        return {  # pragma: no cover
+            'owner': owner,
+            'repo': repo,
+            'issue_number': issue_number,
+            'sub_issue_id': sub_issue_id,
+        }
 
     @server.tool()
     def unclassified_tool(owner: str, repo: str) -> str:
         """A tool without safety annotations."""
-        return f'{owner}/{repo}'
+        return f'{owner}/{repo}'  # pragma: no cover
 
     return server
