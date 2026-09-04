@@ -70,16 +70,18 @@ print(result.output)
 - Focused servers expose only tools marked read-only by Cloudflare unless `allow_mutations=True`. The official API
   server exposes only `docs` and its network-isolated OpenAPI `search` tool by default. MCP safety annotations state
   server intent, so credentials should still have only the permissions required for the selected server.
-- Mutation-capable tools raise Pydantic AI's standard deferred approval request before the MCP request runs. Resume
-  with `DeferredToolResults` after the application or user approves the call.
-- On focused servers, `account_id` keeps only tools with an explicit account argument and injects that value. Use it
-  with a multi-account user credential. If the token already pins one account, omit `account_id`; the token is the
-  account boundary. `zone_id` applies the same policy to explicit zone arguments. Scoped instances do not forward
-  remote server instructions because those instructions can include other accessible account IDs.
+- Mutation-capable tools raise Pydantic AI's standard deferred approval request before the MCP request runs. Configured
+  account and zone IDs are required in the mutation tool call so the approval shows the exact target; these IDs enter
+  model context, but credentials do not. Resume with `DeferredToolResults` after the application or user approves.
+- On focused servers, `account_id` keeps only tools with an explicit account argument and supplies that value to read
+  calls. Use it with a multi-account user credential. If the token already pins one account, omit `account_id`; the
+  token is the account boundary. `zone_id` applies the same policy to explicit zone arguments. Scoped instances do not
+  forward remote server instructions because those instructions can include other accessible account IDs.
 - Code Mode `execute` accepts arbitrary JavaScript, so `CloudflareServer.API` cannot combine mutation access with an
   enforced `account_id` or `zone_id`. Use a focused server when either boundary is required.
-- `max_results`, `max_output_bytes`, and `max_output_lines` bound pagination and each returned result. Oversized
-  structured or binary results are replaced rather than returned partially.
+- `max_results` bounds recognized top-level pagination fields and nested fields when their parent object is supplied.
+  `max_output_bytes` and `max_output_lines` bound each model-facing result. Oversized structured or binary results are
+  replaced rather than returned partially.
 - A prebuilt `client` owns authentication and account selection, so it cannot be combined with `api_token` or
   `account_id`. Custom clients treat every tool as mutation-capable unless `trust_server_annotations=True`; even then,
   contradictory safety annotations remain mutation-capable. Remote instructions from custom clients are not

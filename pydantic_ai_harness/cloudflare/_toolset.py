@@ -106,6 +106,23 @@ _PAGE_KEYS = ('limit', 'per_page', 'perPage', 'page_size', 'pageSize', 'first', 
 _PAGE_CONTAINER_KEYS = ('query', 'keysQuery', 'valuesQuery')
 _TRUNCATION_MARKER = '[... Cloudflare result truncated ...]'
 _ERROR_ENVELOPE_BYTES = len(to_json({'error': ''}))
+_REF_ANNOTATION_KEYS = frozenset(
+    {
+        '$anchor',
+        '$comment',
+        '$defs',
+        '$id',
+        '$schema',
+        'default',
+        'definitions',
+        'deprecated',
+        'description',
+        'examples',
+        'readOnly',
+        'title',
+        'writeOnly',
+    }
+)
 _OBJECT_DICT = TypeAdapter(dict[str, object])
 _STRING_LIST = TypeAdapter(list[str])
 _OBJECT_LIST = TypeAdapter(list[object])
@@ -168,6 +185,8 @@ def _resolve_schema(root: dict[str, object], schema: object, seen: frozenset[str
     field = _object_dict(schema)
     reference = field.get('$ref')
     if not isinstance(reference, str) or not reference.startswith('#/') or reference in seen:
+        return schema
+    if any(key not in _REF_ANNOTATION_KEYS and not key.startswith('x-') for key in field if key != '$ref'):
         return schema
     target: object = root
     for raw_part in reference[2:].split('/'):

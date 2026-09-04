@@ -591,6 +591,14 @@ class TestCloudflareToolset:
                 'properties': {'limit': {'$ref': '#/$defs/PageLimit'}},
             },
         )
+        conflicting_ref = with_schema(
+            'conflicting_ref',
+            {
+                'type': 'object',
+                '$defs': {'PageLimit': {'type': 'integer', 'maximum': 3}},
+                'properties': {'limit': {'$ref': '#/$defs/PageLimit', 'maximum': 10}},
+            },
+        )
         empty_schema = with_schema('empty_schema', {'type': 'object', 'properties': {'limit': {}}})
         malformed_types = with_schema(
             'malformed_types',
@@ -625,6 +633,7 @@ class TestCloudflareToolset:
                 'root_ref': root_ref,
                 'unresolved_ref': unresolved_ref,
                 'boolean_ref': boolean_ref,
+                'conflicting_ref': conflicting_ref,
                 'empty_schema': empty_schema,
                 'malformed_types': malformed_types,
                 'aliased_mutation': aliased_mutation,
