@@ -13,11 +13,7 @@ from pydantic_ai.usage import RunUsage
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
-collect_ignore = (
-    ['test_atlassian.py']
-    if importlib.util.find_spec('mcp') is None or importlib.util.find_spec('fastmcp') is None
-    else []
-)
+collect_ignore = ['test_atlassian.py'] if importlib.util.find_spec('mcp') is None else []
 
 
 @pytest.fixture
@@ -129,5 +125,20 @@ def unavailable_atlassian_server() -> FastMCP:
     def futureUnreviewedAtlassianMutation(cloudId: str) -> dict[str, str]:  # pragma: no cover
         """A future server tool that Harness has not reviewed."""
         return {'cloudId': cloudId}
+
+    return server
+
+
+@pytest.fixture
+def jira_only_atlassian_server() -> FastMCP:
+    from mcp.server.fastmcp.server import FastMCP, Settings  # noqa: PLC0415
+
+    Settings.model_rebuild()
+    server = FastMCP('atlassian-jira-only-fake')
+
+    @server.tool()
+    def getJiraIssue(cloudId: str, issueIdOrKey: str) -> dict[str, str]:  # pragma: no cover
+        """A Jira tool that cannot run while another selected product is unavailable."""
+        return {'cloudId': cloudId, 'key': issueIdOrKey}
 
     return server

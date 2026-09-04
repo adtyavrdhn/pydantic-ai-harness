@@ -426,6 +426,16 @@ class TestAtlassian:
             with pytest.raises(UserError, match='no permitted tools.*jira'):
                 await toolset.get_tools(run_context)
 
+    async def test_one_missing_selected_product_fails_closed(
+        self, jira_only_atlassian_server: FastMCP, run_context: RunContext[None]
+    ):
+        toolset = AtlassianToolset(
+            cloud_id='site-1', products=('jira', 'confluence'), client=jira_only_atlassian_server
+        )
+        async with toolset:
+            with pytest.raises(UserError, match='no permitted tools.*confluence'):
+                await toolset.get_tools(run_context)
+
     async def test_destructive_tool_is_approval_gated_before_server_call(
         self, atlassian_server: FastMCP, atlassian_calls: list[str]
     ):

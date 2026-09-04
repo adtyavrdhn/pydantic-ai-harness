@@ -273,8 +273,13 @@ class AtlassianToolset(MCPToolset[AgentDepsT]):
             for name, tool in tools.items()
             if name in selected
         }
-        if not any(name not in _COMMON_READ_TOOLS for name in filtered):
-            products = ', '.join(self.products)
+        missing_products = [
+            product
+            for product in self.products
+            if not any(name in filtered and selected[name][0] == product for name in selected)
+        ]
+        if missing_products:
+            products = ', '.join(missing_products)
             raise UserError(f'Atlassian Rovo MCP returned no permitted tools for the selected products: {products}.')
         return filtered
 
