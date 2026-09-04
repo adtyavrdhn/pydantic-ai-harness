@@ -27,8 +27,16 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
-def _ctx(run_id: str = 'run-1') -> RunContext[None]:
-    return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id)
+def _ctx(run_id: str = 'run-1', conversation_id: str | None = None) -> RunContext[None]:
+    return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id, conversation_id=conversation_id)
+
+
+async def _resolved(capability: ModalSandbox[None], ctx: RunContext[None], ref: SandboxRef | None = None):
+    """Ask the capability for a backend and touch it, so the create-or-attach actually happens."""
+    backend = capability.get_sandbox(ctx, ref=ref)
+    assert isinstance(backend, ModalSandboxBackend)
+    await backend.sandbox
+    return backend
 
 
 class TestLifecycle:
@@ -55,67 +63,60 @@ class TestLifecycle:
 
         assert result.output == 'done'
         assert len(fake_modal.sandboxes) == 1
-        assert fake_modal.sandboxes[0].terminated is True
+        # Nothing terminates it: the conversation may continue in another run, and Modal reaps
+        # an idle sandbox at its own `sandbox_timeout`.
+        assert fake_modal.sandboxes[0].terminated is False
 
-    async def test_acquire_is_idempotent_for_one_logical_run(self, fake_modal: FakeModal) -> None:
+    async def test_building_a_backend_does_no_io(self, fake_modal: FakeModal) -> None:
+        ModalSandbox[None]().get_sandbox(_ctx(), ref=None)
+
+        assert fake_modal.sandboxes == []
+        assert fake_modal.attach_ids == []
+
+    async def test_one_conversation_reuses_one_sandbox(self, fake_modal: FakeModal) -> None:
         capability = ModalSandbox[None]()
 
-        first = await capability.acquire_sandbox(_ctx())
-        second = await capability.acquire_sandbox(_ctx())
+        first = await _resolved(capability, _ctx('run-1', conversation_id='chat-1'))
+        second = await _resolved(capability, _ctx('run-2', conversation_id='chat-1'))
 
-        assert first == second
+        assert first.ref == second.ref
         assert len(fake_modal.sandboxes) == 1
-        assert fake_modal.sandboxes[0].detached is True
         assert fake_modal.create_kwargs[0]['name'] is not None
 
-    async def test_different_runs_use_different_names(self, fake_modal: FakeModal) -> None:
+    async def test_different_conversations_use_different_names(self, fake_modal: FakeModal) -> None:
         capability = ModalSandbox[None]()
 
-        await capability.acquire_sandbox(_ctx('run-1'))
-        await capability.acquire_sandbox(_ctx('run-2'))
+        await _resolved(capability, _ctx('run-1', conversation_id='chat-1'))
+        await _resolved(capability, _ctx('run-2', conversation_id='chat-2'))
 
         assert fake_modal.create_kwargs[0]['name'] != fake_modal.create_kwargs[1]['name']
 
-    async def test_create_race_reconnects_to_the_winner(self, fake_modal: FakeModal) -> None:
-        existing = await ModalSandboxBackend.create(name='shared')
+    async def test_a_create_race_attaches_to_the_winner(self, fake_modal: FakeModal) -> None:
+        capability = ModalSandbox[None]()
+        existing = await _resolved(capability, _ctx(conversation_id='chat-1'))
         fake_modal.name_lookup_misses = 1
 
-        connected = await ModalSandboxBackend.create_or_connect(name='shared')
+        connected = await _resolved(capability, _ctx(conversation_id='chat-1'))
 
-        assert connected.sandbox_id == existing.sandbox_id
+        assert connected.ref == existing.ref
         assert fake_modal.name_lookups[-2:] == [
-            ('pydantic-ai-harness', 'shared'),
-            ('pydantic-ai-harness', 'shared'),
+            ('pydantic-ai-harness', fake_modal.create_kwargs[0]['name']),
+            ('pydantic-ai-harness', fake_modal.create_kwargs[0]['name']),
         ]
 
-    async def test_get_sandbox_reconnects_by_ref(self, fake_modal: FakeModal) -> None:
-        backend = await ModalSandbox[None]().get_sandbox(_ctx(), SandboxRef(sandbox_id='sb-existing'))
+    async def test_a_ref_attaches_to_that_sandbox(self, fake_modal: FakeModal) -> None:
+        await _resolved(ModalSandbox[None](), _ctx(), SandboxRef(sandbox_id='sb-existing'))
 
-        assert isinstance(backend, ModalSandboxBackend)
         assert fake_modal.attach_ids == ['sb-existing']
+        assert fake_modal.create_kwargs == []
 
-    async def test_release_reconnects_and_terminates(self, fake_modal: FakeModal) -> None:
-        capability = ModalSandbox[None]()
-        ref = await capability.acquire_sandbox(_ctx())
-
-        await capability.release_sandbox(_ctx(), ref)
-
-        assert fake_modal.attach_ids == [ref.sandbox_id]
-        assert fake_modal.sandboxes[-1].terminated is True
-
-    async def test_release_is_idempotent_when_sandbox_is_gone(self, fake_modal: FakeModal) -> None:
-        fake_modal.attach_error = fake_modal.unavailable_type('gone')
-
-        await ModalSandbox[None]().release_sandbox(_ctx(), SandboxRef(sandbox_id='gone'))
-
-    async def test_attached_sandbox_is_not_owned(self, fake_modal: FakeModal) -> None:
+    async def test_a_configured_sandbox_id_attaches_and_creates_nothing(self, fake_modal: FakeModal) -> None:
         capability = ModalSandbox[None](sandbox_id='sb-existing')
 
-        ref = await capability.acquire_sandbox(_ctx())
-        await capability.release_sandbox(_ctx(), ref)
+        backend = await _resolved(capability, _ctx())
 
-        assert ref == SandboxRef(sandbox_id='sb-existing')
-        assert fake_modal.sandboxes == []
+        assert backend.ref == SandboxRef(sandbox_id='sb-existing')
+        assert fake_modal.create_kwargs == []
 
 
 class TestConfiguration:

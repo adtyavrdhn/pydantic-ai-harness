@@ -74,7 +74,8 @@ def _unique(prefix: str) -> str:
 @asynccontextmanager
 async def _owned(**settings: object) -> AsyncGenerator[ModalSandboxBackend]:
     """Create a sandbox and terminate it on the way out, as the capability's hooks do."""
-    backend = await ModalSandboxBackend.create(image=_IMAGE, **settings)  # type: ignore[arg-type]
+    backend = ModalSandboxBackend(image=_IMAGE, **settings)  # type: ignore[arg-type]
+    await backend.sandbox
     try:
         yield backend
     finally:
@@ -277,13 +278,14 @@ class TestRealLifecycle:
     async def test_terminate_actually_destroys_the_container(self) -> None:
         """Validates the fake-encoded assumption that closing an owned sandbox destroys the real one."""
         async with _owned(sandbox_timeout=120) as owner:
-            sandbox_id = owner.sandbox_id
+            ref = owner.ref
+        assert ref is not None
 
         became_unavailable = False
         attempts = 8
         for attempt in range(attempts):
             try:
-                await ModalSandboxBackend.connect(sandbox_id)
+                await ModalSandboxBackend(ref=ref).sandbox
             except ModalSandboxUnavailableError:
                 became_unavailable = True
                 break
@@ -299,8 +301,9 @@ class TestRealLifecycle:
         async with _owned(sandbox_timeout=120) as owner:
             await owner.fs.write_bytes(marker, b'shared')
 
-            attached = await ModalSandboxBackend.connect(owner.sandbox_id)
-            assert attached.sandbox_id == owner.sandbox_id
+            attached = ModalSandboxBackend(ref=owner.ref)
+            await attached.sandbox
+            assert attached.ref == owner.ref
             assert await attached.fs.read_bytes(marker) == b'shared'
             await attached.close(terminate=False)
 
