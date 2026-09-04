@@ -100,6 +100,7 @@ class TestLinear:
         result = await agent.run('Read an issue')
         assert _tool_call_names(result.all_messages()) == {'get_issue'}
         assert 'identifiers' in _request_instructions(result.all_messages())
+        assert 'Before changing Linear data' not in _request_instructions(result.all_messages())
 
     def test_default_uses_documented_read_only_endpoint(self):
         transport = _http_transport(Linear())
@@ -232,14 +233,14 @@ class TestLinear:
         toolset = Linear(client=script).get_toolset()
         assert isinstance(toolset, MCPToolset)
 
-    async def test_short_provider_instructions(self, linear_server: FastMCP):
+    async def test_injected_connection_instructions_cover_possible_mutations(self, linear_server: FastMCP):
         result = await Agent(TestModel(call_tools=['get_issue']), capabilities=[Linear(client=linear_server)]).run(
             'Read ENG-123'
         )
         instructions = _request_instructions(result.all_messages())
         assert 'Linear' in instructions
         assert 'identifiers' in instructions
-        assert 'Before changing Linear data' not in instructions
+        assert 'Before changing Linear data' in instructions
 
     async def test_read_write_instructions_cover_mutations(self, linear_server: FastMCP):
         result = await Agent(

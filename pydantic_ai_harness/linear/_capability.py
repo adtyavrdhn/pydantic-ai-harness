@@ -124,7 +124,8 @@ class Linear(AbstractCapability[AgentDepsT]):
         """Return concise provider guidance."""
         if not self.include_instructions:
             return None
-        return _READ_INSTRUCTIONS + (_WRITE_INSTRUCTIONS if not self.read_only else '')
+        connection_may_write = self.client is not None or not self.read_only
+        return _READ_INSTRUCTIONS + (_WRITE_INSTRUCTIONS if connection_may_write else '')
 
     @classmethod
     def from_spec(
