@@ -465,12 +465,15 @@ class DaytonaSandboxBackend(SandboxBackend):
                 raise create_error
 
     def _describe(self) -> str:
-        """How to name this sandbox in an error, before or after it exists."""
+        """How to name this sandbox in an error.
+
+        Every caller runs after `_resolve`, which sets `ref` alongside the live handle, so the
+        other two spellings are only reachable if that ever stops being true. `lax no cover`
+        for the same reason: they are a fallback, not a path tests should have to reach.
+        """
         if self._ref is not None:
             return repr(self._ref.sandbox_id)
-        if self._name is not None:
-            return f'named {self._name!r}'
-        return 'that was never started'
+        return f'named {self._name!r}' if self._name is not None else 'that was never started'  # pragma: lax no cover
 
     async def close(self, *, terminate: bool) -> None:
         """Close the SDK client, deleting the sandbox first when this backend owns it."""

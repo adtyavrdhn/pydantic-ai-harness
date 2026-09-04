@@ -293,6 +293,14 @@ class TestLifecycle:
         assert sandbox.deleted is True
         await DaytonaSandboxBackend.delete_by_id('missing')
 
+    async def test_an_unused_backend_has_nothing_to_close(self, fake_daytona: FakeDaytona) -> None:
+        # Building one does no I/O, so closing it must not open a client either -- resolving
+        # here would create the very sandbox being released.
+        await DaytonaSandboxBackend().close(terminate=True)
+
+        assert fake_daytona.sandboxes == []
+        assert fake_daytona.close_calls == 0
+
     async def test_close_is_idempotent_and_not_found_delete_succeeds(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         fake_daytona.delete_error = DaytonaNotFoundError('gone')
