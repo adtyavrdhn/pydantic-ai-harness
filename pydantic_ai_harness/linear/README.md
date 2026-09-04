@@ -9,11 +9,10 @@ default connection uses Linear's server-enforced read-only endpoint.
 
 ## Installation
 
-The generic MCP extra is tracked in [#788](https://github.com/pydantic/pydantic-ai-harness/issues/788). Until it lands,
-install Harness and Pydantic AI's MCP support explicitly:
+Install Harness with Linear MCP support and the model provider you use:
 
 ```bash
-uv add pydantic-ai-harness "pydantic-ai-slim[mcp,openai]"
+uv add "pydantic-ai-harness[linear]" "pydantic-ai-slim[openai]"
 ```
 
 ## Read Linear data

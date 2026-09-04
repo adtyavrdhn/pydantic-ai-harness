@@ -28,9 +28,7 @@ try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
-        'MCP support is required for the Linear capability. Until '
-        'https://github.com/pydantic/pydantic-ai-harness/issues/788 lands, install it with: '
-        'uv add pydantic-ai-harness "pydantic-ai-slim[mcp]"'
+        'MCP support is required for the Linear capability. Install it with: uv add "pydantic-ai-harness[linear]"'
     ) from _import_error
 
 LINEAR_MCP_URL = 'https://mcp.linear.app/mcp'
