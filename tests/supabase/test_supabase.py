@@ -247,7 +247,7 @@ class TestSupabase:
             ],
         )
 
-        await agent.run('Inspect both projects')
+        result = await agent.run('Inspect both projects')
 
         assert _tool_names(model) == {
             'execute_sql',
@@ -256,6 +256,9 @@ class TestSupabase:
             'list_tables',
             'search_docs',
         }
+        instructions = _instructions(result.all_messages())
+        assert 'Project `dev-one` provides these Supabase feature groups: docs.' in instructions
+        assert 'Project `dev-two` provides these Supabase feature groups: database.' in instructions
 
     async def test_writes_require_approval(self, supabase_server: FastMCP, calls: list[str]):
         def call_sql(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
