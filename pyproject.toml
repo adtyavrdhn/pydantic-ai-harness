@@ -109,7 +109,6 @@ prompt-injection-defender-ml = [
     "stackone-defender[onnx]>=0.7.3,<0.8 ; python_full_version >= '3.11'",
 ]
 google-workspace = [
-    "fastmcp-slim[client]>=3.4.5,<4",
     "pydantic-ai-slim[mcp]>=2.38.0",
 ]
 

@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from httpx import Auth
 from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.exceptions import UserError
@@ -16,6 +15,7 @@ from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai_harness.google_workspace import GoogleWorkspace, GoogleWorkspaceService
 
@@ -38,14 +38,11 @@ class TestGoogleWorkspace:
         schema = json.dumps(AgentSpec.model_json_schema_with_capabilities([GoogleWorkspace]), sort_keys=True)
         assert '"clients"' not in schema
         assert '"access_token"' not in schema
-        assert '"oauth_client_secret"' not in schema
         assert '"services"' in schema
 
-    def test_secret_values_are_not_represented(self):
-        capability = GoogleWorkspace(
-            services=('gmail',), oauth_client_id='client', oauth_client_secret='secret', access_token=None
-        )
-        assert 'secret' not in repr(capability)
+    def test_token_value_is_not_represented(self):
+        capability = GoogleWorkspace(services=('gmail',), access_token='secret-token')
+        assert 'secret-token' not in repr(capability)
 
     @pytest.mark.parametrize(
         ('services', 'message'),
@@ -59,34 +56,12 @@ class TestGoogleWorkspace:
         with pytest.raises(UserError, match=message):
             GoogleWorkspace(services=services)  # pyright: ignore[reportArgumentType]
 
-    def test_rejects_conflicting_direct_authentication(self):
-        with pytest.raises(UserError, match='access token or OAuth client credentials'):
-            GoogleWorkspace(services=('gmail',), access_token='token', oauth_client_id='client')
-
-    def test_rejects_conflicting_environment_authentication(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', 'token')
-        monkeypatch.setenv('GOOGLE_OAUTH_CLIENT_ID', 'client')
-        monkeypatch.setenv('GOOGLE_OAUTH_CLIENT_SECRET', 'secret')
-        with pytest.raises(UserError, match='cannot be combined'):
-            Agent(TestModel(), capabilities=[GoogleWorkspace(services=('gmail',))])
-
-    def test_explicit_oauth_ignores_access_token_environment(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', 'token')
-        capability = GoogleWorkspace(
-            services=('gmail',), oauth_client_id='client', oauth_client_secret='secret', oauth_callback_port=4567
-        )
-        with pytest.warns(UserWarning, match='in-memory token storage'):
-            Agent(TestModel(), capabilities=[capability])
-
     def test_explicit_access_token_builds_toolset(self):
         Agent(TestModel(), capabilities=[GoogleWorkspace(services=('gmail',), access_token='token')])
 
-    def test_environment_oauth_builds_toolset(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv('GOOGLE_OAUTH_CLIENT_ID', 'client')
-        monkeypatch.setenv('GOOGLE_OAUTH_CLIENT_SECRET', 'secret')
-        capability = GoogleWorkspace(services=('gmail',), oauth_callback_port=4567)
-        with pytest.warns(UserWarning, match='in-memory token storage'):
-            Agent(TestModel(), capabilities=[capability])
+    def test_environment_access_token_builds_toolset(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', 'token')
+        Agent(TestModel(), capabilities=[GoogleWorkspace(services=('gmail',))])
 
     @pytest.mark.parametrize(
         ('service', 'url'),
@@ -101,7 +76,7 @@ class TestGoogleWorkspace:
             ('people', 'https://people.googleapis.com/mcp/v1'),
         ],
     )
-    def test_oauth_boundary_uses_official_url_and_exact_callback(
+    def test_access_token_boundary_uses_official_url(
         self,
         service: GoogleWorkspaceService,
         url: str,
@@ -109,41 +84,20 @@ class TestGoogleWorkspace:
     ):
         captured: dict[str, object] = {}
 
-        def oauth(**kwargs: object) -> Auth:
-            captured.update(kwargs)
-            return Auth()
+        def mcp_toolset(client: object, *, id: str, auth: str) -> FunctionToolset[object]:
+            captured.update(client=client, id=id, auth=auth)
+            return FunctionToolset()
 
-        monkeypatch.setattr('pydantic_ai_harness.google_workspace._capability.OAuth', oauth)
+        monkeypatch.setattr('pydantic_ai_harness.google_workspace._capability.MCPToolset', mcp_toolset)
         Agent(
             TestModel(),
-            capabilities=[
-                GoogleWorkspace(
-                    services=(service,),
-                    oauth_client_id='client',
-                    oauth_client_secret='secret',
-                    oauth_callback_port=4567,
-                )
-            ],
+            capabilities=[GoogleWorkspace(services=(service,), access_token='token')],
         )
         assert captured == {
-            'mcp_url': url,
-            'client_id': 'client',
-            'client_secret': 'secret',
-            'callback_port': 4567,
-            'callback_host': 'localhost',
+            'client': url,
+            'id': f'google-workspace-{service}',
+            'auth': 'token',
         }
-
-    def test_explicit_client_id_can_use_environment_secret(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', 'ignored-token')
-        monkeypatch.setenv('GOOGLE_OAUTH_CLIENT_SECRET', 'secret')
-        capability = GoogleWorkspace(services=('gmail',), oauth_client_id='client')
-        with pytest.warns(UserWarning, match='in-memory token storage'):
-            Agent(TestModel(), capabilities=[capability])
-
-    @pytest.mark.parametrize('port', [0, 65536])
-    def test_rejects_invalid_callback_port(self, port: int):
-        with pytest.raises(UserError, match='between 1 and 65535'):
-            GoogleWorkspace(oauth_callback_port=port)
 
     def test_rejects_allowlist_for_unselected_service(self):
         with pytest.raises(UserError, match='does not belong to a selected service'):
@@ -154,8 +108,7 @@ class TestGoogleWorkspace:
             GoogleWorkspace(services=('gmail',), clients={'calendar': calendar_server})
 
     def test_missing_authentication_fails_before_a_run(self, monkeypatch: pytest.MonkeyPatch):
-        for name in ('GOOGLE_ACCESS_TOKEN', 'GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET'):
-            monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv('GOOGLE_ACCESS_TOKEN', raising=False)
         with pytest.raises(UserError, match='Google Workspace authentication requires'):
             Agent(TestModel(), capabilities=[GoogleWorkspace(services=('gmail',))])
 

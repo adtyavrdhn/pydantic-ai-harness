@@ -3962,7 +3962,6 @@ exa = [
     { name = "exa-py" },
 ]
 google-workspace = [
-    { name = "fastmcp-slim", extra = ["client"] },
     { name = "pydantic-ai-slim", extra = ["mcp"] },
 ]
 logfire = [
@@ -4031,7 +4030,6 @@ requires-dist = [
     { name = "browser-use", marker = "python_full_version >= '3.11' and extra == 'browser-use'", specifier = ">=0.13.6,<0.14" },
     { name = "exa-py", marker = "extra == 'exa'", specifier = ">=2.16.0" },
     { name = "fastmcp", marker = "extra == 'stackone'", specifier = ">=3.4.5,<4" },
-    { name = "fastmcp-slim", extras = ["client"], marker = "extra == 'google-workspace'", specifier = ">=3.4.5,<4" },
     { name = "genai-prices", specifier = ">=0.0.71" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "idna", marker = "extra == 'playwright'", specifier = ">=3.4" },

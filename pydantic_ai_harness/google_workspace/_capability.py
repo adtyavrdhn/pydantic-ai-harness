@@ -6,13 +6,12 @@ External contract, verified 2026-09-04:
   Streamable HTTP MCP endpoint at the URL recorded in `_MCP_URLS`.
 - The tools recorded in `_READ_ONLY_TOOLS` are the non-mutating subset of the
   catalog Google documents for each endpoint.
-- The servers use OAuth 2.0 and require a pre-registered OAuth client. Local
-  authentication must use the exact `http://localhost:<port>/callback` URI
-  registered for that client.
+- The servers use OAuth 2.0. This capability accepts caller-managed bearer
+  tokens and caller-owned MCP clients.
 
 Sources: https://developers.google.com/workspace/guides/configure-mcp-servers
 and https://docs.cloud.google.com/mcp/configure-mcp-ai-application. Re-check
-the endpoint and tool tables, then the OAuth client instructions.
+the endpoint, tool, and authentication tables before changing this module.
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset
 
 try:
-    from fastmcp.client.auth import OAuth
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -99,17 +97,8 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
     allowed_tools: str | Sequence[str] | None = None
     """Exact prefixed tool name or names to expose, such as `gmail_search_threads`."""
 
-    oauth_client_id: str | None = None
-    """Pre-registered Google OAuth client ID, or `GOOGLE_OAUTH_CLIENT_ID`."""
-
-    oauth_client_secret: str | None = field(default=None, repr=False)
-    """Google OAuth client secret, or `GOOGLE_OAUTH_CLIENT_SECRET`."""
-
-    oauth_callback_port: int = 3000
-    """Local callback port. Register `http://localhost:<port>/callback` exactly."""
-
     access_token: str | None = field(default=None, repr=False)
-    """Existing bearer token, or `GOOGLE_ACCESS_TOKEN` when no OAuth client is configured."""
+    """Caller-managed bearer token, or `GOOGLE_ACCESS_TOKEN`."""
 
     clients: Mapping[GoogleWorkspaceService, MCPToolsetClient | MCPToolset[AgentDepsT]] | None = field(
         default=None, repr=False
@@ -152,11 +141,6 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
             if invalid is not None:
                 raise UserError(f'Allowed tool {invalid!r} does not belong to a selected service.')
 
-        if self.access_token is not None and (self.oauth_client_id is not None or self.oauth_client_secret is not None):
-            raise UserError('Pass an access token or OAuth client credentials, not both.')
-        if not 1 <= self.oauth_callback_port <= 65535:
-            raise UserError('`oauth_callback_port` must be between 1 and 65535.')
-
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build one prefixed MCP toolset per selected Workspace product."""
         toolsets = [self._service_toolset(service).prefixed(service) for service in self.services]
@@ -185,38 +169,17 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
             return MCPToolset(client, id=f'google-workspace-{service}')
 
         url = _MCP_URLS[service]
-        auth = self._direct_auth(url)
+        auth = self._access_token()
         return MCPToolset(url, id=f'google-workspace-{service}', auth=auth)
 
-    def _direct_auth(self, url: str) -> str | OAuth:
-        explicit_oauth = self.oauth_client_id is not None or self.oauth_client_secret is not None
+    def _access_token(self) -> str:
         if self.access_token is not None:
             return self.access_token
-        if explicit_oauth:
-            client_id = self.oauth_client_id or os.environ.get('GOOGLE_OAUTH_CLIENT_ID')
-            client_secret = self.oauth_client_secret or os.environ.get('GOOGLE_OAUTH_CLIENT_SECRET')
-        else:
-            access_token = os.environ.get('GOOGLE_ACCESS_TOKEN')
-            client_id = os.environ.get('GOOGLE_OAUTH_CLIENT_ID')
-            client_secret = os.environ.get('GOOGLE_OAUTH_CLIENT_SECRET')
-            if access_token is not None:
-                if client_id is not None or client_secret is not None:
-                    raise UserError(
-                        '`GOOGLE_ACCESS_TOKEN` cannot be combined with Google OAuth client environment variables.'
-                    )
-                return access_token
-
-        if client_id is None or client_secret is None:
-            raise UserError(
-                'Google Workspace authentication requires `oauth_client_id` and `oauth_client_secret`, '
-                '`GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`, an access token, or a prebuilt client.'
-            )
-        return OAuth(
-            mcp_url=url,
-            client_id=client_id,
-            client_secret=client_secret,
-            callback_port=self.oauth_callback_port,
-            callback_host='localhost',
+        access_token = os.environ.get('GOOGLE_ACCESS_TOKEN')
+        if access_token is not None:
+            return access_token
+        raise UserError(
+            'Google Workspace authentication requires `access_token`, `GOOGLE_ACCESS_TOKEN`, or a prebuilt client.'
         )
 
     @classmethod
@@ -229,8 +192,6 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
         defer_loading: bool = False,
         read_only: bool = True,
         allowed_tools: str | Sequence[str] | None = None,
-        oauth_client_id: str | None = None,
-        oauth_callback_port: int = 3000,
         include_instructions: bool = True,
     ) -> GoogleWorkspace[AgentDepsT]:
         """Construct from serializable options while keeping secrets and clients out of specs."""
@@ -241,8 +202,6 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
             defer_loading=defer_loading,
             read_only=read_only,
             allowed_tools=allowed_tools,
-            oauth_client_id=oauth_client_id,
-            oauth_callback_port=oauth_callback_port,
             include_instructions=include_instructions,
         )
 

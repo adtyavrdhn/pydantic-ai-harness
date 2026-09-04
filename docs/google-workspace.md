@@ -17,10 +17,8 @@ uv add "pydantic-ai-harness[google-workspace]" "pydantic-ai-slim[openai]"
 In Google Cloud:
 
 1. Join the Google Workspace Developer Preview Program, then enable the Workspace API and MCP service for each product you will select.
-2. Configure the OAuth consent screen. For an External audience, add every account that will sign in as a test user.
-3. Under Data Access, add the scopes for each selected product from the table below. Each value starts with `https://www.googleapis.com/auth/`.
-4. Create a Web application OAuth client and register `http://localhost:3000/callback` as an authorized redirect URI. The scheme, host, port, and path must match exactly.
-5. If you select Chat, configure the Google Chat API app and turn off **Enable interactive features**.
+2. If you select Chat, configure the Google Chat API app and turn off **Enable interactive features**.
+3. Use your application's OAuth flow to obtain a bearer token with the scopes for each selected product. Each value below starts with `https://www.googleapis.com/auth/`.
 
 | Product | Scope suffixes |
 |---|---|
@@ -35,15 +33,14 @@ In Google Cloud:
 
 Set these environment variables:
 
-- `GOOGLE_OAUTH_CLIENT_ID`: the pre-registered OAuth client ID.
-- `GOOGLE_OAUTH_CLIENT_SECRET`: the matching OAuth client secret.
+- `GOOGLE_ACCESS_TOKEN`: a caller-managed Google OAuth bearer token.
 - `OPENAI_API_KEY`: the key used by the example model.
 
-The capability handles local OAuth. On the first connection, each selected service may open Google's authorization page in a browser and receive a callback on localhost. Tokens are kept in process memory and are not persisted across restarts. If port 3000 is unavailable, pass `oauth_callback_port=<port>` and register the exact matching `http://localhost:<port>/callback` URI.
+The capability does not open a browser, mint tokens, or refresh tokens. Your application owns OAuth, including its pre-registered client, redirect URI, scope ceiling, storage, and refresh policy.
 
 ## Example
 
-Save this as `workspace_agent.py` after setting the three environment variables above:
+Save this as `workspace_agent.py` after setting the two environment variables above:
 
 ```python
 import asyncio
@@ -75,12 +72,12 @@ Run it with `uv run python workspace_agent.py`.
 
 - Gmail and Calendar are selected by default. Pass `services=('drive', 'docs', 'sheets', 'slides', 'chat', 'people')` to select other products.
 - Tool names are prefixed by service. Use `allowed_tools=('gmail_search_threads', 'calendar_list_events')` for an exact allowlist.
-- `read_only=True` is the default. It filters the exposed tools, but it does not reduce the OAuth scopes configured for Google's remote service. Set `read_only=False` to expose server-provided mutation tools, then use `workspace.get_toolset().approval_required()` when those actions need human approval.
-- `GOOGLE_ACCESS_TOKEN` or `access_token=` accepts a caller-managed bearer token instead of local OAuth.
-- Hosted applications that own persistent or per-user OAuth can pass a caller-owned FastMCP client or `MCPToolset` for each selected service through `clients=`. One client represents one authenticated identity.
+- `read_only=True` is the default. It filters exposed tools, but it does not reduce the bearer token's scopes. Issue the token with the narrowest scopes your application permits. Set `read_only=False` to expose server-provided mutation tools, then use `workspace.get_toolset().approval_required()` when those actions need human approval.
+- Pass a token with `GOOGLE_ACCESS_TOKEN` or `access_token=`. Hosted applications can instead pass a caller-owned MCP client or `MCPToolset` for each selected service through `clients=`. One client represents one authenticated identity.
+- Automatic local OAuth is unavailable because the upstream MCP client currently replaces an explicit scope ceiling during discovery. Track [modelcontextprotocol/python-sdk#2317](https://github.com/modelcontextprotocol/python-sdk/issues/2317).
 - Workspace content can contain instructions aimed at the model. Keep mutation tools narrow and review proposed changes before approval.
 
-Google's [Workspace MCP configuration guide](https://developers.google.com/workspace/guides/configure-mcp-servers) lists the provider setup, scopes, and current tool catalog.
+Google's [Workspace MCP configuration guide](https://developers.google.com/workspace/guides/configure-mcp-servers) lists the provider setup and current tool catalog.
 
 ## API reference
 
