@@ -239,12 +239,16 @@ class TestLinear:
         instructions = _request_instructions(result.all_messages())
         assert 'Linear' in instructions
         assert 'identifiers' in instructions
+        assert 'Before changing Linear data' not in instructions
 
     async def test_read_write_instructions_cover_mutations(self, linear_server: FastMCP):
         result = await Agent(
             TestModel(), capabilities=[Linear(client=linear_server, read_only=False, allowed_tools=['create_issue'])]
         ).run('Create an issue')
         assert 'Before changing Linear data' in _request_instructions(result.all_messages())
+        assert 'search for an existing match when a read tool is available' in _request_instructions(
+            result.all_messages()
+        )
 
     async def test_approval_wrapper_defers_and_resumes_mutation(self, linear_server: FastMCP):
         responses = iter(

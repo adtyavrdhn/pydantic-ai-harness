@@ -12,8 +12,8 @@ uv add "pydantic-ai-harness[linear]" "pydantic-ai-slim[openai]"
 
 ## Set up credentials
 
-For bearer authentication, create a Linear API key under **Settings > Security & access > Personal API keys**, then
-set the Linear and OpenAI credentials:
+For bearer authentication, create a Linear API key under **Settings > Account > Security & Access > Personal API
+keys**, then set the Linear and OpenAI credentials:
 
 ```bash
 export LINEAR_ACCESS_TOKEN="your-linear-api-key"
@@ -22,8 +22,8 @@ export OPENAI_API_KEY="your-openai-api-key"
 
 Give the Linear key the `Read` permission for the default read-only connection. To use interactive OAuth instead, pass
 `auth='oauth'` and omit `LINEAR_ACCESS_TOKEN`. FastMCP handles OAuth and opens a browser for Linear authorization on the
-first run. Its default OAuth token storage is in memory, so applications that need persistence should inject a
-preconfigured FastMCP client with a persistent token store.
+first run. For a headless job, use a bearer token. To reuse OAuth authorization across runs, inject a FastMCP client
+configured with encrypted persistent token storage; FastMCP's default token storage is in memory.
 
 ## Run an agent
 
@@ -55,8 +55,9 @@ print(result.output)
 - `allowed_tools` narrows the exposed tools by exact name. It does not replace endpoint or credential permissions.
 - Mutation tools do not require human approval automatically. Use `linear.get_toolset().approval_required()` when a
   person must approve calls.
-- An injected FastMCP client or `MCPToolset` owns its endpoint and authentication. Do not also pass `auth`, and do not
-  share authenticated clients between users or workspaces.
+- Use a separate Linear capability or preconfigured client for each user or workspace. Reconnecting an OAuth client
+  does not switch workspaces.
+- An injected FastMCP client or `MCPToolset` owns its endpoint and authentication. Do not also pass `auth`.
 - URL clients that receive `auth` directly must use HTTPS.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/linear/)

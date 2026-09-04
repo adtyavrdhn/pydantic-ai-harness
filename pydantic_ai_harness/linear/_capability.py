@@ -39,10 +39,13 @@ LINEAR_READ_ONLY_MCP_URL = 'https://mcp.linear.app/mcp/readonly'
 
 _DEFAULT_DESCRIPTION = 'Use Linear issues, projects, and teams.'
 _READ_INSTRUCTIONS = (
-    'Use the Linear tools for issues, projects, and teams. Prefer specific queries and use returned identifiers '
-    'instead of guessing them.'
+    'Use the Linear tools for issues, projects, and teams. Prefer specific queries. Use identifiers returned by '
+    'Linear or supplied by the user instead of guessing from names.'
 )
-_WRITE_INSTRUCTIONS = ' Before changing Linear data, confirm the target and the requested change.'
+_WRITE_INSTRUCTIONS = (
+    ' Before changing Linear data, verify the requested action and target. Before creating, search for an existing '
+    'match when a read tool is available.'
+)
 
 
 @dataclass
