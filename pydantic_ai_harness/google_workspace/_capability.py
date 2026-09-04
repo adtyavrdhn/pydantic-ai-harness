@@ -32,8 +32,7 @@ try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
-        'MCP support is required for Google Workspace. Install it with: '
-        'uv add pydantic-ai-harness "pydantic-ai-slim[mcp]"'
+        'MCP support is required for Google Workspace. Install it with: uv add "pydantic-ai-harness[google-workspace]"'
     ) from _import_error
 
 GoogleWorkspaceService = Literal['gmail', 'drive', 'docs', 'sheets', 'slides', 'calendar', 'chat', 'people']

@@ -11,7 +11,7 @@ Google Workspace gives an agent selected Gmail, Calendar, Drive, Docs, Sheets, S
 The capability uses Pydantic AI's MCP support. Install it alongside Harness:
 
 ```bash
-uv add pydantic-ai-harness "pydantic-ai-slim[mcp,openai,spec]"
+uv add "pydantic-ai-harness[google-workspace]" "pydantic-ai-slim[openai,spec]"
 ```
 
 Google's servers are in the Workspace Developer Preview Program. Enable the selected Workspace APIs and MCP services in a Google Cloud project before connecting.
