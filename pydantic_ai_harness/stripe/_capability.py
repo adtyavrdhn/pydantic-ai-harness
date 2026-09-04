@@ -1,6 +1,6 @@
 """Stripe hosted MCP capability.
 
-Wire contract, verified 2026-09-04:
+Wire contract, verified 2026-09-05:
 
 - `https://mcp.stripe.com` serves MCP over HTTP and accepts a restricted API key as a bearer token.
 - Restricted keys use `rk_test_` for sandboxes and `rk_live_` for live mode. Objects do not cross modes.
@@ -15,22 +15,25 @@ connected-account section, tool table, and key prefixes before changing this bou
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Literal
-from urllib.parse import urlsplit
+import hashlib
+import hmac
+import json
+from dataclasses import KW_ONLY, dataclass, field
+from typing import Any, Literal
 
-from pydantic import AnyUrl
+import httpx
+from fastmcp.client.transports import StreamableHttpTransport
+from pydantic import TypeAdapter, ValidationError
+from pydantic_ai import ApprovalRequired, RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
-from pydantic_ai.toolsets import AbstractToolset
+from pydantic_ai.toolsets import AbstractToolset, ToolsetTool, WrapperToolset
 
 try:
-    from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
+    from pydantic_ai.mcp import MCPToolset
 except ImportError as _import_error:  # pragma: no cover
-    raise ImportError(
-        'MCP support is required for the Stripe capability. Install it with: uv add "pydantic-ai-slim[mcp]"'
-    ) from _import_error
+    raise ImportError('Install Stripe support with: uv add "pydantic-ai-harness[stripe]"') from _import_error
 
 StripeMode = Literal['sandbox', 'live']
 
@@ -45,6 +48,8 @@ _READ_TOOL_NAMES = frozenset(
     }
 )
 _WRITE_TOOL_NAME = 'stripe_api_write'
+_APPROVAL_BINDING_KEY = 'stripe_scope_binding'
+_APPROVAL_METADATA = TypeAdapter(dict[Literal['stripe_scope_binding'], str])
 _DEFAULT_INSTRUCTIONS = (
     'Use the Stripe tools for account data and Stripe API guidance. This connection is read-only. '
     'Use `stripe_api_search` and `stripe_api_details` before `stripe_api_read` when the API method is unclear.'
@@ -55,18 +60,18 @@ _WRITE_INSTRUCTIONS = (
 )
 
 
-def _validate_https_url(url: str) -> None:
-    parsed = urlsplit(url)
-    if parsed.scheme.lower() != 'https' or parsed.hostname is None:
-        raise UserError('`client` URL values must be absolute HTTPS URLs.')
-
-
 def _validate_api_key(api_key: str, mode: StripeMode) -> None:
     if mode not in ('sandbox', 'live'):
         raise UserError('`mode` must be `sandbox` or `live`.')
     expected_prefix = 'rk_test_' if mode == 'sandbox' else 'rk_live_'
     if not api_key.startswith(('rk_test_', 'rk_live_')):
         raise UserError('Stripe MCP requires a restricted API key beginning with `rk_test_` or `rk_live_`.')
+    if (
+        api_key in ('rk_test_', 'rk_live_')
+        or not api_key.isascii()
+        or not all(character.isalnum() or character == '_' for character in api_key)
+    ):
+        raise UserError('Stripe MCP requires a single-line ASCII restricted API key.')
     if not api_key.startswith(expected_prefix):
         raise UserError(f'The Stripe API key does not match `mode={mode!r}`.')
 
@@ -77,6 +82,53 @@ def _validate_connected_account(connected_account: str | None) -> None:
     suffix = connected_account.removeprefix('acct_')
     if not connected_account.startswith('acct_') or not suffix or not suffix.isascii() or not suffix.isalnum():
         raise UserError('`connected_account` must be a Stripe account ID beginning with `acct_`.')
+
+
+def _stripe_http_client(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+    follow_redirects: bool = False,
+) -> httpx.AsyncClient:
+    return httpx.AsyncClient(headers=headers, timeout=timeout, auth=auth, follow_redirects=False)
+
+
+@dataclass
+class _StripeApprovalToolset(WrapperToolset[AgentDepsT]):
+    api_key: str = field(repr=False)
+    mode: StripeMode
+    connected_account: str | None = field(repr=False)
+
+    def _binding(self, name: str, tool_args: dict[str, Any], tool_call_id: str | None) -> str:
+        payload = json.dumps(
+            [self.mode, self.connected_account, name, tool_call_id, tool_args],
+            sort_keys=True,
+            separators=(',', ':'),
+        ).encode()
+        return hmac.new(self.api_key.encode(), payload, hashlib.sha256).hexdigest()
+
+    async def call_tool(
+        self,
+        name: str,
+        tool_args: dict[str, Any],
+        ctx: RunContext[AgentDepsT],
+        tool: ToolsetTool[AgentDepsT],
+    ) -> Any:
+        if name != _WRITE_TOOL_NAME:
+            return await super().call_tool(name, tool_args, ctx, tool)
+
+        binding = self._binding(name, tool_args, ctx.tool_call_id)
+        if not ctx.tool_call_approved:
+            raise ApprovalRequired({_APPROVAL_BINDING_KEY: binding})
+
+        try:
+            metadata = _APPROVAL_METADATA.validate_python(ctx.tool_call_metadata)
+        except ValidationError:
+            raise UserError('Stripe write approval does not match the current account scope.') from None
+        supplied_binding = metadata.get(_APPROVAL_BINDING_KEY)
+        if supplied_binding is None or not hmac.compare_digest(supplied_binding, binding):
+            raise UserError('Stripe write approval does not match the current account scope.')
+        return await super().call_tool(name, tool_args, ctx, tool)
 
 
 @dataclass
@@ -93,16 +145,14 @@ class Stripe(AbstractCapability[AgentDepsT]):
         connected_account: Optional `acct_...` Connect account applied to every request.
         enable_writes: Expose `stripe_api_write`, with approval required for every call.
         include_instructions: Add concise Stripe tool guidance to the agent.
-        client: Replacement MCP client accepted by `MCPToolset`. URL values receive the configured authentication
-            and connected-account headers. Non-URL clients own their transport, authentication, and account scope.
     """
 
     api_key: str = field(repr=False)
+    _: KW_ONLY
     mode: StripeMode = 'sandbox'
     connected_account: str | None = field(default=None, repr=False)
     enable_writes: bool = False
     include_instructions: bool = True
-    client: MCPToolsetClient | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         _validate_api_key(self.api_key, self.mode)
@@ -116,24 +166,27 @@ class Stripe(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build a filtered Stripe MCP toolset and approval-gate the optional write tool."""
-        resolved: MCPToolsetClient = self.client if self.client is not None else _STRIPE_MCP_URL
-        headers: dict[str, str] | None = None
-        is_url = isinstance(resolved, AnyUrl) or (
-            isinstance(resolved, str) and urlsplit(resolved).scheme.lower() in ('http', 'https')
-        )
-        if is_url:
-            _validate_https_url(str(resolved))
-            headers = {'Authorization': f'Bearer {self.api_key}'}
-            if self.connected_account is not None:
-                headers['Stripe-Account'] = self.connected_account
+        headers = {'Authorization': f'Bearer {self.api_key}'}
+        if self.connected_account is not None:
+            headers['Stripe-Account'] = self.connected_account
 
-        toolset = MCPToolset[AgentDepsT](resolved, id=self.id, headers=headers)
+        transport = StreamableHttpTransport(
+            url=_STRIPE_MCP_URL,
+            headers=headers,
+            httpx_client_factory=_stripe_http_client,
+        )
+        toolset = MCPToolset[AgentDepsT](transport, id=self.id)
         allowed = _READ_TOOL_NAMES
         if self.enable_writes:
             allowed = allowed | frozenset((_WRITE_TOOL_NAME,))
         filtered = toolset.filtered(lambda _ctx, tool_def: tool_def.name in allowed)
         if self.enable_writes:
-            return filtered.approval_required(lambda _ctx, tool_def, _args: tool_def.name == _WRITE_TOOL_NAME)
+            return _StripeApprovalToolset(
+                filtered,
+                api_key=self.api_key,
+                mode=self.mode,
+                connected_account=self.connected_account,
+            )
         return filtered
 
     @classmethod

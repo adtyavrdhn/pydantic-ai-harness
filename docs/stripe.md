@@ -5,29 +5,33 @@ description: Give a Pydantic AI agent read-only Stripe access with explicit, app
 
 # Stripe
 
-Use `Stripe` when an agent needs controlled access to one Stripe platform or connected account through Stripe's
-official hosted MCP server. It is read-only by default, distinguishes sandbox from live credentials, and puts every
-opt-in write through Pydantic AI's tool approval flow.
+`Stripe` lets an agent read one Stripe platform or connected account and request approval for opt-in writes through
+Stripe's hosted MCP server.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/stripe/)
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
-## Installation
-
-Install Harness, Pydantic AI's MCP transport, and your model provider:
+## Install
 
 ```bash
-uv add pydantic-ai-harness "pydantic-ai-slim[mcp,openai]"
+uv add "pydantic-ai-harness[stripe]" "pydantic-ai-slim[openai]"
 ```
 
-Create a [restricted API key](https://docs.stripe.com/keys) with only the permissions the agent needs. Do not use an
-unrestricted `sk_...` key. Supply credentials from a secret store or environment variable.
+## Set up Stripe and your model
 
-## Read from a sandbox
+In the Stripe Dashboard, create a restricted API key with only the read permissions the agent needs. Export that key
+and your model-provider key:
 
-`mode='sandbox'` is the default and accepts only `rk_test_...` keys. The model receives API discovery, documentation,
-account information, and `stripe_api_read`; it does not receive `stripe_api_write`.
+```bash
+export STRIPE_API_KEY='rk_test_...'
+export OPENAI_API_KEY='...'
+```
+
+The capability sends `STRIPE_API_KEY` directly to Stripe as a bearer token. It does not run OAuth or open a browser.
+Do not use an unrestricted `sk_...` key.
+
+## Run an agent
 
 ```python
 import os
@@ -43,69 +47,24 @@ result = agent.run_sync('List the five most recent customers')
 print(result.output)
 ```
 
-The key prefix and `mode` must agree. Live access is deliberate:
+You can ask the agent to:
 
-```python
-import os
+- search for Stripe API methods and inspect their parameters;
+- retrieve account information;
+- read customers, payments, refunds, invoices, subscriptions, and other methods supported by Stripe MCP;
+- search Stripe documentation;
+- request supported API writes when writes are enabled.
 
-from pydantic_ai_harness import Stripe
+## Operational constraints
 
-stripe = Stripe(api_key=os.environ['STRIPE_LIVE_RESTRICTED_KEY'], mode='live')
-```
-
-## Scope a connected account
-
-Set `connected_account` to bind every request to one Connect account with Stripe's `Stripe-Account` header. OAuth does
-not support this flow. Use a restricted platform key with the connected-account permissions required by the agent.
-
-```python
-import os
-
-from pydantic_ai_harness import Stripe
-
-stripe = Stripe(
-    api_key=os.environ['STRIPE_PLATFORM_RESTRICTED_KEY'],
-    connected_account=os.environ['STRIPE_CONNECTED_ACCOUNT_ID'],
-)
-```
-
-Construct a separate `Stripe` instance for each user and account. Do not share one instance across tenants. The API
-key and connected account are omitted from representations and agent instructions, but they remain credentials and
-must stay out of logs and source control.
-
-## Enable approved writes
-
-`enable_writes=True` exposes Stripe's generic `stripe_api_write` tool. Every call requires approval before the MCP
-request runs. The restricted key remains the authorization boundary and should grant only the required write
-permissions.
-
-```python
-import os
-
-from pydantic_ai import Agent, DeferredToolRequests
-from pydantic_ai_harness import Stripe
-
-agent = Agent(
-    'openai:gpt-5.6-sol',
-    capabilities=[
-        Stripe(api_key=os.environ['STRIPE_API_KEY'], enable_writes=True),
-    ],
-    output_type=[str, DeferredToolRequests],
-)
-result = agent.run_sync('Refund payment pi_123')
-
-if isinstance(result.output, DeferredToolRequests):
-    for call in result.output.approvals:
-        print(call.tool_name, call.args)
-```
-
-Resume the run with `DeferredToolResults` after your application approves or denies each request. See Pydantic AI's
-[tool approval documentation](/ai/tools-toolsets/deferred-tools/). Approval prevents the model from acting without
-confirmation. It does not replace authentication and server-side authorization for clients that can submit message
-history.
-
-Stripe can add tools to its hosted server. This capability uses an exact allowlist, so new tools do not become
-available automatically. Re-check the [Stripe MCP tool list](https://docs.stripe.com/mcp) before changing the allowlist.
+- Access is read-only by default. `enable_writes=True` exposes `stripe_api_write`; every call returns a
+  `DeferredToolRequests` approval request before Stripe receives the write. Preserve the request metadata when
+  resuming. Approved results are replayable within the same scope, so persist and consume them atomically.
+- `mode='sandbox'` accepts `rk_test_...` keys. Set `mode='live'` explicitly for an `rk_live_...` key.
+- Set `connected_account='acct_...'` to send every request to one Connect account. Connected-account access requires
+  a restricted platform key with the needed connected-account permissions and does not support OAuth.
+- The capability sends requests only to `https://mcp.stripe.com` and exposes an exact tool allowlist. Stripe labels
+  the MCP server Public preview. Confirm that preview services meet your requirements before using live mode.
 
 ## API reference
 
