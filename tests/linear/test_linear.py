@@ -153,6 +153,12 @@ class TestLinear:
         assert _tool_call_names(result.all_messages()) == {'get_issue'}
         assert 'Fix the build' in result.output
 
+    async def test_agent_lists_issues(self, linear_server: FastMCP):
+        agent = Agent(TestModel(call_tools=['list_issues']), capabilities=[Linear(client=linear_server)])
+        result = await agent.run('List issues')
+        assert _tool_call_names(result.all_messages()) == {'list_issues'}
+        assert 'ENG-123' in result.output
+
     async def test_server_failure_reaches_model_as_retry(self, linear_server: FastMCP):
         def model_fn(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
             retry = next(
