@@ -207,6 +207,15 @@ class TestSupabase:
 
         assert 'future_mutation' not in _tool_names(model)
 
+    async def test_one_agent_cannot_connect_two_projects(self, supabase_server: FastMCP):
+        agent = Agent(
+            TestModel(call_tools=[]),
+            capabilities=[Supabase(project_ref='dev-one'), Supabase(project_ref='dev-two')],
+        )
+
+        with pytest.raises(UserError, match='conflicts with existing tool'):
+            await agent.run('Inspect both projects')
+
     async def test_writes_require_approval(self, supabase_server: FastMCP, calls: list[str]):
         def call_sql(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             if not any(isinstance(part, ToolCallPart) for message in messages for part in message.parts):

@@ -216,7 +216,7 @@ def supabase_server(
         assert isinstance(client, str)
         assert urlsplit(client)._replace(query='').geturl() == 'https://mcp.supabase.com/mcp'
         parameters = parse_qs(urlsplit(client).query)
-        assert parameters['project_ref'] == ['dev-project']
+        assert parameters['project_ref']
         assert parameters['features']
         assert auth == 'oauth'
         connections.append((client, auth))
