@@ -13,7 +13,6 @@ from pydantic_ai.run import AgentRunResult
 from pydantic_ai_harness.channels import (
     ChannelEvent,
     ChannelHost,
-    ConversationStore,
     InMemoryConversationStore,
 )
 
@@ -398,8 +397,3 @@ class TestChannelHost:
         assert len(adapter.replies) == 2
         assert [len(messages) for _, messages in store.saves] == [2, 2]
         assert len(result.all_messages()) == 2
-
-
-def test_conversation_store_protocol_is_runtime_structural() -> None:
-    store: ConversationStore = InMemoryConversationStore()
-    assert store is not None

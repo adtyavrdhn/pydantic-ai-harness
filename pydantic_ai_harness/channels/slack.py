@@ -6,8 +6,12 @@ External assumptions verified 2026-09:
   more than five minutes from local time: https://docs.slack.dev/authentication/verifying-requests-from-slack/
 * `chat.postMessage` replies to a thread when passed its root `thread_ts`:
   https://docs.slack.dev/reference/methods/chat.postmessage
+* `chat.postMessage` reports truncation in `response_metadata.warnings`:
+  https://docs.slack.dev/changelog/2018-truncating-really-long-messages/
+* Slack returns HTTP 429 with a `Retry-After` delay:
+  https://docs.slack.dev/apis/web-api/rate-limits/
 
-Re-check both pages before changing request verification or reply mapping.
+Re-check these pages before changing request verification or reply mapping.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+import anyio
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
@@ -28,6 +33,7 @@ __all__ = ('SlackAPIError', 'SlackChannel', 'SlackError', 'SlackSignatureError',
 _DEFAULT_API_URL = 'https://slack.com/api/chat.postMessage'
 _MAX_REQUEST_AGE_SECONDS = 60 * 5
 _JSON_OBJECT_ADAPTER = TypeAdapter(dict[str, object])
+_STRING_LIST_ADAPTER = TypeAdapter(list[str])
 
 
 class SlackError(Exception):
@@ -39,7 +45,7 @@ class SlackSignatureError(SlackError):
 
 
 class SlackAPIError(SlackError):
-    """Slack rejected an outbound reply."""
+    """An outbound Slack reply failed or was only partially delivered."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +101,7 @@ class SlackChannel:
         event = _mapping(payload.get('event'))
         if event is None:
             raise SlackError("Slack payload field 'event' must be an object")
-        if _string(event, 'type') not in {'app_mention', 'message'}:
+        if _string(event, 'type') != 'app_mention':
             return None
         if 'bot_id' in event or 'subtype' in event:
             return None
@@ -152,6 +158,13 @@ class SlackChannel:
             headers={'Authorization': f'Bearer {self._bot_token}'},
             json=payload,
         )
+        if response.status_code == 429:
+            await anyio.sleep(_retry_after_seconds(response))
+            response = await client.post(
+                _DEFAULT_API_URL,
+                headers={'Authorization': f'Bearer {self._bot_token}'},
+                json=payload,
+            )
         response.raise_for_status()
         try:
             body = _json_object(response.content)
@@ -160,6 +173,31 @@ class SlackChannel:
         if body.get('ok') is not True:
             error = _string(body, 'error') or 'unknown_error'
             raise SlackAPIError(f'Slack chat.postMessage failed: {error}')
+        if 'response_metadata' not in body:
+            return
+        response_metadata = _mapping(body['response_metadata'])
+        if response_metadata is None:
+            raise SlackAPIError('Slack chat.postMessage returned an invalid response')
+        if 'warnings' in response_metadata:
+            try:
+                warnings = _STRING_LIST_ADAPTER.validate_python(response_metadata['warnings'])
+            except ValidationError as exc:
+                raise SlackAPIError('Slack chat.postMessage returned an invalid response') from exc
+            if 'message_truncated' in warnings:
+                raise SlackAPIError('Slack chat.postMessage truncated the reply')
+
+
+def _retry_after_seconds(response: httpx.Response) -> int:
+    value = response.headers.get('Retry-After')
+    if value is None:
+        raise SlackAPIError('Slack rate limit response has no Retry-After delay')
+    try:
+        seconds = int(value)
+    except ValueError as exc:
+        raise SlackAPIError('Slack rate limit response has an invalid Retry-After delay') from exc
+    if seconds < 0:
+        raise SlackAPIError('Slack rate limit response has an invalid Retry-After delay')
+    return seconds
 
 
 def _json_object(raw: bytes) -> dict[str, object]:

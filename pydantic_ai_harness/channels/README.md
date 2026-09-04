@@ -114,18 +114,21 @@ Expose port 8000 through your HTTPS host, invite the bot to a channel, and menti
 
 - `@bot Summarize this update in three bullets.`
 - `@bot Rewrite this announcement for customers.`
-- `@bot List the decisions and open questions in this thread.`
+- `@bot Turn these notes into a checklist.`
 - Follow up in the same thread with `@bot Make it shorter` or `@bot Explain the second point`.
 
 ## Operational notes
 
 - Pass the untouched request bytes to `parse_request()`. Reading and re-encoding JSON first breaks signature verification.
+- Limit request-body size at the HTTPS server or proxy before FastAPI reads it. `parse_request()` verifies supplied bytes but does not own network admission.
 - Slack expects a response within three seconds and retries failed delivery. The example reserves two seconds for its bounded in-process queue and returns 503 when full. Use a durable queue for production.
 - Claim `event_id` before calling `handle()` if duplicate agent turns are unacceptable. The host does not claim, acknowledge, or retry events.
 - The default history store is process-local and loses history on restart. Pass a `ConversationStore` implementation for persistent history.
 - Events are serialized per Slack workspace, channel, and thread inside one `ChannelHost`. Coordinate workers outside the package when several processes share a store.
 - Signature verification authenticates Slack, not the sender. Check `sender_id` and `delivery_id` before enqueueing if only selected users or channels may invoke the agent.
 - The host sends the reply before saving history. A save failure can occur after Slack receives the reply, so do not blindly retry an ambiguous whole handler call.
+- Slack may truncate replies over 40,000 characters. The adapter raises `SlackAPIError` when Slack reports that warning instead of treating a partial reply as success.
+- On the first HTTP 429, the adapter waits for `Retry-After` and retries the same generated reply once. A second 429 propagates; timeouts and 5xx responses are not retried because their delivery outcome can be ambiguous.
 - The caller owns FastAPI, the queue, OAuth, and any injected `httpx.AsyncClient`.
 - While Harness is on 0.x releases, minor releases may change this API. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 

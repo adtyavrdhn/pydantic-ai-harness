@@ -9,8 +9,9 @@ from collections.abc import Mapping
 import anyio
 import httpx
 import pytest
+from pydantic_ai import Agent
 
-from pydantic_ai_harness.channels import ChannelEvent
+from pydantic_ai_harness.channels import ChannelEvent, ChannelHost
 from pydantic_ai_harness.channels.slack import (
     SlackAPIError,
     SlackChannel,
@@ -58,15 +59,15 @@ class TestSlackRequestParsing:
             else:
                 SlackChannel(signing_secret='secret', bot_token='token', team_id='')
 
-    def test_normalizes_root_message_and_thread_reply(self) -> None:
+    def test_normalizes_root_mention_and_thread_reply(self) -> None:
         channel = SlackChannel(signing_secret='signing-secret', bot_token='xoxb-secret', team_id='T123')
         root_body = _body()
         thread_body = _body(
             {
-                'type': 'message',
+                'type': 'app_mention',
                 'channel': 'C123',
                 'user': 'U456',
-                'text': 'follow up',
+                'text': '<@BOT> follow up',
                 'ts': '1700000001.000001',
                 'thread_ts': '1700000000.000001',
             },
@@ -74,10 +75,10 @@ class TestSlackRequestParsing:
         )
         other_root_body = _body(
             {
-                'type': 'message',
+                'type': 'app_mention',
                 'channel': 'C123',
                 'user': 'U789',
-                'text': 'separate root',
+                'text': '<@BOT> separate root',
                 'ts': '1700000099.000001',
             },
             event_id='Ev789',
@@ -98,7 +99,7 @@ class TestSlackRequestParsing:
             event_id='Ev456',
             conversation_id='slack:T123:C123:1700000000.000001',
             sender_id='U456',
-            text='follow up',
+            text='<@BOT> follow up',
             reply_to_id='1700000000.000001',
             delivery_id='C123',
         )
@@ -155,8 +156,9 @@ class TestSlackRequestParsing:
         'event',
         [
             {'type': 'reaction_added'},
-            {'type': 'message', 'bot_id': 'B123'},
-            {'type': 'message', 'subtype': 'message_changed'},
+            {'type': 'message', 'channel': 'C123', 'user': 'U123', 'text': 'hello', 'ts': '1700000000.1'},
+            {'type': 'app_mention', 'bot_id': 'B123'},
+            {'type': 'app_mention', 'subtype': 'message_changed'},
         ],
     )
     def test_ignores_unsupported_and_bot_events(self, event: Mapping[str, object]) -> None:
@@ -193,7 +195,7 @@ class TestSlackRequestParsing:
     def test_rejects_malformed_explicit_thread_timestamp(self, thread_timestamp: object) -> None:
         body = _body(
             {
-                'type': 'message',
+                'type': 'app_mention',
                 'channel': 'C123',
                 'user': 'U123',
                 'text': 'hello',
@@ -212,14 +214,14 @@ class TestSlackRequestParsing:
             (_body(team_id=''), 'team_id'),
             (_body(event_id=''), 'event_id'),
             (
-                _body({'type': 'message', 'channel': '', 'user': 'U123', 'text': 'hello', 'ts': '1700000000.1'}),
+                _body({'type': 'app_mention', 'channel': '', 'user': 'U123', 'text': 'hello', 'ts': '1700000000.1'}),
                 'channel',
             ),
             (
-                _body({'type': 'message', 'channel': 'C123', 'user': '', 'text': 'hello', 'ts': '1700000000.1'}),
+                _body({'type': 'app_mention', 'channel': 'C123', 'user': '', 'text': 'hello', 'ts': '1700000000.1'}),
                 'user',
             ),
-            (_body({'type': 'message', 'channel': 'C123', 'user': 'U123', 'text': 'hello', 'ts': ''}), 'ts'),
+            (_body({'type': 'app_mention', 'channel': 'C123', 'user': 'U123', 'text': 'hello', 'ts': ''}), 'ts'),
         ],
     )
     def test_rejects_empty_identity_fields(self, body: bytes, field: str) -> None:
@@ -299,14 +301,145 @@ class TestSlackReply:
             channel = SlackChannel(signing_secret='secret', bot_token='token', team_id='team', client=client)
             event = ChannelEvent(event_id='e', conversation_id='c', sender_id='u', text='x')
 
-            with pytest.raises(httpx.HTTPStatusError):
+            with pytest.raises(httpx.HTTPStatusError) as unavailable:
                 await channel.reply(event, 'first')
+            assert unavailable.value.response.status_code == 503
             with pytest.raises(SlackAPIError, match='not_in_channel'):
                 await channel.reply(event, 'second')
             with pytest.raises(SlackAPIError, match='invalid response'):
                 await channel.reply(event, 'third')
             with pytest.raises(SlackAPIError, match='unknown_error'):
                 await channel.reply(event, 'fourth')
+
+    async def test_surfaces_truncated_and_malformed_warning_responses(self) -> None:
+        responses = iter(
+            [
+                httpx.Response(200, json={'ok': True, 'response_metadata': {}}),
+                httpx.Response(200, json={'ok': True, 'response_metadata': {'warnings': ['missing_charset']}}),
+                httpx.Response(200, json={'ok': True, 'response_metadata': {'warnings': ['message_truncated']}}),
+                httpx.Response(200, json={'ok': True, 'response_metadata': {'warnings': 'message_truncated'}}),
+                httpx.Response(200, json={'ok': True, 'response_metadata': 'invalid'}),
+            ]
+        )
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return next(responses)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            channel = SlackChannel(signing_secret='secret', bot_token='token', team_id='team', client=client)
+            event = ChannelEvent(event_id='e', conversation_id='c', sender_id='u', text='x')
+
+            await channel.reply(event, 'accepted empty metadata')
+            await channel.reply(event, 'accepted warning')
+            with pytest.raises(SlackAPIError, match='truncated'):
+                await channel.reply(event, 'truncated warning')
+            with pytest.raises(SlackAPIError, match='invalid response'):
+                await channel.reply(event, 'malformed warning')
+            with pytest.raises(SlackAPIError, match='invalid response'):
+                await channel.reply(event, 'malformed metadata')
+
+    @pytest.mark.parametrize('anyio_backend', ['asyncio'])
+    async def test_retries_one_rate_limited_reply_without_rerunning_agent(
+        self, anyio_backend: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[httpx.Request] = []
+        delays: list[float] = []
+        responses = iter([httpx.Response(429, headers={'Retry-After': '7'}), httpx.Response(200, json={'ok': True})])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return next(responses)
+
+        async def record_delay(seconds: float) -> None:
+            delays.append(seconds)
+
+        monkeypatch.setattr(anyio, 'sleep', record_delay)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            channel = SlackChannel(signing_secret='secret', bot_token='token', team_id='team', client=client)
+            event = ChannelEvent(event_id='e', conversation_id='c', sender_id='u', text='x')
+
+            result = await ChannelHost(Agent('test'), channel).handle(event)
+
+        assert anyio_backend == 'asyncio'
+        assert result.usage.requests == 1
+        assert delays == [7]
+        assert len(seen) == 2
+        assert [str(request.url) for request in seen] == ['https://slack.com/api/chat.postMessage'] * 2
+        assert [request.headers['authorization'] for request in seen] == ['Bearer token'] * 2
+        assert seen[0].content == seen[1].content
+
+    async def test_does_not_retry_a_second_rate_limit(self) -> None:
+        responses = iter(
+            [
+                httpx.Response(429, headers={'Retry-After': '0'}),
+                httpx.Response(429, headers={'Retry-After': '3'}),
+            ]
+        )
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return next(responses)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            channel = SlackChannel(signing_secret='secret', bot_token='token', team_id='team', client=client)
+            event = ChannelEvent(event_id='e', conversation_id='c', sender_id='u', text='x')
+
+            with pytest.raises(httpx.HTTPStatusError) as rate_limit:
+                await channel.reply(event, 'reply')
+
+        assert rate_limit.value.response.status_code == 429
+        assert rate_limit.value.response.headers['Retry-After'] == '3'
+
+    @pytest.mark.parametrize('headers', [{}, {'Retry-After': 'invalid'}, {'Retry-After': '-1'}])
+    async def test_rejects_invalid_rate_limit_delay(self, headers: Mapping[str, str]) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, headers=headers)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            channel = SlackChannel(signing_secret='secret', bot_token='token', team_id='team', client=client)
+            event = ChannelEvent(event_id='e', conversation_id='c', sender_id='u', text='x')
+
+            with pytest.raises(SlackAPIError, match='Retry-After'):
+                await channel.reply(event, 'reply')
+
+    async def test_cancellation_during_rate_limit_wait_closes_default_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clients: list[httpx.AsyncClient] = []
+        requests: list[httpx.Request] = []
+        async_client_type = httpx.AsyncClient
+        waiting = anyio.Event()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(429, headers={'Retry-After': '60'})
+
+        def client_factory() -> httpx.AsyncClient:
+            client = async_client_type(transport=httpx.MockTransport(handler))
+            clients.append(client)
+            return client
+
+        async def wait_for_retry(_seconds: float) -> None:
+            waiting.set()
+            await anyio.Event().wait()
+
+        monkeypatch.setattr(httpx, 'AsyncClient', client_factory)
+        monkeypatch.setattr(anyio, 'sleep', wait_for_retry)
+        channel = SlackChannel(signing_secret='secret', bot_token='token', team_id='team')
+        cancel_scope = anyio.CancelScope()
+
+        async def run_reply() -> None:
+            with cancel_scope:
+                await channel.reply(ChannelEvent(event_id='e', conversation_id='c', sender_id='u', text='x'), 'reply')
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(run_reply)
+            await waiting.wait()
+            cancel_scope.cancel()
+
+        assert len(requests) == 1
+        assert len(clients) == 1
+        assert clients[0].is_closed
 
     async def test_closes_short_lived_default_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         clients: list[httpx.AsyncClient] = []
