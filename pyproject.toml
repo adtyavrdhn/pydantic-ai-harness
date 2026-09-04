@@ -152,7 +152,7 @@ lint = [
 # Draft stack dependency on pydantic/pydantic-ai#6492. Before merge, replace this pin and raise
 # the package floor to the first released version containing both durable operations and the
 # sandbox primitives.
-pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "adb0f2dca713ccb236081f02079553392435330a" }
+pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "6dc37345b4c19dc829c2ce059e6f75a487afcc53" }
 
 [tool.hatch.version]
 source = 'uv-dynamic-versioning'
@@ -174,7 +174,7 @@ bump = true
 # An override *replaces* every requirement on the package it names, so it erases the floors slim
 # declares as well as browser-use's pins, and `lowest-direct` resolves `pydantic-ai-slim` to its
 # floor while taking provider SDKs to the newest release the range admits. `anthropic` therefore
-# repeats the floor slim declares: `anthropic>=1` is the HTTPX2 generation, and the
+# repeats the floor slim declares: `anthropic>=1.3` is what slim's Anthropic model imports need, and the
 # `pydantic-ai-slim` floor above is the release built on it, so both halves of that pair resolve
 # together under every resolution mode. Move this floor whenever that one moves.
 #
@@ -182,7 +182,7 @@ bump = true
 # shadows it: uv 0.12.1 reads `override-dependencies` only from the workspace root's `pyproject.toml`.
 # Moved into `uv.toml` it silences the warning and stops applying, and resolution then fails outright
 # on browser-use's exact pins.
-override-dependencies = ['anthropic>=1.0.0', 'openai>=2.45.0']
+override-dependencies = ['anthropic>=1.3.0', 'openai>=2.45.0']
 
 
 [tool.hatch.build.targets.wheel]
