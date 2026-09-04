@@ -1,21 +1,40 @@
 # Supabase
 
-Use `Supabase` to inspect one non-production Supabase development or test project through Supabase's official hosted
-MCP server. The server is Public Alpha. Do not use this integration with production data or expose it to end users.
-
-[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/supabase/)
+`Supabase` lets an agent inspect one Supabase development or test project through Supabase's hosted MCP server.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
-## Installation
-
-Install Harness with its Supabase extra and the model provider you use:
+## Install
 
 ```bash
 uv add "pydantic-ai-harness[supabase]" "pydantic-ai-slim[openai]"
 ```
 
-## Read one development project
+## Set up Supabase
+
+Create or choose a non-production project, then copy its project reference from the Supabase Dashboard project
+settings. Set the project reference and your model provider key:
+
+```bash
+export SUPABASE_PROJECT_REF="your-project-ref"
+export OPENAI_API_KEY="your-openai-api-key"
+```
+
+No Supabase token is needed for local use. Pydantic AI's MCP client uses FastMCP to start Supabase OAuth, which opens
+a browser on the first connection. Sign in and authorize the organization that contains the selected project. OAuth
+tokens are stored in memory and do not persist across process restarts.
+
+For CI, where browser login is unavailable, create a scoped personal access token in Supabase Account Settings >
+Access Tokens. Limit it to this project and the read permissions the selected feature groups need, then set:
+
+```bash
+export SUPABASE_ACCESS_TOKEN="sbp_fc..."
+```
+
+Scoped personal access tokens are Public Alpha and are rolling out gradually. If scoped tokens are unavailable for
+your account, a classic token grants access to every organization and project available to that account.
+
+## Run
 
 ```python
 import os
@@ -26,91 +45,37 @@ from pydantic_ai_harness.supabase import Supabase
 agent = Agent(
     'openai:gpt-5.6-sol',
     capabilities=[
-        Supabase(project_ref=os.environ['SUPABASE_PROJECT_REF']),
+        Supabase(
+            project_ref=os.environ['SUPABASE_PROJECT_REF'],
+            access_token=os.getenv('SUPABASE_ACCESS_TOKEN'),
+        )
     ],
 )
-result = agent.run_sync('List the public tables and check the security advisors')
+result = agent.run_sync('List the public tables and report any security advisor findings')
 print(result.output)
 ```
 
-The default uses browser OAuth and may open a browser on first connection. FastMCP's default OAuth storage is
-in-memory, so the token does not persist across process restarts. For CI, pass a PAT explicitly:
+You can ask the agent to:
 
-```python
-import os
+- list tables, extensions, and migrations;
+- run read-only SQL queries;
+- inspect security and performance advisors or query project logs;
+- get the project URL and publishable keys;
+- generate TypeScript database types; or
+- search Supabase documentation.
 
-from pydantic_ai_harness.supabase import Supabase
+## Operational constraints
 
-Supabase(
-    project_ref=os.environ['SUPABASE_PROJECT_REF'],
-    access_token=os.environ['SUPABASE_ACCESS_TOKEN'],
-)
-```
+- The MCP server is Public Alpha. Use this integration only with development or test data, and do not expose it to
+  end users.
+- `project_ref` is required. Account-wide tools are not exposed.
+- The defaults are `read_only=True` and the `database`, `debugging`, `development`, and `docs` feature groups.
+- You can explicitly select any non-empty combination of those groups plus `functions`, `storage`, and `branching`.
+  The Storage MCP group is disabled by default. Storage configuration updates and Branching require a paid plan;
+  Branching is experimental.
+- `read_only=False` enables mutation tools, but every SQL, schema, data, Edge Function, Storage, or Branching mutation
+  still requires Pydantic AI tool approval. Include `DeferredToolRequests` in the agent output types and approve or
+  deny each request before resuming the run.
+- Treat rows and logs as untrusted content. Review each tool call and keep credential permissions narrow.
 
-The token is excluded from capability and toolset representations. Construct one capability or toolset per user;
-Pydantic AI MCP sessions retain the identity that opened them.
-
-Scoped PATs are Public Alpha and are still rolling out. Prefer a scoped PAT limited to the selected project and the
-read permissions needed by the chosen feature groups. Classic PATs cover every organization and project the account
-can access.
-
-## Defaults and feature groups
-
-`project_ref` is required, so account-wide tools are not exposed. `read_only=True` makes `execute_sql` use Supabase's
-read-only Postgres user and removes other mutation tools. The default `features` are:
-
-```python
-from pydantic_ai_harness.supabase import Supabase
-
-Supabase(
-    project_ref='your-development-project-ref',
-    features=('database', 'debugging', 'development', 'docs'),
-)
-```
-
-You can select any non-empty combination of `database`, `debugging`, `development`, `docs`, `functions`, `storage`,
-and `branching`. The capability sends this exact list to the server and exposes only the currently documented tools
-in those groups. This fail-closed list prevents a new Public Alpha server tool from appearing before Harness has
-classified it.
-
-The Supabase MCP Storage feature group is disabled by default. Updating Storage configuration requires a paid plan.
-Branching is experimental and also requires a paid plan.
-
-## Enable writes and approvals
-
-Writes require `read_only=False`. SQL can change data or schema, so `execute_sql`, `apply_migration`, and every other
-documented mutation tool then require Pydantic AI approval by default:
-
-```python
-from pydantic_ai import Agent, DeferredToolRequests
-from pydantic_ai_harness.supabase import Supabase
-
-agent = Agent(
-    'openai:gpt-5.6-sol',
-    capabilities=[Supabase(project_ref='your-development-project-ref', read_only=False)],
-    output_type=[str, DeferredToolRequests],
-)
-```
-
-Handle `DeferredToolRequests` with Pydantic AI's
-[tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval) flow.
-
-To add a stricter caller policy, compose the returned toolset with the public toolset wrapper:
-
-```python
-from pydantic_ai import Agent
-from pydantic_ai_harness.supabase import Supabase
-
-supabase = Supabase(
-    project_ref='your-development-project-ref',
-    read_only=False,
-)
-tools = supabase.get_toolset().approval_required()
-agent = Agent('openai:gpt-5.6-sol', toolsets=[tools])
-```
-
-This version requires approval for every Supabase tool call. The capability's mutation approval remains in place
-under the caller's stricter wrapper.
-
-See the [Supabase MCP documentation](https://supabase.com/docs/guides/ai-tools/mcp) for current security guidance,
-feature groups, authentication, and plan restrictions.
+[Supabase MCP reference](https://supabase.com/docs/guides/ai-tools/mcp) | [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/supabase/)
