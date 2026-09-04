@@ -245,6 +245,27 @@ class TestGoogleWorkspace:
         result = await Agent(TestModel(), capabilities=[capability]).run('Use Gmail')
         assert tool_call_names(result.all_messages()) == {'gmail_search_threads', 'gmail_create_draft'}
 
+    async def test_selected_write_tools_execute_at_the_network_boundary(
+        self,
+        calendar_server: FastMCP,
+        workspace_server_factory: Callable[[Sequence[str], Sequence[str]], FastMCP],
+    ):
+        docs_server = workspace_server_factory(('read_doc',), ('update_doc',))
+        capability = GoogleWorkspace[object](
+            services=('calendar', 'docs'),
+            clients={'calendar': calendar_server, 'docs': docs_server},
+            read_only=False,
+            allowed_tools=('calendar_create_event', 'docs_update_doc'),
+        )
+        result = await Agent(
+            TestModel(call_tools=['calendar_create_event', 'docs_update_doc']), capabilities=[capability]
+        ).run('Create an event and update a document')
+        assert tool_call_names(result.all_messages()) == {'calendar_create_event', 'docs_update_doc'}
+        returns = [
+            part for message in result.all_messages() for part in message.parts if isinstance(part, ToolReturnPart)
+        ]
+        assert {part.tool_name for part in returns} == {'calendar_create_event', 'docs_update_doc'}
+
     async def test_prebuilt_mcp_toolset_executes(self, gmail_server: FastMCP):
         capability = GoogleWorkspace[object](
             services=('gmail',), clients={'gmail': MCPToolset(gmail_server, id='caller-owned')}
