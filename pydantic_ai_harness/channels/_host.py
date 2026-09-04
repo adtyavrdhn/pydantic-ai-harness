@@ -34,7 +34,7 @@ class ChannelAdapter(Protocol):
 
     async def reply(self, event: ChannelEvent, text: str) -> None:
         """Send `text` in response to `event`."""
-        ...
+        ...  # pragma: no cover - structural protocol
 
 
 class ConversationStore(Protocol):
@@ -42,11 +42,11 @@ class ConversationStore(Protocol):
 
     async def load(self, conversation_id: str) -> Sequence[ModelMessage]:
         """Load the conversation's messages, or an empty sequence for a new conversation."""
-        ...
+        ...  # pragma: no cover - structural protocol
 
     async def save(self, conversation_id: str, messages: Sequence[ModelMessage]) -> None:
         """Replace the conversation's stored messages."""
-        ...
+        ...  # pragma: no cover - structural protocol
 
 
 class InMemoryConversationStore:
