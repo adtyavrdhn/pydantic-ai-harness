@@ -44,8 +44,10 @@ def notion_state() -> NotionState:
     return {
         'calls': [],
         'ai_search_status': 'available',
+        'missing_access_tools': set(),
         'page_content': 'Old launch plan',
         'user_id': 'user-1',
+        'unavailable_tools': set(),
         'workspace_id': 'workspace-1',
     }
 
@@ -62,6 +64,18 @@ def notion_server(notion_state: NotionState) -> FastMCP:
         """Fetch a Notion object or the current connection identity."""
         notion_state['calls'].append(('notion-fetch', {'id': id}))
         if id == 'self':
+            current_tool_access = {
+                'ai_search': {'status': notion_state['ai_search_status']},
+                'create_database': {'status': 'available'},
+                'fetch': {'status': 'available'},
+                'get_users': {'status': 'available'},
+                'query_meeting_notes': {'status': 'available'},
+                'search': {'status': 'available'},
+                'update_page': {'status': 'available'},
+            }
+            current_tool_access.update({name: {'status': 'not_enabled'} for name in notion_state['unavailable_tools']})
+            for name in notion_state['missing_access_tools']:
+                current_tool_access.pop(name, None)
             return {
                 'self': {
                     'workspace': {'id': notion_state['workspace_id'], 'name': 'Acme'},
@@ -71,7 +85,7 @@ def notion_server(notion_state: NotionState) -> FastMCP:
                         'type': 'person',
                         'email': 'ada@example.com',
                     },
-                    'current_tool_access': {'ai_search': {'status': notion_state['ai_search_status']}},
+                    'current_tool_access': current_tool_access,
                 }
             }
         return {
@@ -97,6 +111,11 @@ def notion_server(notion_state: NotionState) -> FastMCP:
     def get_users() -> list[dict[str, str]]:
         """List users."""
         return [{'id': 'user-1', 'name': 'Ada'}]
+
+    @server.tool(name='notion-query-meeting-notes')
+    def query_meeting_notes(query: str) -> list[dict[str, str]]:
+        """Query meeting notes."""
+        return [{'id': 'meeting-1', 'title': query}]
 
     @server.tool(name='notion-update-page')
     def update_page(page_id: str, command: str, new_str: str) -> dict[str, str]:
@@ -200,7 +219,10 @@ def attributed_server_with_meta() -> FastMCP:
             'self': {
                 'workspace': {'id': 'workspace-1', 'name': 'Acme', '_meta': 'workspace-secret'},
                 'user': {'id': 'user-1', 'name': 'Ada', 'type': 'person', '_meta': 'user-secret'},
-                'current_tool_access': {'ai_search': {'status': 'available', '_meta': 'access-secret'}},
+                'current_tool_access': {
+                    'ai_search': {'status': 'available', '_meta': 'access-secret'},
+                    'fetch': {'status': 'available'},
+                },
                 '_meta': 'self-secret',
             },
             '_meta': 'envelope-secret',
@@ -226,7 +248,12 @@ def rotating_identity_server() -> FastMCP:
             'self': {
                 'workspace': {'id': f'workspace-{fetch_count}', 'name': 'Acme'},
                 'user': {'id': 'user-1', 'name': 'Ada', 'type': 'person'},
-                'current_tool_access': {'ai_search': {'status': 'available'}},
+                'current_tool_access': {
+                    'ai_search': {'status': 'available'},
+                    'fetch': {'status': 'available'},
+                    'search': {'status': 'available'},
+                    'update_page': {'status': 'available'},
+                },
             }
         }
 

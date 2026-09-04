@@ -104,6 +104,7 @@ change. A selected mutation is not automatically approved; an approval wrapper m
 """
 
 _MAX_IDENTITY_RESPONSE_CHARS = 16_384
+_AVAILABLE_STATUSES = {'available', 'available_with_limit'}
 
 
 class _IdentityParty(BaseModel):
@@ -173,6 +174,7 @@ class NotionToolset(MCPToolset[AgentDepsT]):
         self._attribution: str | None = None
         self._identity_key: tuple[str, str] | None = None
         self._ai_search_available = False
+        self._available_tool_names: set[str] = set()
         self._notion_session_checked = False
         self._notion_running_count = 0
         super().__init__(client, id=id)
@@ -233,6 +235,12 @@ class NotionToolset(MCPToolset[AgentDepsT]):
             raise UserError('Notion connection identity changed; no workspace tools were exposed.')
         self._identity_key = identity_key
         self._ai_search_available = identity.current_tool_access['ai_search'].status == 'available'
+        self._available_tool_names = {
+            name
+            for name in _READ_TOOL_NAMES | _MUTATION_TOOL_NAMES
+            if (access := identity.current_tool_access.get(name.removeprefix('notion-').replace('-', '_'))) is not None
+            and access.status in _AVAILABLE_STATUSES
+        }
         self._attribution = json.dumps(
             {
                 'workspace': {'id': identity.workspace.id, 'name': identity.workspace.name},
@@ -276,8 +284,7 @@ class NotionToolset(MCPToolset[AgentDepsT]):
         """Return conservative read tools plus explicitly selected mutations."""
         attribution = await self._ensure_attribution()
         selected = set(_READ_TOOL_NAMES) | set(self.mutation_tools)
-        if not self._ai_search_available:
-            selected.discard('notion-ai-search')
+        selected.intersection_update(self._available_tool_names)
         tools = await super().get_tools(ctx)
         return {
             name: replace(
@@ -307,4 +314,8 @@ class NotionToolset(MCPToolset[AgentDepsT]):
         identity = await self._fetch_identity()
         if (identity.workspace.id, identity.user.id) != self._identity_key:
             raise UserError('Notion connection identity changed after tool discovery; tool invocation refused.')
+        access_key = name.removeprefix('notion-').replace('-', '_')
+        access = identity.current_tool_access.get(access_key)
+        if access is None or access.status not in _AVAILABLE_STATUSES:
+            raise UserError(f'Notion tool `{name}` is no longer available for this connection; invocation refused.')
         return await super().call_tool(name, tool_args, ctx, tool)

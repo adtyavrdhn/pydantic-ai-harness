@@ -39,7 +39,13 @@ class TestNotionToolset:
         async with toolset:
             tools = await toolset.get_tools(run_context)
 
-        assert set(tools) == {'notion-ai-search', 'notion-fetch', 'notion-get-users', 'notion-search'}
+        assert set(tools) == {
+            'notion-ai-search',
+            'notion-fetch',
+            'notion-get-users',
+            'notion-query-meeting-notes',
+            'notion-search',
+        }
         assert all((tool.tool_def.metadata or {})['notion'] is True for tool in tools.values())
         assert all((tool.tool_def.metadata or {})['notion_mutation'] is False for tool in tools.values())
         assert all('workspace-1' in (tool.tool_def.metadata or {})['notion_attribution'] for tool in tools.values())
@@ -216,6 +222,52 @@ class TestNotion:
         assert result.output == 'Found with keyword search.'
         assert ('notion-search', {'query': 'launch plan'}) in notion_state['calls']
 
+    async def test_read_tools_with_unavailable_access_status_are_hidden(
+        self, notion_server: FastMCP, notion_state: NotionState
+    ) -> None:
+        notion_state['unavailable_tools'].add('query_meeting_notes')
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            tool_names = {tool.name for tool in info.function_tools}
+            assert 'notion-query-meeting-notes' not in tool_names
+            assert 'notion-search' in tool_names
+            return ModelResponse(parts=[TextPart('done')])
+
+        result = await Agent(FunctionModel(model), capabilities=[Notion(client=notion_server)]).run(
+            'List meeting notes'
+        )
+        assert result.output == 'done'
+
+    async def test_selected_mutation_with_unavailable_access_status_is_hidden(
+        self, notion_server: FastMCP, notion_state: NotionState
+    ) -> None:
+        notion_state['unavailable_tools'].add('update_page')
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            assert 'notion-update-page' not in {tool.name for tool in info.function_tools}
+            return ModelResponse(parts=[TextPart('Unavailable.')])
+
+        result = await Agent(
+            FunctionModel(model),
+            capabilities=[Notion(client=notion_server, mutations='notion-update-page')],
+        ).run('Update a page')
+        assert result.output == 'Unavailable.'
+
+    async def test_selected_mutation_missing_from_access_map_is_hidden(
+        self, notion_server: FastMCP, notion_state: NotionState
+    ) -> None:
+        notion_state['missing_access_tools'].add('update_page')
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            assert 'notion-update-page' not in {tool.name for tool in info.function_tools}
+            return ModelResponse(parts=[TextPart('Missing.')])
+
+        result = await Agent(
+            FunctionModel(model),
+            capabilities=[Notion(client=notion_server, mutations='notion-update-page')],
+        ).run('Update a page')
+        assert result.output == 'Missing.'
+
     async def test_selected_mutation_composes_with_tool_approval(
         self, notion_server: FastMCP, notion_state: NotionState
     ) -> None:
@@ -323,6 +375,29 @@ class TestNotion:
         ):
             await agent.run('Replace the launch plan')
 
+    async def test_mutation_rechecks_access_immediately_before_execution(
+        self, notion_server: FastMCP, notion_state: NotionState
+    ) -> None:
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            notion_state['unavailable_tools'].add('update_page')
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        'notion-update-page',
+                        {'page_id': 'page-1', 'command': 'replace_content', 'new_str': 'Blocked'},
+                        'update-1',
+                    )
+                ]
+            )
+
+        agent = Agent(
+            FunctionModel(model),
+            capabilities=[Notion(client=notion_server, mutations='notion-update-page')],
+        )
+        with pytest.raises(UserError, match='tool `notion-update-page` is no longer available'):
+            await agent.run('Replace the launch plan')
+        assert notion_state['page_content'] == 'Old launch plan'
+
     async def test_read_rechecks_identity_immediately_before_execution(self, rotating_identity_server: FastMCP) -> None:
         def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             return ModelResponse(parts=[ToolCallPart('notion-search', {'query': 'private page'}, 'search-1')])
@@ -344,4 +419,4 @@ class TestNotion:
             FunctionModel(model),
             capabilities=[Notion(client=notion_server, include_instructions=False)],
         ).run('hello')
-        assert all('connection attribution' not in instructions for instructions in seen)
+        assert all('connection identity' not in instructions for instructions in seen)

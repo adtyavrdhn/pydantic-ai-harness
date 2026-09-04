@@ -8,6 +8,8 @@ class NotionState(TypedDict):
 
     calls: list[tuple[str, dict[str, str]]]
     ai_search_status: Literal['available', 'not_enabled']
+    missing_access_tools: set[str]
+    unavailable_tools: set[str]
     page_content: str
     user_id: str
     workspace_id: str
