@@ -93,6 +93,24 @@ class TestSupabase:
         assert 'access_token' not in properties
         assert Supabase.get_serialization_name() == 'Supabase'
 
+    def test_from_spec_preserves_safe_runtime_boundary(self):
+        capability = Supabase.from_spec(
+            'abcdefghijklmnopqrst',
+            id='database',
+            description='Development database',
+            defer_loading=True,
+            read_only=False,
+            features=('docs',),
+        )
+
+        assert capability.project_ref == 'abcdefghijklmnopqrst'
+        assert capability.id == 'database'
+        assert capability.description == 'Development database'
+        assert capability.defer_loading is True
+        assert capability.read_only is False
+        assert capability.features == ('docs',)
+        assert capability.access_token is None
+
     @pytest.mark.parametrize('project_ref', ['', 'has spaces', 'a/b', 'a?b'])
     def test_project_ref_must_be_url_safe(self, project_ref: str):
         with pytest.raises(UserError, match='project_ref'):
