@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from pydantic_ai_harness.coder import DEFAULT_ALLOWED_COMMANDS
+
 _ROOT = Path(__file__).parent.parent
 _PACKAGE = _ROOT / 'pydantic_ai_harness'
 
@@ -120,6 +122,7 @@ _CAPABILITY_DOC_PAGES = _capability_doc_pages()
 # or empty heading, fails instead of passing on a substring match.
 _CAPABILITY_PAGE_META = {
     'advisor.md': ('advisor', 'Advisor'),
+    'aws-lambda.md': ('aws_lambda', 'AWS Lambda Durability'),
     'background-tools.md': ('background_tools', 'Background Tools'),
     'code-mode.md': ('code_mode', 'Code Mode'),
     'coder.md': ('coder', 'Coder'),
@@ -364,7 +367,6 @@ def test_blown_out_example_is_identical_across_surfaces(surface: str) -> None:
 
 
 def test_blown_out_example_matches_coder_defaults() -> None:
-    from pydantic_ai_harness.coder import DEFAULT_ALLOWED_COMMANDS
 
     block = _blown_out_block(_ROOT / _BLOWN_OUT_SURFACES[0])
     listed = re.findall(r"'([a-z]+)'", block.split('allowed_commands = [', 1)[1].split(']', 1)[0])
