@@ -67,6 +67,8 @@ print(result.output)
   important. Use `authorization_token=` only for an Atlassian service-account API key sent as a Bearer token. Personal
   API tokens require Basic authentication on a preconfigured FastMCP client passed with `client=`. JSM tools require
   one of these API-token mechanisms and do not support OAuth 2.1.
+- In a multi-user service, create a separate `Atlassian` capability or `AtlassianToolset` for each user. Do not share an
+  authenticated MCP client between users.
 - Atlassian organization permission groups and the signed-in account's product permissions can further reduce the
   available tools.
 - For two sites on one agent, wrap each `Atlassian` capability in Pydantic AI's `PrefixTools` so their tool names do not
