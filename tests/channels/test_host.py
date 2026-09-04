@@ -99,6 +99,7 @@ class TestChannelHost:
     async def test_uses_a_falsy_conversation_store(self) -> None:
         adapter = _RecordingAdapter()
         store = _FalsyStore()
+        assert not store
         host = ChannelHost(Agent('test'), adapter, store=store)
 
         await host.handle(_event('one'))

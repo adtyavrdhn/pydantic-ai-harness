@@ -360,7 +360,7 @@ class TestSlackReply:
         async def handler(_request: httpx.Request) -> httpx.Response:
             started.set()
             await anyio.Event().wait()
-            return httpx.Response(200, json={'ok': True})
+            return httpx.Response(200, json={'ok': True})  # pragma: no cover - cancellation prevents return
 
         def client_factory() -> httpx.AsyncClient:
             client = async_client_type(transport=httpx.MockTransport(handler))
