@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -28,7 +29,7 @@ def calls() -> list[str]:
 
 
 @pytest.fixture
-def supabase_server(calls: list[str]) -> FastMCP:
+def supabase_server(calls: list[str], monkeypatch: pytest.MonkeyPatch) -> FastMCP:
     from mcp.server.fastmcp.server import FastMCP, Settings  # noqa: PLC0415
 
     Settings.model_rebuild()
@@ -93,5 +94,23 @@ def supabase_server(calls: list[str]) -> FastMCP:
         """Create a database branch."""
         calls.append(f'create_branch:{name}')
         return name
+
+    from pydantic_ai.mcp import MCPToolset, MCPToolsetClient  # noqa: PLC0415
+
+    def local_toolset(
+        client: MCPToolsetClient,
+        *,
+        id: str | None = None,
+        auth: object = None,
+    ) -> MCPToolset[None]:
+        assert isinstance(client, str)
+        assert urlsplit(client)._replace(query='').geturl() == 'https://mcp.supabase.com/mcp'
+        parameters = parse_qs(urlsplit(client).query)
+        assert parameters['project_ref'] == ['dev-project']
+        assert parameters['features']
+        assert auth == 'oauth'
+        return MCPToolset(server, id=id)
+
+    monkeypatch.setattr('pydantic_ai_harness.supabase._capability.MCPToolset', local_toolset)
 
     return server

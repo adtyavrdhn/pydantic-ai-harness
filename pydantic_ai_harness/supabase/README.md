@@ -67,7 +67,8 @@ and `branching`. The capability sends this exact list to the server and exposes 
 in those groups. This fail-closed list prevents a new Public Alpha server tool from appearing before Harness has
 classified it.
 
-Storage is not enabled by Supabase by default. Branching is experimental and requires a paid plan.
+Storage is not enabled by Supabase by default. Updating Storage configuration requires a paid plan. Branching is
+experimental and also requires a paid plan.
 
 ## Enable writes and approvals
 
@@ -88,8 +89,7 @@ agent = Agent(
 Handle `DeferredToolRequests` with Pydantic AI's
 [tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval) flow.
 
-To replace the built-in write approval with a stricter caller policy, disable it explicitly and compose the returned
-toolset with the public toolset wrapper:
+To add a stricter caller policy, compose the returned toolset with the public toolset wrapper:
 
 ```python
 from pydantic_ai import Agent
@@ -98,14 +98,13 @@ from pydantic_ai_harness import Supabase
 supabase = Supabase(
     project_ref='your-development-project-ref',
     read_only=False,
-    require_write_approval=False,
 )
 tools = supabase.get_toolset().approval_required()
 agent = Agent('openai:gpt-5.6-sol', toolsets=[tools])
 ```
 
-This version requires approval for every Supabase tool call. Disabling `require_write_approval` without adding another
-approval policy allows mutation tools to execute immediately.
+This version requires approval for every Supabase tool call. The capability's mutation approval remains in place
+under the caller's stricter wrapper.
 
 See the [Supabase MCP documentation](https://supabase.com/docs/guides/ai-tools/mcp) for current security guidance,
 feature groups, authentication, and plan restrictions.

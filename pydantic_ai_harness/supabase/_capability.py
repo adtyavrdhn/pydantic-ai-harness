@@ -9,8 +9,9 @@ External contract, verified 2026-09-04:
 - The remote server uses browser OAuth by default. CI clients can pass a PAT as
   bearer authentication. Scoped PATs are Public Alpha and may not be enabled
   for every account yet.
-- The MCP server is Public Alpha. Supabase documents it for development and
-  testing, recommends against production data, and marks branching as a paid,
+- The MCP server is Public Alpha. Harness keeps this capability development-only.
+  Supabase's current production guidance requires project scoping, read-only
+  mode, restricted features, and narrowly scoped queries. Branching is a paid,
   experimental feature.
 
 Sources: https://supabase.com/docs/guides/ai-tools/mcp,
@@ -34,7 +35,7 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
 try:
-    from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
+    from pydantic_ai.mcp import MCPToolset
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
         'MCP support is required for the Supabase capability. '
@@ -80,8 +81,8 @@ class Supabase(AbstractCapability[AgentDepsT]):
 
     The default connection is project-scoped, read-only, and limited to four
     explicitly listed feature groups. OAuth is used unless `access_token` is
-    supplied. When `read_only=False`, known and unclassified write-capable tools
-    require Pydantic AI tool approval by default.
+    supplied. When `read_only=False`, write-capable tools require Pydantic AI
+    tool approval.
     """
 
     project_ref: str
@@ -104,12 +105,6 @@ class Supabase(AbstractCapability[AgentDepsT]):
     features: Sequence[SupabaseFeature] = _DEFAULT_FEATURES
     """Enabled project feature groups. Account tools are unavailable in project-scoped mode."""
 
-    require_write_approval: bool = True
-    """Require Pydantic AI approval for write-capable tools when `read_only=False`."""
-
-    client: MCPToolsetClient | None = field(default=None, repr=False)
-    """Replacement MCP client for testing or caller-managed transport and authentication."""
-
     def __post_init__(self) -> None:
         if not _PROJECT_REF_RE.fullmatch(self.project_ref):
             raise UserError('`project_ref` must be a non-empty URL-safe Supabase project ID.')
@@ -125,20 +120,17 @@ class Supabase(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build the filtered Supabase MCP toolset and its write-approval policy."""
-        if self.client is None:
-            toolset = MCPToolset[AgentDepsT](
-                self._url(),
-                id=self.id,
-                auth=self.access_token or 'oauth',
-            )
-        else:
-            toolset = MCPToolset[AgentDepsT](self.client, id=self.id)
+        toolset: MCPToolset[AgentDepsT] = MCPToolset(
+            self._url(),
+            id=self.id,
+            auth=self.access_token or 'oauth',
+        )
 
         allowed_tools: set[str] = {tool_name for feature in self.features for tool_name in _FEATURE_TOOLS[feature]}
         if self.read_only:
             allowed_tools.difference_update(_MUTATING_TOOLS - {'execute_sql'})
         filtered = toolset.filtered(lambda _ctx, tool_def: tool_def.name in allowed_tools)
-        if self.read_only or not self.require_write_approval:
+        if self.read_only:
             return filtered
         return filtered.approval_required(lambda _ctx, tool_def, _args: tool_def.name in _MUTATING_TOOLS)
 
@@ -147,8 +139,8 @@ class Supabase(AbstractCapability[AgentDepsT]):
         posture = (
             'This connection is read-only. Use `execute_sql` only for read queries.'
             if self.read_only
-            else 'This connection permits writes. Prefer `apply_migration` for schema changes and expect approval '
-            'before SQL or other mutations.'
+            else 'This connection permits writes. Prefer `apply_migration` for schema changes. SQL and other '
+            'mutations require approval before execution.'
         )
         return (
             f'Supabase tools target only project `{self.project_ref}`. {posture} '
@@ -171,10 +163,8 @@ class Supabase(AbstractCapability[AgentDepsT]):
         id: str | None = None,
         description: str | None = _DESCRIPTION,
         defer_loading: bool = False,
-        access_token: str | None = None,
         read_only: bool = True,
         features: Sequence[SupabaseFeature] = _DEFAULT_FEATURES,
-        require_write_approval: bool = True,
     ) -> Supabase[AgentDepsT]:
         """Construct from serializable options, excluding the runtime-only `client`."""
         return cls(
@@ -182,10 +172,8 @@ class Supabase(AbstractCapability[AgentDepsT]):
             id=id,
             description=description,
             defer_loading=defer_loading,
-            access_token=access_token,
             read_only=read_only,
             features=features,
-            require_write_approval=require_write_approval,
         )
 
     @classmethod
