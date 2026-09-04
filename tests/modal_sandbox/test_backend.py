@@ -587,28 +587,28 @@ class TestWorkingDir:
 class TestFilesystem:
     async def test_write_then_read_round_trips(self, fake_modal: FakeModal) -> None:
         backend = await started()
-        await backend.fs.write_bytes('/tmp/a.txt', b'body')
-        assert await backend.fs.read_bytes('/tmp/a.txt') == b'body'
+        await backend.write_bytes('/tmp/a.txt', b'body')
+        assert await backend.read_bytes('/tmp/a.txt') == b'body'
 
     async def test_stat_reports_size_for_files(self, fake_modal: FakeModal) -> None:
         backend = await started()
-        await backend.fs.write_bytes('/tmp/a.txt', b'body')
-        entry = await backend.fs.stat('/tmp/a.txt')
+        await backend.write_bytes('/tmp/a.txt', b'body')
+        entry = await backend.stat('/tmp/a.txt')
         assert (entry.name, entry.path, entry.is_dir, entry.size) == ('a.txt', '/tmp/a.txt', False, 4)
 
     async def test_stat_reports_no_size_for_directories(self, fake_modal: FakeModal) -> None:
         # A directory's reported size is a filesystem implementation detail, not a content
         # length, so the protocol carrier reports none.
         backend = await started()
-        await backend.fs.make_dir('/tmp/pkg')
-        entry = await backend.fs.stat('/tmp/pkg')
+        await backend.make_dir('/tmp/pkg')
+        entry = await backend.stat('/tmp/pkg')
         assert (entry.is_dir, entry.size) == (True, None)
 
     async def test_list_dir_returns_absolute_paths(self, fake_modal: FakeModal) -> None:
         fake_modal.sandboxes.clear()
         backend = await started()
         fake_modal.sandboxes[0].listing = [FileInfo('a.py', False, size=7), FileInfo('pkg', True)]
-        entries = await backend.fs.list_dir('/srv')
+        entries = await backend.list_dir('/srv')
         assert [(entry.name, entry.path, entry.is_dir, entry.size) for entry in entries] == [
             ('a.py', '/srv/a.py', False, 7),
             ('pkg', '/srv/pkg', True, None),
@@ -618,22 +618,22 @@ class TestFilesystem:
         # One call covers both halves of the protocol's `remove`: on a file `recursive`
         # changes nothing, and on a directory it is what removes a non-empty one.
         backend = await started()
-        await backend.fs.make_dir('/tmp/pkg')
-        await backend.fs.remove('/tmp/pkg')
+        await backend.make_dir('/tmp/pkg')
+        await backend.remove('/tmp/pkg')
         assert fake_modal.sandboxes[0].removals == [('/tmp/pkg', True)]
 
     async def test_exists(self, fake_modal: FakeModal) -> None:
         backend = await started()
-        await backend.fs.write_bytes('/tmp/a.txt', b'body')
-        assert await backend.fs.exists('/tmp/a.txt') is True
-        assert await backend.fs.exists('/tmp/missing.txt') is False
+        await backend.write_bytes('/tmp/a.txt', b'body')
+        assert await backend.exists('/tmp/a.txt') is True
+        assert await backend.exists('/tmp/missing.txt') is False
 
     async def test_exists_is_false_through_a_non_directory(self, fake_modal: FakeModal) -> None:
         # Modal splits "there is nothing at that path" in two, and a non-leaf path component
         # that is a file is the other half.
         backend = await started()
         fake_modal.sandboxes[0].fs_error = fake_modal.module.exception.SandboxFilesystemNotADirectoryError('nope')
-        assert await backend.fs.exists('/tmp/a.txt/deeper') is False
+        assert await backend.exists('/tmp/a.txt/deeper') is False
 
     @pytest.mark.parametrize('operation', ['read_bytes', 'stat'])
     async def test_a_missing_path_raises_the_builtin_error(self, fake_modal: FakeModal, operation: str) -> None:
@@ -641,20 +641,20 @@ class TestFilesystem:
         # into the builtin `FileNotFoundError` every consumer already handles.
         backend = await started()
         with pytest.raises(FileNotFoundError, match="'/tmp/missing.txt'"):
-            await getattr(backend.fs, operation)('/tmp/missing.txt')
+            await getattr(backend, operation)('/tmp/missing.txt')
 
     async def test_exists_still_reports_other_failures(self, fake_modal: FakeModal) -> None:
         # Only "there is nothing at that path" is an answer; anything else is a failure.
         backend = await started()
         fake_modal.sandboxes[0].fs_error = fake_modal.filesystem_error_type('Permission denied')
         with pytest.raises(ModalSandboxError, match='Permission denied'):
-            await backend.fs.exists('/root/x')
+            await backend.exists('/root/x')
 
     async def test_a_filesystem_error_is_recoverable_while_the_sandbox_runs(self, fake_modal: FakeModal) -> None:
         backend = await started()
         fake_modal.sandboxes[0].fs_error = fake_modal.filesystem_error_type('Permission denied')
         with pytest.raises(ModalSandboxError, match='Permission denied') as exc:
-            await backend.fs.write_bytes('/root/x', b'data')
+            await backend.write_bytes('/root/x', b'data')
         assert isinstance(exc.value, SandboxError)
         assert not isinstance(exc.value, SandboxUnavailableError)
 
@@ -665,17 +665,17 @@ class TestFilesystem:
         fake_modal.sandboxes[0].fs_error = fake_modal.filesystem_error_type('request failed')
         fake_modal.sandboxes[0].poll_result = 0
         with pytest.raises(ModalSandboxUnavailableError):
-            await backend.fs.read_bytes('/x')
+            await backend.read_bytes('/x')
 
     async def test_a_wrapped_auth_failure_is_terminal(self, fake_modal: FakeModal) -> None:
         backend = await started()
         fake_modal.sandboxes[0].fs_error = fake_modal.filesystem_error_type('request failed')
         fake_modal.sandboxes[0].poll_error = fake_modal.auth_type('unauthenticated')
         with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
-            await backend.fs.list_dir('/x')
+            await backend.list_dir('/x')
 
     async def test_a_direct_auth_failure_is_terminal(self, fake_modal: FakeModal) -> None:
         backend = await started()
         fake_modal.sandboxes[0].fs_error = fake_modal.auth_type('unauthenticated')
         with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
-            await backend.fs.make_dir('/x')
+            await backend.make_dir('/x')
