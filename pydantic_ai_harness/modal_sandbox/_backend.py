@@ -24,6 +24,7 @@ stream, or filesystem handling.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import math
 import posixpath
 import time
@@ -37,10 +38,10 @@ from pydantic_ai.sandboxes import (
     FileEntry,
     SandboxBackend,
     SandboxError,
+    SandboxRef,
     SandboxTimeoutError,
     SandboxUnavailableError,
 )
-from typing_extensions import Self
 
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
 
@@ -221,9 +222,8 @@ class _ModalFilesystem:
     def __init__(self, backend: ModalSandboxBackend) -> None:
         self._backend = backend
 
-    @property
-    def _sandbox(self) -> modal.Sandbox:
-        return self._backend.sandbox
+    async def _sandbox(self) -> modal.Sandbox:
+        return await self._backend.sandbox
 
     @asynccontextmanager
     async def _translated(self, path: str) -> AsyncGenerator[None]:
@@ -244,20 +244,20 @@ class _ModalFilesystem:
 
     async def read_bytes(self, path: str) -> bytes:
         async with self._translated(path):
-            return await self._sandbox.filesystem.read_bytes.aio(path)
+            return await (await self._sandbox()).filesystem.read_bytes.aio(path)
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         # Modal takes the data first, creates missing parents, and replaces existing contents.
         async with self._translated(path):
-            await self._sandbox.filesystem.write_bytes.aio(data, path)
+            await (await self._sandbox()).filesystem.write_bytes.aio(data, path)
 
     async def stat(self, path: str) -> FileEntry:
         async with self._translated(path):
-            return _file_entry(await self._sandbox.filesystem.stat.aio(path), path)
+            return _file_entry(await (await self._sandbox()).filesystem.stat.aio(path), path)
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
         async with self._translated(path):
-            entries = await self._sandbox.filesystem.list_files.aio(path)
+            entries = await (await self._sandbox()).filesystem.list_files.aio(path)
         # `name` is the entry's base name, so joining it onto the directory we asked about
         # gives the absolute path the protocol promises.
         return [_file_entry(entry, posixpath.join(path, entry.name)) for entry in entries]
@@ -266,13 +266,13 @@ class _ModalFilesystem:
         # Modal's default `create_parents=True` is `mkdir -p`: missing parents are created and
         # an existing directory is not an error.
         async with self._translated(path):
-            await self._sandbox.filesystem.make_directory.aio(path)
+            await (await self._sandbox()).filesystem.make_directory.aio(path)
 
     async def remove(self, path: str) -> None:
         # `recursive=True` is what lets this remove a non-empty directory; on a file it changes
         # nothing, so one call covers both halves of the protocol's `remove`.
         async with self._translated(path):
-            await self._sandbox.filesystem.remove.aio(path, recursive=True)
+            await (await self._sandbox()).filesystem.remove.aio(path, recursive=True)
 
     async def exists(self, path: str) -> bool:
         import modal
@@ -283,7 +283,7 @@ class _ModalFilesystem:
         # (`/tmp/notes.txt/deeper`). Both are answers here, which is why this calls Modal
         # directly rather than through `stat`, whose translation only knows the first.
         try:
-            await self._sandbox.filesystem.stat.aio(path)
+            await (await self._sandbox()).filesystem.stat.aio(path)
         except (
             modal.exception.SandboxFilesystemNotFoundError,
             modal.exception.SandboxFilesystemNotADirectoryError,
@@ -305,10 +305,16 @@ class ModalSandboxBackend(SandboxBackend):
     """A [Modal](https://modal.com) sandbox as a Pydantic AI [`SandboxBackend`][pydantic_ai.sandboxes.SandboxBackend].
 
     Commands and file operations run inside a Modal container, so the host is never exposed.
-    Build one with [`create`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.create] or
-    attach to an existing environment with
-    [`connect`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.connect]; the
-    `ModalSandbox` capability does both for you.
+
+    Building one does no I/O. It holds settings plus, optionally, the identity of a sandbox that
+    already exists; the first operation creates or attaches, once, and everything after that
+    reuses the same environment. Reach the live `modal.Sandbox` through
+    [`sandbox`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.sandbox], which you can
+    only await — so no operation can run against a sandbox that does not exist yet.
+
+    Nothing here terminates a sandbox on its own. Modal reaps one at the `sandbox_timeout` it
+    was created with; call [`close`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.close]
+    with `terminate=True` to end it sooner.
 
     Commands run as one-shot operations, with complete output returned after they finish.
     Modal enforces `timeout=` itself, so a command is bounded by the deadline applied to its
@@ -320,71 +326,97 @@ class ModalSandboxBackend(SandboxBackend):
     check on this class instead of at a distant `Sandbox.wrap` call.
 
     Args:
-        sandbox: A live `modal.Sandbox`. Whoever created it owns terminating it.
-        working_dir: The sandbox's working directory when it is already known (`create` passes
-            its own `workdir`); otherwise it is discovered with `pwd` on first use.
-        sandbox_timeout: The lifetime an owned sandbox was created with, used to explain an
-            expired sandbox. `None` for a sandbox this process did not create.
+        sandbox: A live `modal.Sandbox` you already have. Whoever created it owns terminating it.
+        ref: Identity of an existing sandbox to attach to on first use.
+        name: Modal name to create-or-attach on first use, unique among running sandboxes in the
+            app. This is what lets several runs share one environment. Ignored when `sandbox` or
+            `ref` is given.
+        image: Registry tag a newly created sandbox runs.
+        app_name: Modal app a newly created sandbox belongs to.
+        create_app_if_missing: Create the Modal app when it does not exist yet.
+        sandbox_timeout: How long Modal keeps a newly created sandbox alive, in seconds.
+        workdir: Absolute directory commands start in; Modal's default when `None`.
+        env: Environment variables set for the whole sandbox at creation.
     """
-
-    sandbox: modal.Sandbox
-    """The underlying `modal.Sandbox`, for provider-specific functionality."""
 
     def __init__(
         self,
-        sandbox: modal.Sandbox,
+        sandbox: modal.Sandbox | None = None,
         *,
-        working_dir: str | None = None,
-        sandbox_timeout: int | None = None,
-    ) -> None:
-        working_dir = absolute_path('working_dir', working_dir)
-        self.sandbox = sandbox
-        self.fs = _ModalFilesystem(self)
-        self._working_dir = working_dir
-        self._sandbox_timeout = sandbox_timeout
-
-    @property
-    def sandbox_id(self) -> str:
-        return self.sandbox.object_id
-
-    @classmethod
-    async def create(
-        cls,
-        *,
+        ref: SandboxRef | None = None,
+        name: str | None = None,
         image: str = DEFAULT_IMAGE,
         app_name: str = DEFAULT_APP_NAME,
         create_app_if_missing: bool = True,
         sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
         workdir: str | None = None,
         env: Mapping[str, str] | None = None,
-        name: str | None = None,
-    ) -> Self:
-        """Provision a fresh Modal sandbox. The caller owns terminating it with `close`.
+    ) -> None:
+        self._live = sandbox
+        self._ref = ref if sandbox is None else SandboxRef(sandbox_id=sandbox.object_id)
+        self._name = name
+        self._image = image
+        self._app_name = app_name
+        self._create_app_if_missing = create_app_if_missing
+        self._sandbox_timeout = sandbox_timeout
+        self._workdir = absolute_path('workdir', workdir)
+        self._env = dict(env) if env is not None else None
+        # Known up front only when this backend will create the sandbox with an explicit
+        # `workdir`; otherwise it is the image's, discovered with `pwd` on first use.
+        self._working_dir = self._workdir if (sandbox is None and ref is None) else None
+        # Set once the sandbox exists, so an expiry message can say which lifetime ran out.
+        self._created_timeout: int | None = None
+        self._lock = anyio.Lock()
+        self.fs = _ModalFilesystem(self)
 
-        Args:
-            image: Registry tag the sandbox runs (e.g. `python:3.12-slim`).
-            app_name: Modal app the sandbox is created under.
-            create_app_if_missing: Create the Modal app when it does not exist yet.
-            sandbox_timeout: How long Modal keeps the sandbox alive, in seconds.
-            workdir: Absolute directory commands start in; Modal's default when `None`.
-            env: Environment variables set for the whole sandbox.
-            name: Optional Modal name, unique among running sandboxes in the app.
+    @property
+    def sandbox(self) -> Awaitable[modal.Sandbox]:
+        """The live `modal.Sandbox`, created or attached on first use.
+
+        Awaitable and never a plain value: every operation has to go through the step that
+        makes the sandbox exist, so none of them can skip it.
         """
-        try:
-            import modal
-        except ImportError as e:
-            raise ModalSandboxError(_MISSING_MODAL) from e
+        return self._resolve()
 
-        workdir = absolute_path('workdir', workdir)
+    async def _resolve(self) -> modal.Sandbox:
+        async with self._lock:
+            if self._live is None:
+                try:
+                    # Guarded once, here: everything that touches Modal runs after this.
+                    importlib.import_module('modal')
+                except ImportError as e:
+                    raise ModalSandboxError(_MISSING_MODAL) from e
+                if self._ref is not None:
+                    self._live = await self._attach(self._ref.sandbox_id)
+                elif self._name is not None:
+                    self._live = await self._create_or_attach_by_name(self._name)
+                else:
+                    self._live = await self._create()
+                self._ref = SandboxRef(sandbox_id=self._live.object_id)
+        return self._live
+
+    @property
+    def ref(self) -> SandboxRef | None:
+        """Identity of the sandbox, or `None` before one has been created."""
+        return self._ref
+
+    async def _create(self, name: str | None = None) -> modal.Sandbox:
+        """Provision a fresh Modal sandbox."""
+        import modal
 
         try:
             # Cancellation during create can orphan a sandbox until `sandbox_timeout` reaps it.
             with anyio.fail_after(_CREATE_TIMEOUT):
-                app = await modal.App.lookup.aio(app_name, create_if_missing=create_app_if_missing)
-                built = modal.Image.from_registry(image)  # pyright: ignore[reportUnknownMemberType]
-                variables: dict[str, str | None] | None = dict(env) if env is not None else None
+                app = await modal.App.lookup.aio(self._app_name, create_if_missing=self._create_app_if_missing)
+                built = modal.Image.from_registry(self._image)  # pyright: ignore[reportUnknownMemberType]
+                variables: dict[str, str | None] | None = dict(self._env) if self._env is not None else None
                 sandbox = await modal.Sandbox.create.aio(  # pyright: ignore[reportUnknownMemberType]
-                    app=app, image=built, timeout=sandbox_timeout, workdir=workdir, env=variables, name=name
+                    app=app,
+                    image=built,
+                    timeout=self._sandbox_timeout,
+                    workdir=self._workdir,
+                    env=variables,
+                    name=name,
                 )
         except TimeoutError as error:
             raise ModalSandboxError(
@@ -397,54 +429,34 @@ class ModalSandboxBackend(SandboxBackend):
             raise ModalSandboxAuthError(_AUTH_MESSAGE) from error
         except modal.exception.Error as error:
             raise ModalSandboxError(f'Could not start Modal sandbox: {error}') from error
-        return cls(sandbox, working_dir=workdir, sandbox_timeout=sandbox_timeout)
+        self._created_timeout = self._sandbox_timeout
+        return sandbox
 
-    @classmethod
-    async def create_or_connect(
-        cls,
-        *,
-        name: str,
-        image: str = DEFAULT_IMAGE,
-        app_name: str = DEFAULT_APP_NAME,
-        create_app_if_missing: bool = True,
-        sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
-        workdir: str | None = None,
-        env: Mapping[str, str] | None = None,
-    ) -> Self:
-        """Connect to the running named sandbox, or create it once.
+    async def _create_or_attach_by_name(self, name: str) -> modal.Sandbox:
+        """Attach to the running named sandbox, or create it once.
 
-        A concurrent retry may win the create race. In that case, reconnect by
-        name rather than provisioning another environment.
+        A concurrent retry may win the create race. In that case, attach by name rather than
+        provisioning another environment.
         """
         try:
-            return await cls.connect_name(app_name, name)
+            return await self._attach_by_name(name)
         except ModalSandboxUnavailableError:
             pass
         try:
-            return await cls.create(
-                image=image,
-                app_name=app_name,
-                create_app_if_missing=create_app_if_missing,
-                sandbox_timeout=sandbox_timeout,
-                workdir=workdir,
-                env=env,
-                name=name,
-            )
+            return await self._create(name)
         except _ModalSandboxAlreadyExists:
             pass
-        return await cls.connect_name(app_name, name)
+        return await self._attach_by_name(name)
 
-    @classmethod
-    async def connect(cls, sandbox_id: str) -> Self:
-        """Attach to a Modal sandbox that already exists, without taking over its lifecycle.
+    async def _attach(self, sandbox_id: str) -> modal.Sandbox:
+        """Attach to a Modal sandbox that already exists.
 
         Modal hands back a handle for a sandbox it still knows about even after that sandbox
         has terminated, so this polls: a `SandboxRef` must not resolve to a dead environment.
+        Nothing is recreated in its place — a run that expected files there must be told they
+        are gone, not handed an empty workspace.
         """
-        try:
-            import modal
-        except ImportError as e:
-            raise ModalSandboxError(_MISSING_MODAL) from e
+        import modal
 
         try:
             sandbox = await modal.Sandbox.from_id.aio(sandbox_id)
@@ -452,36 +464,43 @@ class ModalSandboxBackend(SandboxBackend):
         except modal.exception.AuthError as e:
             raise ModalSandboxAuthError(_AUTH_MESSAGE) from e
         except _unavailable_sandbox_exc_types() as e:
-            raise ModalSandboxUnavailableError(_attached_gone_message(sandbox_id)) from e
+            raise ModalSandboxUnavailableError(_attached_gone_message(repr(sandbox_id))) from e
         except modal.exception.Error as e:
             raise ModalSandboxError(f'Could not connect to Modal sandbox {sandbox_id!r}: {e}') from e
         if finished is not None:
-            raise ModalSandboxUnavailableError(_attached_gone_message(sandbox_id))
-        return cls(sandbox)
+            raise ModalSandboxUnavailableError(_attached_gone_message(repr(sandbox_id)))
+        return sandbox
 
-    @classmethod
-    async def connect_name(cls, app_name: str, name: str) -> Self:
-        """Connect to a running named sandbox without creating one."""
+    async def _attach_by_name(self, name: str) -> modal.Sandbox:
+        """Attach to a running named sandbox without creating one."""
+        import modal
+
         try:
-            import modal
-        except ImportError as error:
-            raise ModalSandboxError(_MISSING_MODAL) from error
-        try:
-            sandbox = await modal.Sandbox.from_name.aio(app_name, name)
+            sandbox = await modal.Sandbox.from_name.aio(self._app_name, name)
             finished = await sandbox.poll.aio()
         except modal.exception.AuthError as error:
             raise ModalSandboxAuthError(_AUTH_MESSAGE) from error
         except _unavailable_sandbox_exc_types() as error:
             raise ModalSandboxUnavailableError(
-                f'Modal sandbox named {name!r} in app {app_name!r} is not running.'
+                f'No running Modal sandbox named {name!r} in app {self._app_name!r}.'
             ) from error
         except modal.exception.Error as error:
             raise ModalSandboxError(
-                f'Could not connect to Modal sandbox named {name!r} in app {app_name!r}: {error}'
+                f'Could not connect to Modal sandbox named {name!r} in app {self._app_name!r}: {error}'
             ) from error
         if finished is not None:
-            raise ModalSandboxUnavailableError(f'Modal sandbox named {name!r} in app {app_name!r} is not running.')
-        return cls(sandbox)
+            raise ModalSandboxUnavailableError(
+                f'Modal sandbox named {name!r} in app {self._app_name!r} is not running.'
+            )
+        return sandbox
+
+    def _describe(self) -> str:
+        """How to name this sandbox in an error, before or after it exists."""
+        if self._ref is not None:
+            return repr(self._ref.sandbox_id)
+        if self._name is not None:
+            return f'named {self._name!r}'
+        return 'that was never started'
 
     async def close(self, *, terminate: bool) -> None:
         """Release this handle, terminating the sandbox with it when we own its lifetime.
@@ -491,11 +510,17 @@ class ModalSandboxBackend(SandboxBackend):
         """
         import modal
 
+        sandbox = self._live
+        if sandbox is None:
+            # Never used, so there is nothing to terminate and nothing to detach from.
+            # Resolving one here just to close it would create the very sandbox being released.
+            return
+
         async def terminate_call() -> object:
-            return await self.sandbox.terminate.aio(wait=True)
+            return await sandbox.terminate.aio(wait=True)
 
         async def detach_call() -> object:
-            return await self.sandbox.detach.aio()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            return await sandbox.detach.aio()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
         calls: list[tuple[str, Callable[[], Awaitable[object]]]] = []
         if terminate:
@@ -511,10 +536,10 @@ class ModalSandboxBackend(SandboxBackend):
             elif isinstance(error, TimeoutError):
                 translated = ModalSandboxError(
                     f'Timed out after {_TEARDOWN_TIMEOUT}s while trying to {operation} '
-                    f'Modal sandbox {self.sandbox_id!r}.'
+                    f'Modal sandbox {self._describe()}.'
                 )
             else:
-                translated = ModalSandboxError(f'Could not {operation} Modal sandbox {self.sandbox_id!r}: {error}')
+                translated = ModalSandboxError(f'Could not {operation} Modal sandbox {self._describe()}: {error}')
             if first_error is None:
                 first_error = translated
         if first_error is not None:
@@ -534,7 +559,7 @@ class ModalSandboxBackend(SandboxBackend):
             # one, mis-resolving relative paths with no error.
             if result.exit_code != 0 or not posixpath.isabs(printed):
                 raise ModalSandboxError(
-                    f'Could not determine the working directory of Modal sandbox {self.sandbox_id!r}: '
+                    f'Could not determine the working directory of Modal sandbox {self._describe()}: '
                     f'`pwd` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
                 )
             self._working_dir = printed
@@ -585,17 +610,18 @@ class ModalSandboxBackend(SandboxBackend):
         try:
             # Modal's text mode decodes strictly, so read bytes and decode with replacement:
             # a command printing invalid UTF-8 must not abort the run.
-            process = await self.sandbox.exec.aio(*argv, timeout=deadline, workdir=cwd, env=variables, text=False)
+            sandbox = await self.sandbox
+            process = await sandbox.exec.aio(*argv, timeout=deadline, workdir=cwd, env=variables, text=False)
         except modal.exception.Error as e:
             raise await self.operation_error(e, 'Command could not run in the sandbox') from e
         return _ModalProcess(process, backend=self, deadline=deadline, started_at=started_at)
 
     def _unavailable_message(self) -> str:
-        if self._sandbox_timeout is None:
-            return _attached_gone_message(self.sandbox_id)
+        if self._created_timeout is None:
+            return _attached_gone_message(self._describe())
         return (
             'The Modal sandbox is no longer running (it may have reached its '
-            f'sandbox_timeout of {self._sandbox_timeout}s, or been terminated). '
+            f'sandbox_timeout of {self._created_timeout}s, or been terminated). '
             'Start a new run, or raise sandbox_timeout for longer work.'
         )
 
@@ -626,7 +652,8 @@ class ModalSandboxBackend(SandboxBackend):
         import modal
 
         try:
-            finished = await self.sandbox.poll.aio()
+            sandbox = await self.sandbox
+            finished = await sandbox.poll.aio()
         except modal.exception.AuthError:
             return ModalSandboxAuthError(_AUTH_MESSAGE)
         except _unavailable_sandbox_exc_types():
@@ -640,9 +667,9 @@ class ModalSandboxBackend(SandboxBackend):
         return ModalSandboxError(str(e))
 
 
-def _attached_gone_message(sandbox_id: str) -> str:
+def _attached_gone_message(described: str) -> str:
     return (
-        f'The Modal sandbox {sandbox_id!r} is no longer running '
+        f'The Modal sandbox {described} is no longer running '
         '(it does not exist, was terminated, or expired at its configured lifetime). '
         'Attach to a live sandbox, or create a new one.'
     )
@@ -652,8 +679,7 @@ if TYPE_CHECKING:
     # Pins full structural conformance -- signatures included -- which `isinstance` cannot
     # check. `__new__` rather than a call, because neither SDK object can be constructed
     # without a live sandbox behind it; this block never runs.
-    _sandbox = modal.Sandbox.__new__(modal.Sandbox)
-    _backend = ModalSandboxBackend(_sandbox)
+    _backend = ModalSandboxBackend()
     _backend_conforms: SandboxBackend = _backend
     _filesystem_backend_conforms: SupportsFilesystem = _backend
     _filesystem_conforms: SandboxFilesystem = _backend.fs

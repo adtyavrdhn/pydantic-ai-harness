@@ -16,13 +16,12 @@ from pydantic_ai_harness.modal_sandbox._backend import (
     DEFAULT_IMAGE,
     DEFAULT_SANDBOX_TIMEOUT,
     ModalSandboxBackend,
-    ModalSandboxUnavailableError,
 )
 
 
-def _sandbox_name(run_id: str) -> str:
-    """Return a Modal-safe, deterministic name for one logical run."""
-    digest = hashlib.sha256(run_id.encode()).hexdigest()[:32]
+def _sandbox_name(identity: str) -> str:
+    """Return a Modal-safe, deterministic name for one conversation."""
+    digest = hashlib.sha256(identity.encode()).hexdigest()[:32]
     return f'pydantic-ai-{digest}'
 
 
@@ -30,10 +29,16 @@ def _sandbox_name(run_id: str) -> str:
 class ModalSandbox(AbstractCapability[AgentDepsT]):
     """Supply an isolated [Modal](https://modal.com) sandbox through `ctx.sandbox`.
 
-    By default, one named sandbox is created or reused for each logical run and
-    terminated when that run ends. The deterministic name makes acquisition safe
-    to retry across durable workers. Set `sandbox_id` to attach to an existing
-    sandbox without taking ownership of its lifetime.
+    One named sandbox is created or reused per conversation, so a follow-up run continues in
+    the workspace the previous one left behind. The name is derived from the conversation, which
+    also makes creation safe to retry across durable workers: a retry attaches to the sandbox the
+    first attempt made rather than provisioning a second one.
+
+    Nothing here terminates a sandbox. A conversation can span many runs, so the end of a run is
+    not the end of the workspace; Modal reaps an idle sandbox at `sandbox_timeout`. Raise that
+    for longer work, or terminate one yourself through `result.sandbox`.
+
+    Set `sandbox_id` to attach to an existing sandbox instead.
 
     This capability supplies execution only. Compose it with tools or capabilities
     that consume [`RunContext.sandbox`][pydantic_ai.tools.RunContext.sandbox].
@@ -86,14 +91,15 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
                 'attaches to an existing one. Remove them, or drop `sandbox_id` to create a sandbox.'
             )
 
-    async def acquire_sandbox(self, ctx: RunContext[AgentDepsT]) -> SandboxRef:
-        """Create or reuse the sandbox for this logical run."""
+    def get_sandbox(self, ctx: RunContext[AgentDepsT], *, ref: SandboxRef | None) -> SandboxBackend:
+        """Build the backend for this run. No I/O here: it attaches or creates on first use."""
+        if ref is not None:
+            # An environment the run was pointed at explicitly, or one an earlier run left behind.
+            return ModalSandboxBackend(ref=ref)
         if self.sandbox_id is not None:
-            return SandboxRef(sandbox_id=self.sandbox_id)
-        if ctx.run_id is None:  # pragma: no cover - core assigns it before acquisition
-            raise RuntimeError('Modal sandbox acquisition requires a run ID.')
-        backend = await ModalSandboxBackend.create_or_connect(
-            name=_sandbox_name(ctx.run_id),
+            return ModalSandboxBackend(ref=SandboxRef(sandbox_id=self.sandbox_id))
+        return ModalSandboxBackend(
+            name=_sandbox_name(ctx.conversation_id or ctx.run_id or ''),
             image=self.image,
             app_name=self.app_name,
             create_app_if_missing=self.create_app_if_missing,
@@ -101,20 +107,3 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
             workdir=self.workdir,
             env=self.env,
         )
-        ref = SandboxRef(sandbox_id=backend.sandbox_id)
-        await backend.close(terminate=False)
-        return ref
-
-    async def get_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> SandboxBackend | None:
-        """Reconnect to a referenced Modal sandbox without provisioning one."""
-        return await ModalSandboxBackend.connect(ref.sandbox_id)
-
-    async def release_sandbox(self, ctx: RunContext[AgentDepsT], ref: SandboxRef) -> None:
-        """Terminate an owned sandbox; leave an attached sandbox to its owner."""
-        if self.sandbox_id is not None:
-            return
-        try:
-            backend = await ModalSandboxBackend.connect(ref.sandbox_id)
-        except ModalSandboxUnavailableError:
-            return
-        await backend.close(terminate=True)

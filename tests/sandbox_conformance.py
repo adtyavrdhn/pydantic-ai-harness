@@ -25,7 +25,7 @@ async def check_command_validation(factory: BackendFactory) -> None:
 async def check_missing_file(factory: BackendFactory) -> None:
     sandbox = Sandbox(await factory())
     with pytest.raises(FileNotFoundError):
-        await sandbox.fs.read_bytes('/missing')
+        await sandbox.read_bytes('/missing')
 
 
 async def check_timeout(factory: BackendFactory) -> None:
