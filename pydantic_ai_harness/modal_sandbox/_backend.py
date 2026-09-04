@@ -49,11 +49,7 @@ if TYPE_CHECKING:
     import modal
     import modal.container_process
     import modal.io_streams
-    from pydantic_ai.sandboxes import (
-        SandboxCommand,
-        SandboxFilesystem,
-        SupportsFilesystem,
-    )
+    from pydantic_ai.sandboxes import SandboxCommand, SupportsFilesystem
 
 __all__ = (
     'ModalSandboxAuthError',
@@ -216,84 +212,6 @@ class _ModalProcess:
         return exit_code == _SIGKILL_EXIT and elapsed >= self._deadline
 
 
-class _ModalFilesystem:
-    """Modal's sandbox filesystem API behind the `SandboxFilesystem` protocol."""
-
-    def __init__(self, backend: ModalSandboxBackend) -> None:
-        self._backend = backend
-
-    async def _sandbox(self) -> modal.Sandbox:
-        return await self._backend.sandbox
-
-    @asynccontextmanager
-    async def _translated(self, path: str) -> AsyncGenerator[None]:
-        """Map Modal's filesystem exceptions onto the ones the protocol promises.
-
-        A missing path is the builtin `FileNotFoundError` every backend raises. Everything
-        else may be masking a dead sandbox or rejected credentials, so it goes through the
-        poll-based classification.
-        """
-        import modal
-
-        try:
-            yield
-        except modal.exception.SandboxFilesystemNotFoundError as e:
-            raise FileNotFoundError(f'No such file or directory in the Modal sandbox: {path!r}') from e
-        except modal.exception.Error as e:
-            raise await self._backend.operation_error(e, f'Could not access {path!r} in the sandbox') from e
-
-    async def read_bytes(self, path: str) -> bytes:
-        async with self._translated(path):
-            return await (await self._sandbox()).filesystem.read_bytes.aio(path)
-
-    async def write_bytes(self, path: str, data: bytes) -> None:
-        # Modal takes the data first, creates missing parents, and replaces existing contents.
-        async with self._translated(path):
-            await (await self._sandbox()).filesystem.write_bytes.aio(data, path)
-
-    async def stat(self, path: str) -> FileEntry:
-        async with self._translated(path):
-            return _file_entry(await (await self._sandbox()).filesystem.stat.aio(path), path)
-
-    async def list_dir(self, path: str) -> Sequence[FileEntry]:
-        async with self._translated(path):
-            entries = await (await self._sandbox()).filesystem.list_files.aio(path)
-        # `name` is the entry's base name, so joining it onto the directory we asked about
-        # gives the absolute path the protocol promises.
-        return [_file_entry(entry, posixpath.join(path, entry.name)) for entry in entries]
-
-    async def make_dir(self, path: str) -> None:
-        # Modal's default `create_parents=True` is `mkdir -p`: missing parents are created and
-        # an existing directory is not an error.
-        async with self._translated(path):
-            await (await self._sandbox()).filesystem.make_directory.aio(path)
-
-    async def remove(self, path: str) -> None:
-        # `recursive=True` is what lets this remove a non-empty directory; on a file it changes
-        # nothing, so one call covers both halves of the protocol's `remove`.
-        async with self._translated(path):
-            await (await self._sandbox()).filesystem.remove.aio(path, recursive=True)
-
-    async def exists(self, path: str) -> bool:
-        import modal
-
-        # Modal has no existence check of its own, and `stat` is the cheapest question that
-        # answers one. Modal splits "there is nothing at that path" in two: a missing
-        # component, and a non-leaf component that is a file rather than a directory
-        # (`/tmp/notes.txt/deeper`). Both are answers here, which is why this calls Modal
-        # directly rather than through `stat`, whose translation only knows the first.
-        try:
-            await (await self._sandbox()).filesystem.stat.aio(path)
-        except (
-            modal.exception.SandboxFilesystemNotFoundError,
-            modal.exception.SandboxFilesystemNotADirectoryError,
-        ):
-            return False
-        except modal.exception.Error as e:
-            raise await self._backend.operation_error(e, f'Could not access {path!r} in the sandbox') from e
-        return True
-
-
 def _file_entry(entry: modal.types.FileInfo, path: str) -> FileEntry:
     is_dir = entry.is_dir()
     # A directory's reported size is an implementation detail of the underlying filesystem
@@ -367,7 +285,6 @@ class ModalSandboxBackend(SandboxBackend):
         # Set once the sandbox exists, so an expiry message can say which lifetime ran out.
         self._created_timeout: int | None = None
         self._lock = anyio.Lock()
-        self.fs = _ModalFilesystem(self)
 
     @property
     def sandbox(self) -> Awaitable[modal.Sandbox]:
@@ -399,6 +316,58 @@ class ModalSandboxBackend(SandboxBackend):
     def ref(self) -> SandboxRef | None:
         """Identity of the sandbox, or `None` before one has been created."""
         return self._ref
+
+    @asynccontextmanager
+    async def _translated_filesystem_error(self, path: str) -> AsyncGenerator[None]:
+        """Map Modal's filesystem exceptions onto the ones the protocol promises."""
+        import modal
+
+        try:
+            yield
+        except modal.exception.SandboxFilesystemNotFoundError as e:
+            raise FileNotFoundError(f'No such file or directory in the Modal sandbox: {path!r}') from e
+        except modal.exception.Error as e:
+            raise await self.operation_error(e, f'Could not access {path!r} in the sandbox') from e
+
+    async def read_bytes(self, path: str) -> bytes:
+        async with self._translated_filesystem_error(path):
+            return await (await self.sandbox).filesystem.read_bytes.aio(path)
+
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        # Modal takes the data first, creates missing parents, and replaces existing contents.
+        async with self._translated_filesystem_error(path):
+            await (await self.sandbox).filesystem.write_bytes.aio(data, path)
+
+    async def stat(self, path: str) -> FileEntry:
+        async with self._translated_filesystem_error(path):
+            return _file_entry(await (await self.sandbox).filesystem.stat.aio(path), path)
+
+    async def list_dir(self, path: str) -> Sequence[FileEntry]:
+        async with self._translated_filesystem_error(path):
+            entries = await (await self.sandbox).filesystem.list_files.aio(path)
+        return [_file_entry(entry, posixpath.join(path, entry.name)) for entry in entries]
+
+    async def make_dir(self, path: str) -> None:
+        async with self._translated_filesystem_error(path):
+            await (await self.sandbox).filesystem.make_directory.aio(path)
+
+    async def remove(self, path: str) -> None:
+        async with self._translated_filesystem_error(path):
+            await (await self.sandbox).filesystem.remove.aio(path, recursive=True)
+
+    async def exists(self, path: str) -> bool:
+        import modal
+
+        try:
+            await (await self.sandbox).filesystem.stat.aio(path)
+        except (
+            modal.exception.SandboxFilesystemNotFoundError,
+            modal.exception.SandboxFilesystemNotADirectoryError,
+        ):
+            return False
+        except modal.exception.Error as e:
+            raise await self.operation_error(e, f'Could not access {path!r} in the sandbox') from e
+        return True
 
     async def _create(self, name: str | None = None) -> modal.Sandbox:
         """Provision a fresh Modal sandbox."""
@@ -685,4 +654,3 @@ if TYPE_CHECKING:
     _backend = ModalSandboxBackend()
     _backend_conforms: SandboxBackend = _backend
     _filesystem_backend_conforms: SupportsFilesystem = _backend
-    _filesystem_conforms: SandboxFilesystem = _backend.fs
