@@ -292,9 +292,10 @@ uv run uvicorn telegram_bot:app --host 0.0.0.0 --port 8000
   claims, and returns 204 after enqueue. It loses state on restart, and a later handler failure is not retried. Use a
   durable queue with an atomic `event_id` claim and explicit retry policy when duplicate or lost turns are
   unacceptable.
-- Replies are split at 4096 characters. A valid HTTP 429 delay of at most 60 seconds is retried once. Transport and
-  other provider failures are not retried because delivery may be ambiguous. A later-chunk failure reports how many
-  earlier chunks Telegram confirmed.
+- Replies are split at 4096 characters. A valid HTTP 429 delay of at most 60 seconds is retried once. Larger or
+  repeated delays raise `TelegramRateLimitError` with Telegram's `retry_after` value. Transport and other provider
+  failures are not retried because delivery may be ambiguous. A later-chunk failure reports how many earlier chunks
+  Telegram confirmed.
 - The caller owns Starlette, the queue, and any injected `httpx.AsyncClient`. Store the BotFather token and webhook
   secret as application secrets. Telegram puts the bot token in the Bot API request URL; custom clients, proxies,
   and API URLs must not log or forward it to an untrusted service.

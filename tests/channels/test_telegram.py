@@ -20,6 +20,7 @@ from pydantic_ai_harness.channels.telegram import (
     TelegramChannel,
     TelegramError,
     TelegramPartialDeliveryError,
+    TelegramRateLimitError,
     TelegramWebhookError,
 )
 
@@ -645,12 +646,15 @@ class TestTelegramChannel:
         assert 'bot-secret' not in str(exc_info.value)
         await client.aclose()
 
-    async def test_rejects_second_rate_limit_and_malformed_retry_control(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_surfaces_unretried_rate_limits_and_rejects_malformed_retry_control(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         retry_after: object = 0
         calls = 0
+        sleeps: list[float] = []
 
-        async def sleep(_delay: float) -> None:
-            return None
+        async def sleep(delay: float) -> None:
+            sleeps.append(delay)
 
         def handler(_request: httpx.Request) -> httpx.Response:
             nonlocal calls
@@ -670,24 +674,38 @@ class TestTelegramChannel:
         event = channel.parse_request(_update(), _headers())
         assert event is not None
 
-        with pytest.raises(TelegramError, match='Too Many Requests'):
+        with pytest.raises(TelegramRateLimitError, match='Too Many Requests') as repeated:
             await channel.reply(event, 'first')
         assert calls == 2
+        assert repeated.value.retry_after == 0
+        assert sleeps == [0]
 
         retry_after = False
         with pytest.raises(TelegramError, match='Too Many Requests'):
             await channel.reply(event, 'second')
         assert calls == 3
 
-        retry_after = 61
+        retry_after = -1
         with pytest.raises(TelegramError, match='Too Many Requests'):
             await channel.reply(event, 'third')
         assert calls == 4
 
-        retry_after = None
+        retry_after = 1.5
         with pytest.raises(TelegramError, match='Too Many Requests'):
             await channel.reply(event, 'fourth')
         assert calls == 5
+
+        retry_after = None
+        with pytest.raises(TelegramError, match='Too Many Requests'):
+            await channel.reply(event, 'fifth')
+        assert calls == 6
+
+        retry_after = 2_282
+        with pytest.raises(TelegramRateLimitError, match='Too Many Requests') as long_delay:
+            await channel.reply(event, 'sixth')
+        assert calls == 7
+        assert long_delay.value.retry_after == 2_282
+        assert sleeps == [0]
         await client.aclose()
 
     async def test_rejects_invalid_provider_responses_and_event_identity(self) -> None:

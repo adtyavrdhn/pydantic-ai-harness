@@ -27,7 +27,13 @@ from pydantic import TypeAdapter, ValidationError
 
 from ._host import ChannelEvent
 
-__all__ = ('TelegramChannel', 'TelegramError', 'TelegramPartialDeliveryError', 'TelegramWebhookError')
+__all__ = (
+    'TelegramChannel',
+    'TelegramError',
+    'TelegramPartialDeliveryError',
+    'TelegramRateLimitError',
+    'TelegramWebhookError',
+)
 
 _DEFAULT_API_URL = 'https://api.telegram.org'
 _MAX_TEXT_CHARS = 4096
@@ -57,6 +63,15 @@ class TelegramPartialDeliveryError(TelegramError):
         """Record how many chunks Telegram confirmed before the failure."""
         super().__init__(message)
         self.sent_chunks = sent_chunks
+
+
+class TelegramRateLimitError(TelegramError):
+    """Telegram rate-limits a reply with a caller-visible retry delay."""
+
+    def __init__(self, message: str, *, retry_after: int) -> None:
+        """Record Telegram's requested delay without forcing an unbounded wait."""
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class _TelegramTokenFilter(logging.Filter):
@@ -95,12 +110,6 @@ class _TelegramTokenFilter(logging.Filter):
 
 
 _TOKEN_FILTER = _TelegramTokenFilter()
-
-
-class _RateLimited(TelegramError):
-    def __init__(self, message: str, *, retry_after: float) -> None:
-        super().__init__(message)
-        self.retry_after = retry_after
 
 
 class TelegramChannel:
@@ -262,12 +271,14 @@ class TelegramChannel:
     async def _send_with_one_flood_retry(self, payload: Mapping[str, object]) -> None:
         try:
             await self._send(payload)
-        except _RateLimited as exc:
+        except TelegramRateLimitError as exc:
+            if exc.retry_after > _MAX_RETRY_AFTER_SECONDS:
+                raise
             await anyio.sleep(exc.retry_after)
             try:
                 await self._send(payload)
-            except _RateLimited as second:
-                raise TelegramError(str(second)) from None
+            except TelegramRateLimitError:
+                raise
 
     async def _send(self, payload: Mapping[str, object]) -> None:
         if self._client is not None:
@@ -309,7 +320,7 @@ class TelegramChannel:
         message = message.replace(self._bot_token, '<redacted>')
         retry_after = _retry_after(envelope) if response.status_code == 429 else None
         if retry_after is not None:
-            raise _RateLimited(message, retry_after=retry_after)
+            raise TelegramRateLimitError(message, retry_after=retry_after)
         raise TelegramError(message)
 
 
@@ -431,16 +442,11 @@ def _decode_delivery(delivery_id: str | None) -> int:
     return int(delivery_id)
 
 
-def _retry_after(envelope: Mapping[str, object]) -> float | None:
+def _retry_after(envelope: Mapping[str, object]) -> int | None:
     parameters = _mapping(envelope.get('parameters'))
     if parameters is None:
         return None
     retry_after = parameters.get('retry_after')
-    if (
-        isinstance(retry_after, bool)
-        or not isinstance(retry_after, int)
-        or retry_after < 0
-        or retry_after > _MAX_RETRY_AFTER_SECONDS
-    ):
+    if isinstance(retry_after, bool) or not isinstance(retry_after, int) or retry_after < 0:
         return None
-    return float(retry_after)
+    return retry_after
