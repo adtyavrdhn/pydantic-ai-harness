@@ -188,8 +188,8 @@ def _register_branching_tools(server: FastMCP, calls: list[str]) -> None:
     @server.tool()
     def future_mutation() -> str:
         """Represent a server tool unknown to this capability version."""
-        calls.append('future_mutation')
-        return 'changed'
+        calls.append('future_mutation')  # pragma: no cover
+        return 'changed'  # pragma: no cover
 
 
 @pytest.fixture

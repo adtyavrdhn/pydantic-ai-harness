@@ -30,8 +30,8 @@ def _mcp_toolset(toolset: AbstractToolset[None]) -> MCPToolset[None]:
     leaves: list[MCPToolset[None]] = []
 
     def capture(candidate: AbstractToolset[None]) -> None:
-        if isinstance(candidate, MCPToolset):
-            leaves.append(candidate)
+        assert isinstance(candidate, MCPToolset)
+        leaves.append(candidate)
 
     toolset.apply(capture)
     assert len(leaves) == 1
@@ -294,6 +294,15 @@ class TestSupabase:
         assert isinstance(result.output, DeferredToolRequests)
         assert [call.tool_name for call in result.output.approvals] == [tool_name]
         assert calls == []
+
+        call_id = result.output.approvals[0].tool_call_id
+        await agent.run(
+            message_history=result.all_messages(),
+            deferred_tool_results=DeferredToolResults(approvals={call_id: True}),
+        )
+
+        assert len(calls) == 1
+        assert calls[0].startswith(tool_name)
 
     async def test_denied_mutation_does_not_execute(self, supabase_server: FastMCP, calls: list[str]):
         model = TestModel(call_tools=['execute_sql'])
