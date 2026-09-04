@@ -287,6 +287,14 @@ class TestGoogleWorkspace:
         capability = GoogleWorkspace(services=('gmail',), clients={'gmail': gmail_server}, include_instructions=False)
         assert capability.get_instructions() is None
 
+    def test_instructions_cover_workspace_operational_boundaries(self):
+        instructions = GoogleWorkspace(services=('gmail',), access_token='token').get_instructions()
+        assert instructions is not None
+        assert 'returned resource ID' in instructions
+        assert 'Keep searches and lists bounded' in instructions
+        assert 'time zone and date boundaries' in instructions
+        assert 'check whether it succeeded before retrying' in instructions
+
     def test_agent_spec_example_loads(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', 'token')
         spec = tmp_path / 'agent.yaml'
