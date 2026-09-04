@@ -27,7 +27,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import AnyUrl
-from pydantic_ai.exceptions import UserError
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import ToolsetTool
 
@@ -65,7 +65,6 @@ _READ_TOOLS: dict[AtlassianProduct, frozenset[str]] = {
             'listJiraIssueTransitions',
             'listJiraProjects',
             'lookupJiraAccountId',
-            'searchJiraIssuesUsingJql',
         }
     ),
     'confluence': frozenset(
@@ -81,7 +80,6 @@ _READ_TOOLS: dict[AtlassianProduct, frozenset[str]] = {
             'listConfluenceContent',
             'listConfluenceSpaces',
             'listConfluenceTasks',
-            'searchConfluence',
         }
     ),
     'jira_service_management': frozenset(
@@ -108,6 +106,13 @@ _READ_TOOLS: dict[AtlassianProduct, frozenset[str]] = {
             'listBitbucketWorkspaces',
         }
     ),
+}
+
+_SEARCH_TOOLS: dict[AtlassianProduct, frozenset[str]] = {
+    'jira': frozenset({'searchJiraIssuesUsingJql'}),
+    'confluence': frozenset({'searchConfluence'}),
+    'jira_service_management': frozenset(),
+    'bitbucket': frozenset(),
 }
 
 _WRITE_TOOLS: dict[AtlassianProduct, frozenset[str]] = {
@@ -179,6 +184,25 @@ def _is_url(client: MCPToolsetClient) -> bool:
     )
 
 
+def validate_auth_configuration(
+    products: Sequence[AtlassianProduct],
+    authorization_token: str | None,
+    client: MCPToolsetClient | None,
+) -> None:
+    if 'jira_service_management' in products and authorization_token is None and client is None:
+        raise UserError(
+            'Jira Service Management MCP tools require API-token authentication; '
+            'pass `authorization_token` or a preconfigured `client`.'
+        )
+    if client is not None and _is_url(client):
+        raise UserError(
+            '`client` cannot be a URL. AtlassianToolset sends credentials only to its pinned official endpoint; '
+            'pass a preconfigured MCP client for a custom transport.'
+        )
+    if client is not None and authorization_token is not None:
+        raise UserError('Configure authentication on the prebuilt `client`; do not also pass `authorization_token`.')
+
+
 class AtlassianToolset(MCPToolset[AgentDepsT]):
     """A site-scoped, allowlisted view of Atlassian's hosted Rovo MCP tools.
 
@@ -210,26 +234,14 @@ class AtlassianToolset(MCPToolset[AgentDepsT]):
             raise UserError('`cloud_id` must not be empty.')
         normalized_products = normalize_products(products)
         validate_access(access)
+        validate_auth_configuration(normalized_products, authorization_token, client)
+
         resolved_client: MCPToolsetClient = ATLASSIAN_MCP_URL if client is None else client
-        auth: Literal['oauth'] | str | None = authorization_token or 'oauth' if _is_url(resolved_client) else None
+        auth: Literal['oauth'] | str | None = (authorization_token or 'oauth') if client is None else None
         super().__init__(resolved_client, id=id, auth=auth, process_tool_call=self._enforce_site_scope)
         self.cloud_id = cloud_id
         self.products = normalized_products
         self.access = access
-
-    @property
-    def write_tool_names(self) -> frozenset[str]:
-        """Mutation tool names enabled by the selected products and access."""
-        if self.access == 'read_only':
-            return frozenset()
-        return frozenset(name for product in self.products for name in _WRITE_TOOLS[product])
-
-    @property
-    def destructive_tool_names(self) -> frozenset[str]:
-        """Destructive tool names enabled by the selected products and access."""
-        if self.access != 'destructive':
-            return frozenset()
-        return frozenset(name for product in self.products for name in _DESTRUCTIVE_TOOLS[product])
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
         tools = await super().get_tools(ctx)
@@ -238,12 +250,13 @@ class AtlassianToolset(MCPToolset[AgentDepsT]):
         }
         for product in self.products:
             selected.update((name, (product, 'read')) for name in _READ_TOOLS[product])
+            selected.update((name, (product, 'search')) for name in _SEARCH_TOOLS[product])
             if self.access != 'read_only':
                 selected.update((name, (product, 'write')) for name in _WRITE_TOOLS[product])
             if self.access == 'destructive':
                 selected.update((name, (product, 'destructive')) for name in _DESTRUCTIVE_TOOLS[product])
 
-        return {
+        filtered = {
             name: replace(
                 tool,
                 tool_def=replace(
@@ -259,6 +272,10 @@ class AtlassianToolset(MCPToolset[AgentDepsT]):
             for name, tool in tools.items()
             if name in selected
         }
+        if not any(name not in _COMMON_READ_TOOLS for name in filtered):
+            products = ', '.join(self.products)
+            raise UserError(f'Atlassian Rovo MCP returned no permitted tools for the selected products: {products}.')
+        return filtered
 
     async def _enforce_site_scope(
         self,
@@ -271,7 +288,7 @@ class AtlassianToolset(MCPToolset[AgentDepsT]):
         if name not in _COMMON_READ_TOOLS:
             requested_cloud_id = args.get('cloudId')
             if requested_cloud_id != self.cloud_id:
-                raise UserError(
+                raise ModelRetry(
                     f'Atlassian tool {name!r} is scoped to cloudId {self.cloud_id!r}; received {requested_cloud_id!r}.'
                 )
         return await call_tool(name, args)

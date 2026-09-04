@@ -1,6 +1,6 @@
 """Atlassian Rovo MCP integration for Jira and selected related products.
 
-Requires Pydantic AI's MCP dependencies: `uv add "pydantic-ai-slim[mcp]"`.
+Install the optional dependencies with `uv add "pydantic-ai-harness[atlassian]"`.
 """
 
 from pydantic_ai_harness.atlassian._capability import Atlassian

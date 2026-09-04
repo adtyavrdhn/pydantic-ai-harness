@@ -4,20 +4,22 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 pytest.importorskip('fastmcp')
 
+from fastmcp.client.auth import BearerAuth, OAuth
 from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.agent.spec import AgentSpec
-from pydantic_ai.exceptions import UserError
+from pydantic_ai.capabilities import PrefixTools
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import RunContext
+from pydantic_ai.tools import RunContext, ToolDefinition
 
 from pydantic_ai_harness.atlassian import ATLASSIAN_MCP_URL, Atlassian, AtlassianToolset
 
@@ -38,18 +40,40 @@ class TestAtlassian:
         transport = toolset.client.transport
         assert isinstance(transport, StreamableHttpTransport)
         assert transport.url == ATLASSIAN_MCP_URL
-        assert transport.auth is not None
+        assert isinstance(transport.auth, OAuth)
+
+    def test_bearer_token_is_bound_to_the_official_endpoint(self):
+        toolset = AtlassianToolset[None](cloud_id='site-1', authorization_token='bearer-secret')
+        transport = toolset.client.transport
+        assert isinstance(transport, StreamableHttpTransport)
+        assert transport.url == ATLASSIAN_MCP_URL
+        assert isinstance(transport.auth, BearerAuth)
+        assert transport.auth.token.get_secret_value() == 'bearer-secret'
 
     def test_secret_and_injected_client_are_hidden_from_repr(self):
         capability = Atlassian(
             cloud_id='site-1',
             authorization_token='bearer-secret',
-            client='https://user:url-secret@example.com/mcp?token=query-secret',
         )
         representation = repr(capability)
         assert 'bearer-secret' not in representation
-        assert 'url-secret' not in representation
-        assert 'query-secret' not in representation
+
+    @pytest.mark.parametrize('client', ['http://attacker.invalid/mcp', 'https://proxy.example/mcp'])
+    def test_rejects_url_client_to_keep_credentials_on_the_official_endpoint(self, client: str):
+        with pytest.raises(UserError, match='cannot be a URL'):
+            AtlassianToolset(cloud_id='site-1', client=client, authorization_token='secret')
+        with pytest.raises(UserError, match='cannot be a URL'):
+            Atlassian(cloud_id='site-1', client=client)  # pyright: ignore[reportArgumentType]
+
+    def test_rejects_token_with_preconfigured_client(self, atlassian_server: FastMCP):
+        with pytest.raises(UserError, match='Configure authentication on the prebuilt `client`'):
+            AtlassianToolset(
+                cloud_id='site-1',
+                client=atlassian_server,
+                authorization_token='ignored-secret',
+            )
+        with pytest.raises(UserError, match='Configure authentication on the prebuilt `client`'):
+            Atlassian(cloud_id='site-1', client=atlassian_server, authorization_token='ignored-secret')
 
     @pytest.mark.parametrize(
         ('build', 'match'),
@@ -81,11 +105,45 @@ class TestAtlassian:
             )
         assert isinstance(agent, Agent)
 
+    def test_jsm_requires_explicit_noninteractive_auth(self):
+        with pytest.raises(UserError, match='require API-token authentication'):
+            Atlassian(cloud_id='site-1', products='jira_service_management')
+        with pytest.raises(UserError, match='require API-token authentication'):
+            AtlassianToolset(cloud_id='site-1', products='jira_service_management')
+
     def test_ids_preserve_site_identity(self, atlassian_server: FastMCP):
         first = Atlassian(cloud_id='site-1', client=atlassian_server)
         second = Atlassian(cloud_id='site-2', client=atlassian_server)
         assert (first.id, second.id) == ('atlassian-site-1', 'atlassian-site-2')
         Agent(TestModel(), capabilities=[first, second])
+
+    async def test_unprefixed_sites_collide_when_tools_load(self, atlassian_server: FastMCP):
+        agent = Agent(
+            TestModel(),
+            capabilities=[
+                Atlassian(cloud_id='site-1', client=atlassian_server),
+                Atlassian(cloud_id='site-2', client=atlassian_server),
+            ],
+        )
+        with pytest.raises(UserError, match='defines a tool whose name conflicts'):
+            await agent.run('read Jira')
+
+    async def test_prefix_tools_namespaces_multiple_sites(self, atlassian_server: FastMCP):
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            names = {tool.name for tool in info.function_tools}
+            assert 'site_a_getJiraIssue' in names
+            assert 'site_b_getJiraIssue' in names
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent = Agent(
+            FunctionModel(model),
+            capabilities=[
+                PrefixTools(Atlassian(cloud_id='site-1', client=atlassian_server), prefix='site_a'),
+                PrefixTools(Atlassian(cloud_id='site-2', client=atlassian_server), prefix='site_b'),
+            ],
+        )
+        result = await agent.run('compare Jira sites')
+        assert result.output == 'done'
 
     async def test_default_agent_path_exposes_only_reviewed_jira_reads(self, atlassian_server: FastMCP):
         capability = Atlassian(cloud_id='site-1', client=atlassian_server)
@@ -106,7 +164,38 @@ class TestAtlassian:
         assert isinstance(first_request, ModelRequest)
         assert 'cloudId `site-1`' in (first_request.instructions or '')
 
-    async def test_product_selection_is_exact(self, atlassian_server: FastMCP, run_context: RunContext[None]):
+    @pytest.mark.parametrize(
+        ('product', 'expected'),
+        [
+            ('jira', {'atlassianUserInfo', 'getJiraIssue', 'searchJiraIssuesUsingJql', 'createJiraIssue'}),
+            ('confluence', {'atlassianUserInfo', 'getConfluenceContent', 'createConfluenceContent'}),
+            ('jira_service_management', {'atlassianUserInfo', 'getJsmOpsAlerts', 'updateJsmOpsAlert'}),
+            (
+                'bitbucket',
+                {'atlassianUserInfo', 'getBitbucketRepository', 'createBitbucketRepoPullRequest'},
+            ),
+        ],
+    )
+    async def test_each_product_selects_only_its_reviewed_tools(
+        self,
+        product: str,
+        expected: set[str],
+        atlassian_server: FastMCP,
+        run_context: RunContext[None],
+    ):
+        toolset = AtlassianToolset(
+            cloud_id='site-1',
+            products=product,  # pyright: ignore[reportArgumentType]
+            access='read_write',
+            client=atlassian_server,
+        )
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+        assert set(tools) == expected
+
+    async def test_product_selection_combines_without_future_tools(
+        self, atlassian_server: FastMCP, run_context: RunContext[None]
+    ):
         toolset = AtlassianToolset(
             cloud_id='site-1',
             products=('confluence', 'bitbucket'),
@@ -124,7 +213,34 @@ class TestAtlassian:
             'atlassian_cloud_id': 'site-1',
         }
 
-    async def test_write_access_requires_approval_before_server_call(self, atlassian_server: FastMCP):
+    async def test_search_metadata_keeps_search_tools_out_of_write_approval(
+        self, atlassian_server: FastMCP, atlassian_calls: list[str]
+    ):
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+                search = next(tool for tool in info.function_tools if tool.name == 'searchJiraIssuesUsingJql')
+                assert search.metadata is not None
+                assert search.metadata['atlassian_access'] == 'search'
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            tool_name='searchJiraIssuesUsingJql',
+                            args={'cloudId': 'site-1', 'jql': 'assignee = currentUser()'},
+                        )
+                    ]
+                )
+            return ModelResponse(parts=[TextPart('done')])
+
+        result = await Agent(
+            FunctionModel(model),
+            capabilities=[Atlassian(cloud_id='site-1', access='read_write', client=atlassian_server)],
+        ).run('Search Jira')
+        assert result.output == 'done'
+        assert atlassian_calls == ['searchJiraIssuesUsingJql']
+
+    async def test_write_access_requires_approval_before_server_call(
+        self, atlassian_server: FastMCP, atlassian_calls: list[str]
+    ):
         capability = Atlassian(cloud_id='site-1', access='read_write', client=atlassian_server)
 
         def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -142,12 +258,61 @@ class TestAtlassian:
         ).run('Create an issue')
         assert isinstance(result.output, DeferredToolRequests)
         assert [call.tool_name for call in result.output.approvals] == ['createJiraIssue']
+        assert atlassian_calls == []
+
+    async def test_reads_still_execute_in_write_mode(self, atlassian_server: FastMCP, atlassian_calls: list[str]):
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+                return ModelResponse(
+                    parts=[ToolCallPart(tool_name='getJiraIssue', args={'cloudId': 'site-1', 'issueIdOrKey': 'ENG-42'})]
+                )
+            return ModelResponse(parts=[TextPart('done')])
+
+        result = await Agent(
+            FunctionModel(model),
+            capabilities=[Atlassian(cloud_id='site-1', access='read_write', client=atlassian_server)],
+        ).run('Read ENG-42')
+        assert result.output == 'done'
+        assert atlassian_calls == ['getJiraIssue']
+
+    async def test_external_approval_wrapper_composes_when_builtin_approval_is_disabled(
+        self, atlassian_server: FastMCP, atlassian_calls: list[str]
+    ):
+        toolset = Atlassian[None](
+            cloud_id='site-1',
+            access='read_write',
+            require_approval=False,
+            client=atlassian_server,
+        ).get_toolset()
+
+        def require_mutation_approval(ctx: RunContext[None], tool_def: ToolDefinition, args: dict[str, Any]) -> bool:
+            del ctx, args
+            return tool_def.metadata is not None and tool_def.metadata.get('atlassian_access') == 'write'
+
+        wrapped = toolset.approval_required(require_mutation_approval)
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name='createJiraIssue',
+                        args={'cloudId': 'site-1', 'projectKey': 'ENG', 'summary': 'Add SSO'},
+                    )
+                ]
+            )
+
+        agent = Agent[None, str | DeferredToolRequests](
+            FunctionModel(model), deps_type=type(None), toolsets=[wrapped], output_type=[str, DeferredToolRequests]
+        )
+        result = await agent.run('Create an issue')
+        assert isinstance(result.output, DeferredToolRequests)
+        assert atlassian_calls == []
 
     async def test_site_scope_rejects_cross_tenant_call(self, atlassian_server: FastMCP, run_context: RunContext[None]):
         toolset = AtlassianToolset(cloud_id='site-1', client=atlassian_server)
         async with toolset:
             tools = await toolset.get_tools(run_context)
-            with pytest.raises(UserError, match="scoped to cloudId 'site-1'.*'site-2'"):
+            with pytest.raises(ModelRetry, match="scoped to cloudId 'site-1'.*'site-2'"):
                 await toolset.call_tool(
                     'getJiraIssue',
                     {'cloudId': 'site-2', 'issueIdOrKey': 'ENG-42'},
@@ -168,3 +333,37 @@ class TestAtlassian:
         metadata = tools['deleteJiraIssue'].tool_def.metadata
         assert metadata is not None
         assert metadata['atlassian_access'] == 'destructive'
+
+    async def test_common_user_info_does_not_require_cloud_id(
+        self, atlassian_server: FastMCP, atlassian_calls: list[str], run_context: RunContext[None]
+    ):
+        toolset = AtlassianToolset(cloud_id='site-1', client=atlassian_server)
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            await toolset.call_tool('atlassianUserInfo', {}, run_context, tools['atlassianUserInfo'])
+        assert atlassian_calls == ['atlassianUserInfo']
+
+    async def test_missing_selected_product_tools_fail_closed(
+        self, unavailable_atlassian_server: FastMCP, run_context: RunContext[None]
+    ):
+        toolset = AtlassianToolset(cloud_id='site-1', client=unavailable_atlassian_server)
+        async with toolset:
+            with pytest.raises(UserError, match='no permitted tools.*jira'):
+                await toolset.get_tools(run_context)
+
+    async def test_destructive_tool_is_approval_gated_before_server_call(
+        self, atlassian_server: FastMCP, atlassian_calls: list[str]
+    ):
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name='deleteJiraIssue', args={'cloudId': 'site-1', 'issueIdOrKey': 'ENG-42'})]
+            )
+
+        result = await Agent(
+            FunctionModel(model),
+            capabilities=[Atlassian(cloud_id='site-1', access='destructive', client=atlassian_server)],
+            output_type=[str, DeferredToolRequests],
+        ).run('Delete ENG-42')
+        assert isinstance(result.output, DeferredToolRequests)
+        assert [call.tool_name for call in result.output.approvals] == ['deleteJiraIssue']
+        assert atlassian_calls == []

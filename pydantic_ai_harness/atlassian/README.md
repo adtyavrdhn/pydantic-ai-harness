@@ -9,11 +9,8 @@ Management, and Bitbucket Cloud can be selected from the same Atlassian-hosted R
 
 ## Installation
 
-Until [the shared Harness MCP extra](https://github.com/pydantic/pydantic-ai-harness/issues/788) is available, install
-Pydantic AI's MCP dependencies explicitly:
-
 ```bash
-uv add pydantic-ai-harness "pydantic-ai-slim[mcp,openai]"
+uv add "pydantic-ai-harness[atlassian]" "pydantic-ai-slim[openai]"
 ```
 
 Set the model credential and copy the site's `cloudId` from
@@ -95,9 +92,11 @@ Supported values follow Atlassian's current Rovo MCP v2 catalogue:
 | `bitbucket` | OAuth 2.1 or API token; workspace must be linked to an Atlassian organization | No |
 
 Pass a caller-owned bearer token with `authorization_token=`, or pass a preconfigured FastMCP client with `client=`
-for persistent OAuth storage, Basic authentication, service-account policy, custom TLS, or connection pooling. Both
-values are excluded from the capability's representation. Configure API-token authentication when selecting Jira
-Service Management; its tools do not support OAuth 2.1. Atlassian validates the credential type at the server.
+for persistent OAuth storage, Basic authentication, service-account policy, custom TLS, or connection pooling. A URL
+is not accepted as `client`, and `authorization_token` cannot be combined with a preconfigured client. These rules
+keep the convenience bearer-token path pinned to Atlassian's official endpoint. Both values are excluded from the
+capability's representation. Configure API-token authentication when selecting Jira Service Management; its tools do
+not support OAuth 2.1. Atlassian validates the credential type at the server.
 
 Atlassian organization administrators can independently allow or block read, write, search, delete, and manage
 permission groups. The user's existing Jira, Confluence, JSM, and Bitbucket permissions still apply. Some enriched

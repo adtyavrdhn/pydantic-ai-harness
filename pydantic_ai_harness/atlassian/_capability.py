@@ -8,7 +8,7 @@ from dataclasses import KW_ONLY, dataclass, field
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
-from pydantic_ai.toolsets import AgentToolset
+from pydantic_ai.toolsets import AbstractToolset
 
 from pydantic_ai_harness.atlassian._toolset import (
     AtlassianAccess,
@@ -17,6 +17,7 @@ from pydantic_ai_harness.atlassian._toolset import (
     MCPToolsetClient,
     normalize_products,
     validate_access,
+    validate_auth_configuration,
 )
 
 _DEFAULT_DESCRIPTION = 'Use Jira and selected related Atlassian products on one site.'
@@ -60,6 +61,7 @@ class Atlassian(AbstractCapability[AgentDepsT]):
             raise UserError('`cloud_id` must not be empty.')
         self.products = normalize_products(self.products)
         validate_access(self.access)
+        validate_auth_configuration(self.products, self.authorization_token, self.client)
         self.id = self.id or f'atlassian-{self.cloud_id}'
 
     def _toolset(self) -> AtlassianToolset[AgentDepsT]:
@@ -72,13 +74,14 @@ class Atlassian(AbstractCapability[AgentDepsT]):
             id=self.id or f'atlassian-{self.cloud_id}',
         )
 
-    def get_toolset(self) -> AgentToolset[AgentDepsT]:
+    def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build the Atlassian toolset and its optional approval wrapper."""
         toolset = self._toolset()
         if self.require_approval and self.access != 'read_only':
             return toolset.approval_required(
                 lambda ctx, tool_def, tool_args: (
-                    tool_def.metadata is not None and tool_def.metadata.get('atlassian_access') != 'read'
+                    tool_def.metadata is not None
+                    and tool_def.metadata.get('atlassian_access') in ('write', 'destructive')
                 )
             )
         return toolset

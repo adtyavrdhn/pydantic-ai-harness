@@ -31,7 +31,12 @@ def run_context() -> RunContext[None]:
 
 
 @pytest.fixture
-def atlassian_server() -> FastMCP:
+def atlassian_calls() -> list[str]:
+    return []
+
+
+@pytest.fixture
+def atlassian_server(atlassian_calls: list[str]) -> FastMCP:
     from mcp.server.fastmcp.server import FastMCP, Settings  # noqa: PLC0415
 
     Settings.model_rebuild()
@@ -40,26 +45,31 @@ def atlassian_server() -> FastMCP:
     @server.tool()
     def atlassianUserInfo() -> dict[str, str]:
         """Return the authenticated Atlassian user."""
+        atlassian_calls.append('atlassianUserInfo')
         return {'accountId': 'user-1'}
 
     @server.tool()
     def getJiraIssue(cloudId: str, issueIdOrKey: str) -> dict[str, str]:
         """Get one Jira work item."""
+        atlassian_calls.append('getJiraIssue')
         return {'cloudId': cloudId, 'key': issueIdOrKey, 'summary': 'Fix login'}
 
     @server.tool()
     def searchJiraIssuesUsingJql(cloudId: str, jql: str) -> list[dict[str, str]]:
         """Search Jira work items."""
+        atlassian_calls.append('searchJiraIssuesUsingJql')
         return [{'cloudId': cloudId, 'key': 'ENG-42', 'jql': jql}]
 
     @server.tool()
     def createJiraIssue(cloudId: str, projectKey: str, summary: str) -> dict[str, str]:
         """Create one Jira work item."""
+        atlassian_calls.append('createJiraIssue')
         return {'cloudId': cloudId, 'key': f'{projectKey}-43', 'summary': summary}
 
     @server.tool()
     def deleteJiraIssue(cloudId: str, issueIdOrKey: str) -> dict[str, str]:
         """Permanently delete one Jira work item."""
+        atlassian_calls.append('deleteJiraIssue')
         return {'cloudId': cloudId, 'deleted': issueIdOrKey}
 
     @server.tool()
@@ -68,14 +78,49 @@ def atlassian_server() -> FastMCP:
         return {'cloudId': cloudId, 'id': contentId}
 
     @server.tool()
+    def createConfluenceContent(cloudId: str, title: str) -> dict[str, str]:
+        """Create one Confluence content item."""
+        return {'cloudId': cloudId, 'title': title}
+
+    @server.tool()
     def getJsmOpsAlerts(cloudId: str) -> list[dict[str, str]]:
         """Get Jira Service Management alerts."""
         return [{'cloudId': cloudId, 'id': 'alert-1'}]
 
     @server.tool()
+    def updateJsmOpsAlert(cloudId: str, alertId: str) -> dict[str, str]:
+        """Update one Jira Service Management alert."""
+        return {'cloudId': cloudId, 'id': alertId}
+
+    @server.tool()
     def getBitbucketRepository(cloudId: str, workspace: str, repoSlug: str) -> dict[str, str]:
         """Get one Bitbucket repository."""
         return {'cloudId': cloudId, 'workspace': workspace, 'slug': repoSlug}
+
+    @server.tool()
+    def createBitbucketRepoPullRequest(cloudId: str, workspace: str, repoSlug: str) -> dict[str, str]:
+        """Create one Bitbucket pull request."""
+        return {'cloudId': cloudId, 'workspace': workspace, 'slug': repoSlug}
+
+    @server.tool()
+    def futureUnreviewedAtlassianMutation(cloudId: str) -> dict[str, str]:
+        """A future server tool that Harness has not reviewed."""
+        return {'cloudId': cloudId}
+
+    return server
+
+
+@pytest.fixture
+def unavailable_atlassian_server() -> FastMCP:
+    from mcp.server.fastmcp.server import FastMCP, Settings  # noqa: PLC0415
+
+    Settings.model_rebuild()
+    server = FastMCP('atlassian-unavailable-fake')
+
+    @server.tool()
+    def atlassianUserInfo() -> dict[str, str]:
+        """Return the authenticated Atlassian user."""
+        return {'accountId': 'user-1'}
 
     @server.tool()
     def futureUnreviewedAtlassianMutation(cloudId: str) -> dict[str, str]:
