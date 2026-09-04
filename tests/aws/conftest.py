@@ -52,7 +52,7 @@ def aws_server() -> tuple[FastMCP, list[str]]:
     @server.tool()
     def aws___future_tool() -> str:
         """Represent a new tool whose safety annotation is missing."""
-        calls.append('future')
-        return 'unknown'
+        calls.append('future')  # pragma: no cover - fail-closed filtering must make this unreachable
+        return 'unknown'  # pragma: no cover
 
     return server, calls
