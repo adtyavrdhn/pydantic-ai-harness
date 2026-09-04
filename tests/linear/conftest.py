@@ -5,10 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import FastMCP, Settings
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+# The MCP SDK leaves a settings annotation unresolved in some supported dependency
+# combinations. Rebuild it before warnings are escalated by the test suite.
+Settings.model_rebuild()
 
 
 @pytest.fixture

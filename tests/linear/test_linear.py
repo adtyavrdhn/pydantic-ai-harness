@@ -118,6 +118,10 @@ class TestLinear:
         assert transport.url == 'https://proxy.example/mcp'
         assert transport.auth is not None
 
+    def test_url_client_normalizes_uppercase_scheme(self):
+        transport = _http_transport(Linear(client='HTTPS://proxy.example/mcp'))
+        assert transport.url == 'https://proxy.example/mcp'
+
     def test_any_url_client_receives_auth_and_custom_id(self):
         capability = Linear(client=AnyUrl('https://proxy.example/mcp'), auth='token', id='tenant-linear')
         toolset = capability.get_toolset()
@@ -166,6 +170,11 @@ class TestLinear:
             TestModel(),
             capabilities=[Linear(client=linear_server, allowed_tools=['get_issue'])],
         )
+        result = await agent.run('Read issues')
+        assert _tool_call_names(result.all_messages()) == {'get_issue'}
+
+    async def test_single_allowed_tool_string_is_one_exact_name(self, linear_server: FastMCP):
+        agent = Agent(TestModel(), capabilities=[Linear(client=linear_server, allowed_tools='get_issue')])
         result = await agent.run('Read issues')
         assert _tool_call_names(result.all_messages()) == {'get_issue'}
 

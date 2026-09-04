@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import KW_ONLY, dataclass, field
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from httpx import Auth
 from pydantic import AnyUrl
@@ -91,12 +91,21 @@ class Linear(AbstractCapability[AgentDepsT]):
             toolset: AbstractToolset[AgentDepsT] = self.client
         else:
             client = self.client or (LINEAR_READ_ONLY_MCP_URL if self.read_only else LINEAR_MCP_URL)
-            url_scheme = urlsplit(str(client)).scheme.lower() if isinstance(client, (str, AnyUrl)) else None
+            if isinstance(client, (str, AnyUrl)):
+                parsed_url = urlsplit(str(client))
+                url_scheme = parsed_url.scheme.lower()
+            else:
+                parsed_url = None
+                url_scheme = None
             is_http_url = url_scheme in ('http', 'https')
             if self.auth is not None and url_scheme == 'http':
                 raise UserError('Authenticated Linear MCP URLs must use HTTPS.')
             if self.auth is not None and not is_http_url:
                 raise UserError('`auth` cannot be used with a prebuilt client; configure auth on that client.')
+            if is_http_url and parsed_url is not None:
+                client = urlunsplit(
+                    (url_scheme, parsed_url.netloc, parsed_url.path, parsed_url.query, parsed_url.fragment)
+                )
             toolset = MCPToolset(
                 client,
                 id=self.id or 'linear',
@@ -105,7 +114,7 @@ class Linear(AbstractCapability[AgentDepsT]):
 
         if self.allowed_tools is None:
             return toolset
-        allowed_tools = frozenset(self.allowed_tools)
+        allowed_tools = frozenset((self.allowed_tools,) if isinstance(self.allowed_tools, str) else self.allowed_tools)
         return toolset.filtered(lambda _ctx, tool: tool.name in allowed_tools)
 
     def get_instructions(self) -> str | None:
