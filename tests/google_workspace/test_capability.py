@@ -114,9 +114,13 @@ class TestGoogleWorkspace:
         with pytest.raises(UserError, match='does not belong to a selected service'):
             GoogleWorkspace(services=('gmail',), allowed_tools='calendar_list_events')
 
-    def test_rejects_non_string_allowlist_member(self):
+    @pytest.mark.parametrize('allowed_tool', [1, None])
+    def test_rejects_non_string_allowlist_member(self, allowed_tool: object):
         with pytest.raises(UserError, match='does not belong to a selected service'):
-            GoogleWorkspace(services=('gmail',), allowed_tools=(1,))  # pyright: ignore[reportArgumentType]
+            GoogleWorkspace(
+                services=('gmail',),
+                allowed_tools=(allowed_tool,),  # pyright: ignore[reportArgumentType]
+            )
 
     def test_rejects_client_for_unselected_service(self, calendar_server: FastMCP):
         with pytest.raises(UserError, match='Client configured for unselected service'):

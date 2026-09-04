@@ -68,6 +68,7 @@ _READ_ONLY_TOOLS: Mapping[GoogleWorkspaceService, frozenset[str]] = {
 }
 
 _DEFAULT_SERVICES: tuple[GoogleWorkspaceService, ...] = ('gmail', 'calendar')
+_MISSING = object()
 _DEFAULT_DESCRIPTION = 'Read Gmail, Calendar, and other selected Google Workspace products.'
 _DEFAULT_INSTRUCTIONS = (
     'Google Workspace tools are grouped by product and prefixed with the product name. '
@@ -145,9 +146,10 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
         if self.allowed_tools is not None:
             selected_prefixes = tuple(f'{service}_' for service in services)
             invalid = next(
-                (name for name in self.allowed_tools if not _belongs_to_selected_service(name, selected_prefixes)), None
+                (name for name in self.allowed_tools if not _belongs_to_selected_service(name, selected_prefixes)),
+                _MISSING,
             )
-            if invalid is not None:
+            if invalid is not _MISSING:
                 raise UserError(f'Allowed tool {invalid!r} does not belong to a selected service.')
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
