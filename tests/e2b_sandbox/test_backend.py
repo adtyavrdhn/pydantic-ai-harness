@@ -177,6 +177,14 @@ class TestConnect:
 
 
 class TestClose:
+    async def test_an_unused_backend_has_nothing_to_close(self, fake_e2b: FakeE2B) -> None:
+        # Building one does no I/O, so closing it must not reach E2B either -- resolving here
+        # would create the very sandbox being released.
+        await E2BSandboxBackend().close(terminate=True)
+
+        assert fake_e2b.sandboxes == []
+        assert fake_e2b.kill_ids == []
+
     async def test_kills_when_owned(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         await backend.close(terminate=True)

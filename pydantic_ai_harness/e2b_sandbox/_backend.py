@@ -498,12 +498,17 @@ class E2BSandboxBackend(SandboxBackend):
             raise E2BSandboxError(f'Could not connect to E2B sandbox {sandbox_id!r}: {type(e).__name__}: {e}') from e
 
     def _describe(self) -> str:
-        """How to name this sandbox in an error, before or after it exists."""
+        """How to name this sandbox in an error.
+
+        Every caller runs after `_resolve`, which sets `ref` alongside the live handle, so the
+        other two spellings are only reachable if that ever stops being true. `lax no cover`
+        for the same reason: they are a fallback, not a path tests should have to reach.
+        """
         if self._ref is not None:
             return repr(self._ref.sandbox_id)
-        if self._identity is not None:
-            return f'for {self._identity!r}'
-        return 'that was never started'
+        return (
+            f'for {self._identity!r}' if self._identity is not None else 'that was never started'
+        )  # pragma: lax no cover
 
     async def close(self, *, terminate: bool) -> None:
         """Release this handle, killing the sandbox with it when we own its lifetime.
