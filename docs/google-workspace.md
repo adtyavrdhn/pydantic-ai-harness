@@ -1,6 +1,6 @@
 # Google Workspace
 
-Google Workspace gives an agent selected Gmail, Calendar, Drive, Docs, Sheets, Slides, Chat, and People tools through Google's official remote MCP servers. Gmail and Calendar are selected by default.
+Google Workspace lets an agent read selected Gmail, Calendar, Drive, Docs, Sheets, Slides, Chat, and People data, with explicit opt-in for changes.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/google_workspace/)
 
@@ -8,30 +8,50 @@ Google Workspace gives an agent selected Gmail, Calendar, Drive, Docs, Sheets, S
 
 ## Install
 
-The capability uses Pydantic AI's MCP support. Install it alongside Harness:
-
 ```bash
-uv add "pydantic-ai-harness[google-workspace]" "pydantic-ai-slim[openai,spec]"
+uv add "pydantic-ai-harness[google-workspace]" "pydantic-ai-slim[openai]"
 ```
 
-Google's servers are in the Workspace Developer Preview Program. Enable the selected Workspace APIs and MCP services in a Google Cloud project before connecting.
+## Provider setup
 
-## Use Gmail and Calendar
+In Google Cloud:
 
-Create a Web application OAuth client in Google Cloud. Register `http://localhost:3000/callback` as an authorized redirect URI, including the scheme, host, port, and path exactly. Set `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, and `OPENAI_API_KEY`, then run:
+1. Join the Google Workspace Developer Preview Program, then enable the Workspace API and MCP service for each product you will select.
+2. Configure the OAuth consent screen. For an External audience, add every account that will sign in as a test user.
+3. Under Data Access, add the scopes for each selected product from the table below. Each value starts with `https://www.googleapis.com/auth/`.
+4. Create a Web application OAuth client and register `http://localhost:3000/callback` as an authorized redirect URI. The scheme, host, port, and path must match exactly.
+5. If you select Chat, configure the Google Chat API app and turn off **Enable interactive features**.
+
+| Product | Scope suffixes |
+|---|---|
+| Gmail | `gmail.readonly`, `gmail.compose` |
+| Drive | `drive.readonly`, `drive.file` |
+| Docs | `drive.readonly`, `drive.file`, `documents.readonly`, `documents` |
+| Sheets | `drive.readonly`, `drive.file`, `spreadsheets.readonly`, `spreadsheets` |
+| Slides | `drive.readonly`, `drive.file`, `presentations.readonly`, `presentations` |
+| Calendar | `calendar.calendarlist.readonly`, `calendar.events.freebusy`, `calendar.events.readonly` |
+| Chat | `chat.spaces.readonly`, `chat.memberships.readonly`, `chat.messages.readonly`, `chat.messages.create`, `chat.users.readstate` |
+| People | `directory.readonly`, `userinfo.profile`, `contacts.readonly` |
+
+Set these environment variables:
+
+- `GOOGLE_OAUTH_CLIENT_ID`: the pre-registered OAuth client ID.
+- `GOOGLE_OAUTH_CLIENT_SECRET`: the matching OAuth client secret.
+- `OPENAI_API_KEY`: the key used by the example model.
+
+The capability handles local OAuth. On the first connection, each selected service may open Google's authorization page in a browser and receive a callback on localhost. Tokens are kept in process memory and are not persisted across restarts. If port 3000 is unavailable, pass `oauth_callback_port=<port>` and register the exact matching `http://localhost:<port>/callback` URI.
+
+## Example
+
+Save this as `workspace_agent.py` after setting the three environment variables above:
 
 ```python
 import asyncio
-import os
 
 from pydantic_ai import Agent
 from pydantic_ai_harness import GoogleWorkspace
 
-workspace = GoogleWorkspace(
-    oauth_client_id=os.environ['GOOGLE_OAUTH_CLIENT_ID'],
-    oauth_client_secret=os.environ['GOOGLE_OAUTH_CLIENT_SECRET'],
-)
-agent = Agent('openai:gpt-5.6-sol', capabilities=[workspace])
+agent = Agent('openai:gpt-5.6-sol', capabilities=[GoogleWorkspace()])
 
 
 async def main() -> None:
@@ -42,105 +62,25 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The first connection opens Google's OAuth flow. Set `oauth_callback_port` and register the matching `http://localhost:<port>/callback` URI when port 3000 is unavailable. `GOOGLE_ACCESS_TOKEN` or `access_token=` can supply a caller-managed bearer token instead.
+Run it with `uv run python workspace_agent.py`.
 
-## Select products and tools
+## What you can ask
 
-Pass `services` to replace the Gmail and Calendar default. Every tool is prefixed by service, such as `gmail_search_threads`, `calendar_list_events`, or `drive_search_files`.
+- "Summarize unread project mail and list my meetings today."
+- "Find the launch plan in Drive, read the linked Doc, and show the budget values from its Sheet."
+- "Read the quarterly Slides presentation and list the files I can share with the team."
+- "Search Chat for the release decision and find the email address for its author in People."
 
-```python
-from pydantic_ai_harness import GoogleWorkspace
+## Operational constraints
 
-workspace = GoogleWorkspace(
-    services=('drive', 'docs', 'sheets'),
-    allowed_tools=('drive_search_files', 'docs_read_doc', 'sheets_get_values'),
-)
-```
+- Gmail and Calendar are selected by default. Pass `services=('drive', 'docs', 'sheets', 'slides', 'chat', 'people')` to select other products.
+- Tool names are prefixed by service. Use `allowed_tools=('gmail_search_threads', 'calendar_list_events')` for an exact allowlist.
+- `read_only=True` is the default. It filters the exposed tools, but it does not reduce the OAuth scopes configured for Google's remote service. Set `read_only=False` to expose server-provided mutation tools, then use `workspace.get_toolset().approval_required()` when those actions need human approval.
+- `GOOGLE_ACCESS_TOKEN` or `access_token=` accepts a caller-managed bearer token instead of local OAuth.
+- Hosted applications that own persistent or per-user OAuth can pass a caller-owned FastMCP client or `MCPToolset` for each selected service through `clients=`. One client represents one authenticated identity.
+- Workspace content can contain instructions aimed at the model. Keep mutation tools narrow and review proposed changes before approval.
 
-`allowed_tools` is an exact allowlist of prefixed names. It intersects with `read_only`, so a mutating name remains unavailable while `read_only=True`.
-
-The default read-only policy exposes these documented operations:
-
-| Product | Tools |
-|---|---|
-| Gmail | `get_message`, `get_thread`, `list_drafts`, `list_labels`, `search_threads` |
-| Calendar | `get_event`, `list_calendars`, `list_events`, `search_events`, `suggest_time` |
-| Drive | `download_file_content`, `get_file_metadata`, `get_file_permissions`, `list_recent_files`, `read_file_content`, `search_files` |
-| Docs | `read_doc` |
-| Sheets | `get_spreadsheet`, `get_values` |
-| Slides | `read_presentation` |
-| Chat | `list_memberships`, `list_messages`, `search_conversations`, `search_messages` |
-| People | `get_user_profile`, `search_contacts`, `search_directory_people` |
-
-Set `read_only=False` to expose other tools returned by the selected servers. This is explicit because those tools can create drafts and files, update documents, label messages, send chat messages, and change or delete calendar events.
-
-## Bring your own clients
-
-Pass one caller-owned FastMCP client or `MCPToolset` per service when the application owns OAuth, persistent token storage, tenant selection, or HTTP policy:
-
-```python
-from fastmcp import Client
-from fastmcp.client.auth import OAuth
-
-from pydantic_ai_harness import GoogleWorkspace
-
-gmail_url = 'https://gmailmcp.googleapis.com/mcp/v1'
-gmail = Client(
-    gmail_url,
-    auth=OAuth(
-        mcp_url=gmail_url,
-        client_id='your-client-id',
-        client_secret='your-client-secret',
-        callback_port=3000,
-    ),
-)
-workspace = GoogleWorkspace(services=('gmail',), clients={'gmail': gmail})
-```
-
-Configure `OAuth(token_storage=...)` on the client for persistent tokens. Construct a separate client mapping for each concurrent user's run. A shared MCP client represents one authenticated identity.
-
-## Mutations and approval
-
-Mutation tools are hidden until `read_only=False`. To require Pydantic AI approval before every exposed operation, wrap the generated toolset:
-
-```python
-import os
-
-from pydantic_ai import Agent
-from pydantic_ai_harness import GoogleWorkspace
-
-workspace = GoogleWorkspace(read_only=False, access_token=os.environ['GOOGLE_ACCESS_TOKEN'])
-agent = Agent(
-    'openai:gpt-5.6-sol',
-    toolsets=[workspace.get_toolset().approval_required()],
-    defer_model_check=True,
-)
-```
-
-Handle the resulting deferred requests with Pydantic AI's [tool approval](/ai/deferred-tools/) flow. For narrower approval, pass a predicate to `approval_required()`.
-
-Email, documents, calendar descriptions, and chat messages can contain indirect prompt injections. Keep mutation tools narrow, review deferred actions, and compose with an input or tool-result guard when content is not trusted.
-
-## Agent specs
-
-`GoogleWorkspace` supports Pydantic AI agent specs. Secrets and runtime clients are excluded, so provide authentication through environment variables or application code:
-
-```yaml
-model: openai:gpt-5.6-sol
-capabilities:
-  - GoogleWorkspace:
-      services: [gmail, calendar]
-      allowed_tools: [gmail_search_threads, calendar_list_events]
-```
-
-```python
-from pydantic_ai import Agent
-from pydantic_ai_harness import GoogleWorkspace
-
-agent = Agent.from_file('agent.yaml', custom_capability_types=[GoogleWorkspace])
-```
-
-Google's [Workspace MCP configuration guide](https://developers.google.com/workspace/guides/configure-mcp-servers) lists the required APIs, OAuth scopes, endpoints, and current tool catalog.
+Google's [Workspace MCP configuration guide](https://developers.google.com/workspace/guides/configure-mcp-servers) lists the provider setup, scopes, and current tool catalog.
 
 ## API reference
 
