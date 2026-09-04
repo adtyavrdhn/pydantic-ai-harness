@@ -81,6 +81,7 @@ class SlackChannel:
         self._bot_token = bot_token
         self._team_id = team_id
         self._client = client
+        self._post_lock = anyio.Lock()
 
     def parse_request(self, raw_body: bytes, headers: Mapping[str, str]) -> ChannelEvent | SlackUrlVerification | None:
         """Verify a raw Slack request and normalize supported message events.
@@ -127,11 +128,12 @@ class SlackChannel:
         if event.reply_to_id is not None:
             payload['thread_ts'] = event.reply_to_id
 
-        if self._client is None:
-            async with httpx.AsyncClient() as client:
-                await self._post(client, payload)
-        else:
-            await self._post(self._client, payload)
+        async with self._post_lock:
+            if self._client is None:
+                async with httpx.AsyncClient() as client:
+                    await self._post(client, payload)
+            else:
+                await self._post(self._client, payload)
 
     def _verify(self, raw_body: bytes, headers: Mapping[str, str]) -> None:
         normalized_headers = {name.lower(): value for name, value in headers.items()}
@@ -165,6 +167,8 @@ class SlackChannel:
                 headers={'Authorization': f'Bearer {self._bot_token}'},
                 json=payload,
             )
+            if response.status_code == 429:
+                await anyio.sleep(_retry_after_seconds(response))
         response.raise_for_status()
         try:
             body = _json_object(response.content)

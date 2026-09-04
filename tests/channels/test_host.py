@@ -147,14 +147,15 @@ class TestChannelHost:
             return ModelResponse(parts=[TextPart('done')])
 
         host = ChannelHost(Agent(FunctionModel(model)), _RecordingAdapter())
-        async with anyio.create_task_group() as group:
-            group.start_soon(host.handle, _event('same-1', 'same'))
-            group.start_soon(host.handle, _event('same-2', 'same'))
-            group.start_soon(host.handle, _event('other', 'other'))
-            await two_models_started.wait()
-            assert maximum_by_conversation == {'same': 1, 'other': 1}
-            assert maximum_total == 2
-            release_models.set()
+        with anyio.fail_after(5):
+            async with anyio.create_task_group() as group:
+                group.start_soon(host.handle, _event('same-1', 'same'))
+                group.start_soon(host.handle, _event('same-2', 'same'))
+                group.start_soon(host.handle, _event('other', 'other'))
+                await two_models_started.wait()
+                assert maximum_by_conversation == {'same': 1, 'other': 1}
+                assert maximum_total == 2
+                release_models.set()
 
         assert maximum_by_conversation == {'same': 1, 'other': 1}
         assert maximum_total == 2
@@ -269,13 +270,18 @@ class TestChannelHost:
         store = _RecordingStore()
         host = ChannelHost(Agent(FunctionModel(model)), adapter, store=store)
         task = asyncio.create_task(host.handle(_event('cancelled')))
-        await started.wait()
+        with anyio.fail_after(5):
+            await started.wait()
 
         task.cancel()
+        done, pending = await asyncio.wait({task}, timeout=5)
+        assert done == {task}
+        assert not pending
         with pytest.raises(asyncio.CancelledError):
             await task
         release.set()
-        await host.handle(_event('next'))
+        with anyio.fail_after(5):
+            await host.handle(_event('next'))
 
         assert len(adapter.replies) == 1
         assert len(store.saves) == 1
@@ -297,16 +303,21 @@ class TestChannelHost:
         store = _RecordingStore()
         host = ChannelHost(Agent(FunctionModel(model)), adapter, store=store)
         first = asyncio.create_task(host.handle(_event('first')))
-        await started.wait()
+        with anyio.fail_after(5):
+            await started.wait()
         waiting = asyncio.create_task(host.handle(_event('cancelled')))
         await asyncio.sleep(0)
 
         waiting.cancel()
+        done, pending = await asyncio.wait({waiting}, timeout=5)
+        assert done == {waiting}
+        assert not pending
         with pytest.raises(asyncio.CancelledError):
             await waiting
         release.set()
-        await first
-        await host.handle(_event('next'))
+        with anyio.fail_after(5):
+            await first
+            await host.handle(_event('next'))
 
         assert calls == 2
         assert len(adapter.replies) == 2
@@ -330,16 +341,21 @@ class TestChannelHost:
         store = BlockingLoadStore()
         host = ChannelHost(Agent('test'), adapter, store=store)
         task = asyncio.create_task(host.handle(_event('cancelled')))
-        await load_started.wait()
+        with anyio.fail_after(5):
+            await load_started.wait()
 
         task.cancel()
+        done, pending = await asyncio.wait({task}, timeout=5)
+        assert done == {task}
+        assert not pending
         with pytest.raises(asyncio.CancelledError):
             await task
         assert adapter.replies == []
         assert store.saves == []
 
         store.block = False
-        result = await host.handle(_event('next'))
+        with anyio.fail_after(5):
+            result = await host.handle(_event('next'))
         assert len(result.all_messages()) == 2
 
     async def test_cancellation_during_reply_leaves_history_uncommitted_and_releases_lock(self) -> None:
@@ -359,16 +375,21 @@ class TestChannelHost:
         store = _RecordingStore()
         host = ChannelHost(Agent('test'), adapter, store=store)
         task = asyncio.create_task(host.handle(_event('cancelled')))
-        await reply_started.wait()
+        with anyio.fail_after(5):
+            await reply_started.wait()
 
         task.cancel()
+        done, pending = await asyncio.wait({task}, timeout=5)
+        assert done == {task}
+        assert not pending
         with pytest.raises(asyncio.CancelledError):
             await task
         assert len(adapter.replies) == 1
         assert store.saves == []
 
         adapter.block = False
-        result = await host.handle(_event('next'))
+        with anyio.fail_after(5):
+            result = await host.handle(_event('next'))
         assert len(result.all_messages()) == 2
 
     async def test_cancellation_during_save_happens_after_reply_and_releases_lock(self) -> None:
@@ -386,13 +407,18 @@ class TestChannelHost:
         store = BlockingStore()
         host = ChannelHost(Agent('test'), adapter, store=store)
         task = asyncio.create_task(host.handle(_event('cancelled')))
-        await save_started.wait()
+        with anyio.fail_after(5):
+            await save_started.wait()
 
         task.cancel()
+        done, pending = await asyncio.wait({task}, timeout=5)
+        assert done == {task}
+        assert not pending
         with pytest.raises(asyncio.CancelledError):
             await task
         release_save.set()
-        result = await host.handle(_event('next'))
+        with anyio.fail_after(5):
+            result = await host.handle(_event('next'))
 
         assert len(adapter.replies) == 2
         assert [len(messages) for _, messages in store.saves] == [2, 2]

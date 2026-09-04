@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -369,7 +370,8 @@ class TestSlackReply:
         assert [request.headers['authorization'] for request in seen] == ['Bearer token'] * 2
         assert seen[0].content == seen[1].content
 
-    async def test_does_not_retry_a_second_rate_limit(self) -> None:
+    async def test_does_not_retry_a_second_rate_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        delays: list[float] = []
         responses = iter(
             [
                 httpx.Response(429, headers={'Retry-After': '0'}),
@@ -380,6 +382,11 @@ class TestSlackReply:
         def handler(_request: httpx.Request) -> httpx.Response:
             return next(responses)
 
+        async def record_delay(seconds: float) -> None:
+            delays.append(seconds)
+
+        monkeypatch.setattr(anyio, 'sleep', record_delay)
+
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             channel = SlackChannel(signing_secret='secret', bot_token='token', team_id='team', client=client)
             event = ChannelEvent(event_id='e', conversation_id='c', sender_id='u', text='x')
@@ -389,6 +396,117 @@ class TestSlackReply:
 
         assert rate_limit.value.response.status_code == 429
         assert rate_limit.value.response.headers['Retry-After'] == '3'
+        assert delays == [0, 3]
+
+    @pytest.mark.parametrize('anyio_backend', ['asyncio'])
+    async def test_rate_limit_wait_blocks_other_replies_for_the_installation(
+        self, anyio_backend: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        requests: list[httpx.Request] = []
+        retry_waiting = anyio.Event()
+        release_retry = anyio.Event()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if len(requests) == 1:
+                return httpx.Response(429, headers={'Retry-After': '7'})
+            return httpx.Response(200, json={'ok': True})
+
+        async def wait_for_retry(seconds: float) -> None:
+            assert seconds == 7
+            retry_waiting.set()
+            await release_retry.wait()
+
+        monkeypatch.setattr(anyio, 'sleep', wait_for_retry)
+        first_event = ChannelEvent(
+            event_id='e1', conversation_id='c1', sender_id='u', text='x', reply_to_id='1', delivery_id='C1'
+        )
+        second_event = ChannelEvent(
+            event_id='e2', conversation_id='c2', sender_id='u', text='x', reply_to_id='2', delivery_id='C2'
+        )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            channel = SlackChannel(signing_secret='secret', bot_token='token', team_id='team', client=client)
+            with anyio.fail_after(5):
+                async with anyio.create_task_group() as group:
+                    group.start_soon(channel.reply, first_event, 'first')
+                    await retry_waiting.wait()
+                    group.start_soon(channel.reply, second_event, 'second')
+                    await asyncio.sleep(0)
+                    assert len(requests) == 1
+                    release_retry.set()
+
+        assert anyio_backend == 'asyncio'
+        payloads = [json.loads(request.content) for request in requests]
+        assert [(payload['channel'], payload['thread_ts'], payload['text']) for payload in payloads] == [
+            ('C1', '1', 'first'),
+            ('C1', '1', 'first'),
+            ('C2', '2', 'second'),
+        ]
+
+    @pytest.mark.parametrize('anyio_backend', ['asyncio'])
+    async def test_second_rate_limit_keeps_other_replies_waiting(
+        self, anyio_backend: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        requests: list[httpx.Request] = []
+        delays: list[float] = []
+        cooldown_started = [anyio.Event(), anyio.Event()]
+        release_cooldown = [anyio.Event(), anyio.Event()]
+        errors: list[httpx.HTTPStatusError] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if len(requests) == 1:
+                return httpx.Response(429, headers={'Retry-After': '7'})
+            if len(requests) == 2:
+                return httpx.Response(429, headers={'Retry-After': '11'})
+            return httpx.Response(200, json={'ok': True})
+
+        async def wait_for_retry(seconds: float) -> None:
+            index = len(delays)
+            delays.append(seconds)
+            cooldown_started[index].set()
+            await release_cooldown[index].wait()
+
+        async def record_first_failure(channel: SlackChannel, event: ChannelEvent) -> None:
+            try:
+                await channel.reply(event, 'first')
+            except httpx.HTTPStatusError as exc:
+                errors.append(exc)
+
+        monkeypatch.setattr(anyio, 'sleep', wait_for_retry)
+        first_event = ChannelEvent(
+            event_id='e1', conversation_id='c1', sender_id='u', text='x', reply_to_id='1', delivery_id='C1'
+        )
+        second_event = ChannelEvent(
+            event_id='e2', conversation_id='c2', sender_id='u', text='x', reply_to_id='2', delivery_id='C2'
+        )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            channel = SlackChannel(signing_secret='secret', bot_token='token', team_id='team', client=client)
+            with anyio.fail_after(5):
+                async with anyio.create_task_group() as group:
+                    group.start_soon(record_first_failure, channel, first_event)
+                    await cooldown_started[0].wait()
+                    group.start_soon(channel.reply, second_event, 'second')
+                    await asyncio.sleep(0)
+                    assert len(requests) == 1
+                    release_cooldown[0].set()
+                    await cooldown_started[1].wait()
+                    await asyncio.sleep(0)
+                    assert len(requests) == 2
+                    release_cooldown[1].set()
+
+        assert anyio_backend == 'asyncio'
+        assert delays == [7, 11]
+        assert len(errors) == 1
+        assert errors[0].response.status_code == 429
+        payloads = [json.loads(request.content) for request in requests]
+        assert [(payload['channel'], payload['thread_ts'], payload['text']) for payload in payloads] == [
+            ('C1', '1', 'first'),
+            ('C1', '1', 'first'),
+            ('C2', '2', 'second'),
+        ]
 
     @pytest.mark.parametrize('headers', [{}, {'Retry-After': 'invalid'}, {'Retry-After': '-1'}])
     async def test_rejects_invalid_rate_limit_delay(self, headers: Mapping[str, str]) -> None:
@@ -412,7 +530,9 @@ class TestSlackReply:
 
         def handler(request: httpx.Request) -> httpx.Response:
             requests.append(request)
-            return httpx.Response(429, headers={'Retry-After': '60'})
+            if len(requests) == 1:
+                return httpx.Response(429, headers={'Retry-After': '60'})
+            return httpx.Response(200, json={'ok': True})
 
         def client_factory() -> httpx.AsyncClient:
             client = async_client_type(transport=httpx.MockTransport(handler))
@@ -432,14 +552,18 @@ class TestSlackReply:
             with cancel_scope:
                 await channel.reply(ChannelEvent(event_id='e', conversation_id='c', sender_id='u', text='x'), 'reply')
 
-        async with anyio.create_task_group() as group:
-            group.start_soon(run_reply)
-            await waiting.wait()
-            cancel_scope.cancel()
+        with anyio.fail_after(5):
+            async with anyio.create_task_group() as group:
+                group.start_soon(run_reply)
+                await waiting.wait()
+                cancel_scope.cancel()
 
-        assert len(requests) == 1
-        assert len(clients) == 1
-        assert clients[0].is_closed
+        with anyio.fail_after(5):
+            await channel.reply(ChannelEvent(event_id='next', conversation_id='next', sender_id='u', text='x'), 'next')
+
+        assert len(requests) == 2
+        assert len(clients) == 2
+        assert all(client.is_closed for client in clients)
 
     async def test_closes_short_lived_default_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         clients: list[httpx.AsyncClient] = []
@@ -489,8 +613,13 @@ class TestSlackReply:
         clients: list[httpx.AsyncClient] = []
         async_client_type = httpx.AsyncClient
         started = anyio.Event()
+        requests = 0
 
         async def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal requests
+            requests += 1
+            if requests > 1:
+                return httpx.Response(200, json={'ok': True})
             started.set()
             await anyio.Event().wait()
             return httpx.Response(200, json={'ok': True})  # pragma: no cover - cancellation prevents return
@@ -509,13 +638,18 @@ class TestSlackReply:
             with cancel_scope:
                 await channel.reply(ChannelEvent(event_id='e', conversation_id='c', sender_id='u', text='x'), 'reply')
 
-        async with anyio.create_task_group() as group:
-            group.start_soon(run_reply)
-            await started.wait()
-            cancel_scope.cancel()
+        with anyio.fail_after(5):
+            async with anyio.create_task_group() as group:
+                group.start_soon(run_reply)
+                await started.wait()
+                cancel_scope.cancel()
 
-        assert len(clients) == 1
-        assert clients[0].is_closed
+        with anyio.fail_after(5):
+            await channel.reply(ChannelEvent(event_id='next', conversation_id='next', sender_id='u', text='x'), 'next')
+
+        assert requests == 2
+        assert len(clients) == 2
+        assert all(client.is_closed for client in clients)
 
 
 def test_secrets_are_absent_from_repr() -> None:

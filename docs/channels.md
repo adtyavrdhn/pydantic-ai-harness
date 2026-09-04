@@ -64,11 +64,15 @@ slack = SlackChannel(
     team_id=os.environ['SLACK_TEAM_ID'],
 )
 host = ChannelHost(agent, slack)
-send_events, receive_events = anyio.create_memory_object_stream[ChannelEvent](100)
+worker_streams = [anyio.create_memory_object_stream[ChannelEvent](5) for _ in range(20)]
 
 
-async def consume_events() -> None:
-    async with receive_events:
+def worker_for(event: ChannelEvent) -> int:
+    return hash(event.conversation_id) % len(worker_streams)
+
+
+async def consume_events(worker: int) -> None:
+    async with worker_streams[worker][1] as receive_events:
         async for event in receive_events:
             try:
                 await host.handle(event)
@@ -79,7 +83,8 @@ async def consume_events() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     async with anyio.create_task_group() as group:
-        group.start_soon(consume_events)
+        for worker in range(len(worker_streams)):
+            group.start_soon(consume_events, worker)
         yield
         group.cancel_scope.cancel()
 
@@ -100,6 +105,7 @@ async def receive_slack_event(request: Request) -> Response:
     if isinstance(parsed, SlackUrlVerification):
         return PlainTextResponse(parsed.challenge)
     if parsed is not None:
+        send_events = worker_streams[worker_for(parsed)][0]
         with anyio.move_on_after(2) as enqueue_scope:
             await send_events.send(parsed)
         if enqueue_scope.cancel_called:
@@ -126,14 +132,14 @@ Expose port 8000 through your HTTPS host, invite the bot to a channel, and menti
 
 - Pass the untouched request bytes to `parse_request()`. Reading and re-encoding JSON first breaks signature verification.
 - Limit request-body size at the HTTPS server or proxy before FastAPI reads it. `parse_request()` verifies supplied bytes but does not own network admission.
-- Slack expects a response within three seconds and retries failed delivery. The example reserves two seconds for its bounded in-process queue and returns 503 when full. Use a durable queue for production.
+- Slack expects a response within three seconds and retries failed delivery. The example reserves two seconds for bounded, sharded in-process queues and returns 503 when one is full. Use a durable queue for production.
 - Claim `event_id` before calling `handle()` if duplicate agent turns are unacceptable. The host does not claim, acknowledge, or retry events.
 - The default history store is process-local and loses history on restart. Pass a `ConversationStore` implementation for persistent history.
 - Events are serialized per Slack workspace, channel, and thread inside one `ChannelHost`. Coordinate workers outside the package when several processes share a store.
 - Signature verification authenticates Slack, not the sender. Check `sender_id` and `delivery_id` before enqueueing if only selected users or channels may invoke the agent.
 - The host sends the reply before saving history. A save failure can occur after Slack receives the reply, so do not blindly retry an ambiguous whole handler call.
 - Slack may truncate replies over 40,000 characters. The adapter raises `SlackAPIError` when Slack reports that warning instead of treating a partial reply as success.
-- On the first HTTP 429, the adapter waits for `Retry-After` and retries the same generated reply once. A second 429 propagates; timeouts and 5xx responses are not retried because their delivery outcome can be ambiguous.
+- On the first HTTP 429, this adapter instance pauses its replies in the current process, waits for `Retry-After`, and retries the same generated reply once. A second 429 waits again before it propagates; timeouts and 5xx responses are not retried because their delivery outcome can be ambiguous.
 - The caller owns FastAPI, the queue, OAuth, and any injected `httpx.AsyncClient`.
 - While Harness is on 0.x releases, minor releases may change this API. See the [version policy](index.md#version-policy).
 
