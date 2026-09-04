@@ -75,35 +75,42 @@ def atlassian_server(atlassian_calls: list[str]) -> FastMCP:
     @server.tool()
     def getConfluenceContent(cloudId: str, contentId: str) -> dict[str, str]:
         """Get one Confluence content item."""
+        atlassian_calls.append('getConfluenceContent')
         return {'cloudId': cloudId, 'id': contentId}
 
     @server.tool()
     def createConfluenceContent(cloudId: str, title: str) -> dict[str, str]:
         """Create one Confluence content item."""
+        atlassian_calls.append('createConfluenceContent')
         return {'cloudId': cloudId, 'title': title}
 
     @server.tool()
     def getJsmOpsAlerts(cloudId: str) -> list[dict[str, str]]:
         """Get Jira Service Management alerts."""
+        atlassian_calls.append('getJsmOpsAlerts')
         return [{'cloudId': cloudId, 'id': 'alert-1'}]
 
     @server.tool()
     def updateJsmOpsAlert(cloudId: str, alertId: str) -> dict[str, str]:
         """Update one Jira Service Management alert."""
+        atlassian_calls.append('updateJsmOpsAlert')
         return {'cloudId': cloudId, 'id': alertId}
 
     @server.tool()
     def getBitbucketRepository(cloudId: str, workspace: str, repoSlug: str) -> dict[str, str]:
         """Get one Bitbucket repository."""
+        atlassian_calls.append('getBitbucketRepository')
         return {'cloudId': cloudId, 'workspace': workspace, 'slug': repoSlug}
 
     @server.tool()
     def createBitbucketRepoPullRequest(cloudId: str, workspace: str, repoSlug: str) -> dict[str, str]:
         """Create one Bitbucket pull request."""
+        atlassian_calls.append('createBitbucketRepoPullRequest')
         return {'cloudId': cloudId, 'workspace': workspace, 'slug': repoSlug}
 
+    # An exact allowlist is expected never to execute this fake server tool.
     @server.tool()
-    def futureUnreviewedAtlassianMutation(cloudId: str) -> dict[str, str]:
+    def futureUnreviewedAtlassianMutation(cloudId: str) -> dict[str, str]:  # pragma: no cover
         """A future server tool that Harness has not reviewed."""
         return {'cloudId': cloudId}
 
@@ -117,13 +124,9 @@ def unavailable_atlassian_server() -> FastMCP:
     Settings.model_rebuild()
     server = FastMCP('atlassian-unavailable-fake')
 
+    # A fail-closed allowlist is expected never to execute this fake server tool.
     @server.tool()
-    def atlassianUserInfo() -> dict[str, str]:
-        """Return the authenticated Atlassian user."""
-        return {'accountId': 'user-1'}
-
-    @server.tool()
-    def futureUnreviewedAtlassianMutation(cloudId: str) -> dict[str, str]:
+    def futureUnreviewedAtlassianMutation(cloudId: str) -> dict[str, str]:  # pragma: no cover
         """A future server tool that Harness has not reviewed."""
         return {'cloudId': cloudId}
 

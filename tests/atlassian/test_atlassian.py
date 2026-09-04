@@ -22,7 +22,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 
-from pydantic_ai_harness.atlassian import Atlassian, AtlassianToolset
+from pydantic_ai_harness.atlassian import Atlassian, AtlassianAccess, AtlassianProduct, AtlassianToolset
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
@@ -223,6 +223,50 @@ class TestAtlassian:
         async with toolset:
             tools = await toolset.get_tools(run_context)
         assert set(tools) == expected
+
+    @pytest.mark.parametrize(
+        ('product', 'access', 'tool_name', 'args'),
+        [
+            ('jira', 'read_write', 'createJiraIssue', {'cloudId': 'site-1', 'projectKey': 'ENG', 'summary': 'Fix SSO'}),
+            ('jira', 'destructive', 'deleteJiraIssue', {'cloudId': 'site-1', 'issueIdOrKey': 'ENG-42'}),
+            ('confluence', 'read_only', 'getConfluenceContent', {'cloudId': 'site-1', 'contentId': 'page-1'}),
+            ('confluence', 'read_write', 'createConfluenceContent', {'cloudId': 'site-1', 'title': 'Runbook'}),
+            ('jira_service_management', 'read_only', 'getJsmOpsAlerts', {'cloudId': 'site-1'}),
+            (
+                'jira_service_management',
+                'read_write',
+                'updateJsmOpsAlert',
+                {'cloudId': 'site-1', 'alertId': 'alert-1'},
+            ),
+            (
+                'bitbucket',
+                'read_only',
+                'getBitbucketRepository',
+                {'cloudId': 'site-1', 'workspace': 'acme', 'repoSlug': 'api'},
+            ),
+            (
+                'bitbucket',
+                'read_write',
+                'createBitbucketRepoPullRequest',
+                {'cloudId': 'site-1', 'workspace': 'acme', 'repoSlug': 'api'},
+            ),
+        ],
+    )
+    async def test_selected_product_tools_execute_at_the_mcp_boundary(
+        self,
+        product: AtlassianProduct,
+        access: AtlassianAccess,
+        tool_name: str,
+        args: dict[str, Any],
+        atlassian_server: FastMCP,
+        atlassian_calls: list[str],
+        run_context: RunContext[None],
+    ):
+        toolset = AtlassianToolset[None](cloud_id='site-1', products=product, access=access, client=atlassian_server)
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            await toolset.call_tool(tool_name, args, run_context, tools[tool_name])
+        assert atlassian_calls == [tool_name]
 
     async def test_product_selection_combines_without_future_tools(
         self, atlassian_server: FastMCP, run_context: RunContext[None]
