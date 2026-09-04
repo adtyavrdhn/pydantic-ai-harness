@@ -25,11 +25,15 @@ from pydantic import TypeAdapter, ValidationError
 
 from ._host import ChannelEvent
 
+__all__ = ('TelegramChannel', 'TelegramError', 'TelegramPartialDeliveryError', 'TelegramWebhookError')
+
 _DEFAULT_API_URL = 'https://api.telegram.org'
 _MAX_TEXT_CHARS = 4096
 _MAX_RETRY_AFTER_SECONDS = 60
 _SECRET_PATTERN = re.compile(r'[A-Za-z0-9_-]{1,256}')
-_CONVERSATION_PATTERN = re.compile(r'telegram:chat:(-?[1-9][0-9]*)(?::(topic|direct-topic):([1-9][0-9]*))?')
+_CONVERSATION_PATTERN = re.compile(
+    r'telegram:bot:([1-9][0-9]*):chat:(-?[1-9][0-9]*)(?::(topic|direct-topic):([1-9][0-9]*))?'
+)
 _MESSAGE_PATTERN = re.compile(r'telegram:message:([1-9][0-9]*)')
 _TELEGRAM_URL_PATTERN = re.compile(r'(https?://[^\s]*?/bot)[^/\s]+(/[^\s]+)')
 _JSON_ADAPTER: TypeAdapter[object] = TypeAdapter(object)
@@ -77,6 +81,7 @@ class TelegramChannel:
     def __init__(
         self,
         *,
+        bot_id: int,
         bot_token: str,
         webhook_secret: str,
         allowed_senders: Collection[int],
@@ -86,12 +91,15 @@ class TelegramChannel:
         """Configure Telegram authentication, admission, and HTTP transport.
 
         Args:
+            bot_id: Public Telegram user ID of the bot, used to scope stored identities.
             bot_token: Token issued by BotFather for Bot API requests.
             webhook_secret: Secret configured through Telegram's `setWebhook` method.
             allowed_senders: Telegram user or sender-chat IDs allowed to start runs.
             client: Optional pooled HTTP client. The caller retains ownership.
             api_url: Bot API server base URL.
         """
+        if not _is_integer_id(bot_id) or bot_id <= 0:
+            raise ValueError('bot_id must be a positive integer Telegram ID')
         if not bot_token:
             raise ValueError('bot_token must not be empty')
         if _SECRET_PATTERN.fullmatch(webhook_secret) is None:
@@ -107,6 +115,7 @@ class TelegramChannel:
         if not api_url:
             raise ValueError('api_url must not be empty')
 
+        self._bot_id = bot_id
         self._bot_token = bot_token
         self._webhook_secret = webhook_secret
         self._allowed_senders = sender_ids
@@ -144,11 +153,11 @@ class TelegramChannel:
         if sender_id not in self._allowed_senders:
             return None
 
-        conversation_id = f'telegram:chat:{chat_id}'
+        conversation_id = f'telegram:bot:{self._bot_id}:chat:{chat_id}'
         if topic_kind is not None:
             conversation_id += f':{topic_kind}:{topic_id}'
         return ChannelEvent(
-            event_id=f'telegram:update:{update_id}',
+            event_id=f'telegram:bot:{self._bot_id}:update:{update_id}',
             conversation_id=conversation_id,
             sender_id=f'telegram:{sender_kind}:{sender_id}',
             text=text,
@@ -188,7 +197,7 @@ class TelegramChannel:
         """
         if not text:
             raise ValueError('text must not be empty')
-        chat_id, topic_kind, topic_id = _decode_conversation(event.conversation_id)
+        chat_id, topic_kind, topic_id = _decode_conversation(event.conversation_id, bot_id=self._bot_id)
         message_id = _decode_message(event.reply_to_id)
 
         chunks = [text[start : start + _MAX_TEXT_CHARS] for start in range(0, len(text), _MAX_TEXT_CHARS)]
@@ -246,11 +255,16 @@ class TelegramChannel:
             envelope = None
         if envelope is None:
             raise TelegramError(f'Telegram Bot API returned an invalid response: {method}')
-        if response.is_success and envelope.get('ok') is True:
+        ok = envelope.get('ok')
+        if not isinstance(ok, bool):
+            raise TelegramError(f'Telegram Bot API returned an invalid response: {method}')
+        if response.is_success and ok:
             result = _mapping(envelope.get('result'))
             sent_message_id = result.get('message_id') if result is not None else None
             if _is_integer_id(sent_message_id) and sent_message_id >= 0:
                 return
+            raise TelegramError(f'Telegram Bot API returned an invalid response: {method}')
+        if ok:
             raise TelegramError(f'Telegram Bot API returned an invalid response: {method}')
 
         description = envelope.get('description')
@@ -348,12 +362,12 @@ def _redact_log_argument(value: object) -> object:
     return value
 
 
-def _decode_conversation(conversation_id: str) -> tuple[int, str | None, int | None]:
+def _decode_conversation(conversation_id: str, *, bot_id: int) -> tuple[int, str | None, int | None]:
     match = _CONVERSATION_PATTERN.fullmatch(conversation_id)
-    if match is None:
+    if match is None or int(match.group(1)) != bot_id:
         raise TelegramError('event conversation_id is not a Telegram chat identity')
-    topic = match.group(3)
-    return int(match.group(1)), match.group(2), int(topic) if topic is not None else None
+    topic = match.group(4)
+    return int(match.group(2)), match.group(3), int(topic) if topic is not None else None
 
 
 def _decode_message(reply_to_id: str | None) -> int | None:

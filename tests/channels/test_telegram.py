@@ -57,6 +57,7 @@ def _update(
 
 def _channel(client: httpx.AsyncClient | None = None) -> TelegramChannel:
     return TelegramChannel(
+        bot_id=9001,
         bot_token='bot-secret',
         webhook_secret='webhook-secret',
         allowed_senders={22},
@@ -74,12 +75,26 @@ class TestTelegramChannel:
         )
 
         assert event == ChannelEvent(
-            event_id='telegram:update:11',
-            conversation_id='telegram:chat:-100123:topic:44',
+            event_id='telegram:bot:9001:update:11',
+            conversation_id='telegram:bot:9001:chat:-100123:topic:44',
             sender_id='telegram:user:22',
             text='hello',
             reply_to_id='telegram:message:33',
         )
+
+    async def test_scopes_claims_and_history_to_bot(self) -> None:
+        first = _channel().parse_request(_update(), _headers())
+        second = TelegramChannel(
+            bot_id=9002,
+            bot_token='other-secret',
+            webhook_secret='webhook-secret',
+            allowed_senders={22},
+        ).parse_request(_update(), _headers())
+
+        assert first is not None
+        assert second is not None
+        assert first.event_id != second.event_id
+        assert first.conversation_id != second.conversation_id
 
     async def test_rejects_unverified_or_malformed_webhook(self) -> None:
         channel = _channel()
@@ -143,6 +158,7 @@ class TestTelegramChannel:
         message['sender_chat'] = {'id': -100999}
         body['message'] = message
         channel = TelegramChannel(
+            bot_id=9001,
             bot_token='bot-secret',
             webhook_secret='webhook-secret',
             allowed_senders={-100999},
@@ -219,7 +235,7 @@ class TestTelegramChannel:
 
         plain_event = channel.parse_request(_update(topic_id=None), _headers())
         assert plain_event is not None
-        assert plain_event.conversation_id == 'telegram:chat:-100123'
+        assert plain_event.conversation_id == 'telegram:bot:9001:chat:-100123'
 
     async def test_preserves_direct_message_topic_identity(self) -> None:
         requests: list[dict[str, object]] = []
@@ -238,7 +254,7 @@ class TestTelegramChannel:
         event = channel.parse_request(json.dumps(body).encode(), _headers())
 
         assert event is not None
-        assert event.conversation_id == 'telegram:chat:-100123:direct-topic:55'
+        assert event.conversation_id == 'telegram:bot:9001:chat:-100123:direct-topic:55'
         await channel.reply(event, 'answer')
         assert requests == [
             {
@@ -282,7 +298,7 @@ class TestTelegramChannel:
             claimed.add(event.event_id)
             await host.handle(event)
 
-        assert claimed == {'telegram:update:11'}
+        assert claimed == {'telegram:bot:9001:update:11'}
         assert len(requests) == 1
         await client.aclose()
 
@@ -321,8 +337,8 @@ class TestTelegramChannel:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         channel = _channel(client)
         event = ChannelEvent(
-            event_id='telegram:update:1',
-            conversation_id='telegram:chat:7',
+            event_id='telegram:bot:9001:update:1',
+            conversation_id='telegram:bot:9001:chat:7',
             sender_id='telegram:user:22',
             text='prompt',
         )
@@ -463,6 +479,7 @@ class TestTelegramChannel:
             (
                 httpx.Response(200, content=b'not json'),
                 _response([], status_code=500),
+                _response({}),
                 _response({'ok': False}, status_code=401),
                 _response({'ok': True}, status_code=500),
                 _response({'ok': True}),
@@ -475,20 +492,20 @@ class TestTelegramChannel:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         channel = _channel(client)
         event = ChannelEvent(
-            event_id='telegram:update:1',
-            conversation_id='telegram:chat:7',
+            event_id='telegram:bot:9001:update:1',
+            conversation_id='telegram:bot:9001:chat:7',
             sender_id='telegram:user:22',
             text='prompt',
         )
 
-        for _ in range(5):
+        for _ in range(6):
             with pytest.raises(TelegramError):
                 await channel.reply(event, 'answer')
 
         with pytest.raises(TelegramError, match='conversation_id'):
             await channel.reply(
                 ChannelEvent(
-                    event_id='telegram:update:1',
+                    event_id='telegram:bot:9001:update:1',
                     conversation_id='slack:channel:7',
                     sender_id='telegram:user:22',
                     text='prompt',
@@ -498,8 +515,18 @@ class TestTelegramChannel:
         with pytest.raises(TelegramError, match='conversation_id'):
             await channel.reply(
                 ChannelEvent(
-                    event_id='telegram:update:1',
-                    conversation_id='telegram:chat:7:topic:0',
+                    event_id='telegram:bot:9002:update:1',
+                    conversation_id='telegram:bot:9002:chat:7',
+                    sender_id='telegram:user:22',
+                    text='prompt',
+                ),
+                'answer',
+            )
+        with pytest.raises(TelegramError, match='conversation_id'):
+            await channel.reply(
+                ChannelEvent(
+                    event_id='telegram:bot:9001:update:1',
+                    conversation_id='telegram:bot:9001:chat:7:topic:0',
                     sender_id='telegram:user:22',
                     text='prompt',
                 ),
@@ -508,8 +535,8 @@ class TestTelegramChannel:
         with pytest.raises(TelegramError, match='reply_to_id'):
             await channel.reply(
                 ChannelEvent(
-                    event_id='telegram:update:1',
-                    conversation_id='telegram:chat:7',
+                    event_id='telegram:bot:9001:update:1',
+                    conversation_id='telegram:bot:9001:chat:7',
                     sender_id='telegram:user:22',
                     text='prompt',
                     reply_to_id='slack:message:2',
@@ -519,8 +546,8 @@ class TestTelegramChannel:
         with pytest.raises(TelegramError, match='reply_to_id'):
             await channel.reply(
                 ChannelEvent(
-                    event_id='telegram:update:1',
-                    conversation_id='telegram:chat:7',
+                    event_id='telegram:bot:9001:update:1',
+                    conversation_id='telegram:bot:9001:chat:7',
                     sender_id='telegram:user:22',
                     text='prompt',
                     reply_to_id='telegram:message:0',
@@ -562,6 +589,32 @@ class TestTelegramChannel:
         assert calls == 1
         await client.aclose()
 
+    async def test_does_not_retry_malformed_rate_limit_envelope(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = 0
+
+        async def sleep(_delay: float) -> None:
+            pytest.fail('malformed response must not sleep')
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return _response(
+                {'ok': True, 'parameters': {'retry_after': 1}},
+                status_code=429,
+            )
+
+        monkeypatch.setattr('pydantic_ai_harness.channels.telegram.anyio.sleep', sleep)
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        channel = _channel(client)
+        event = channel.parse_request(_update(), _headers())
+        assert event is not None
+
+        with pytest.raises(TelegramError, match='invalid response'):
+            await channel.reply(event, 'answer')
+
+        assert calls == 1
+        await client.aclose()
+
     async def test_uses_custom_api_url(self, caplog: pytest.LogCaptureFixture) -> None:
         requests: list[httpx.Request] = []
 
@@ -571,6 +624,7 @@ class TestTelegramChannel:
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         channel = TelegramChannel(
+            bot_id=9001,
             bot_token='bot-secret',
             webhook_secret='webhook-secret',
             allowed_senders={22},
@@ -663,17 +717,24 @@ class TestTelegramChannel:
         await client.aclose()
 
     async def test_validates_configuration(self) -> None:
+        with pytest.raises(ValueError, match='bot_id'):
+            TelegramChannel(bot_id=0, bot_token='token', webhook_secret='secret', allowed_senders={22})
         with pytest.raises(ValueError, match='bot_token'):
-            TelegramChannel(bot_token='', webhook_secret='secret', allowed_senders={22})
+            TelegramChannel(bot_id=9001, bot_token='', webhook_secret='secret', allowed_senders={22})
         with pytest.raises(ValueError, match='webhook_secret'):
-            TelegramChannel(bot_token='token', webhook_secret='', allowed_senders={22})
+            TelegramChannel(bot_id=9001, bot_token='token', webhook_secret='', allowed_senders={22})
         with pytest.raises(ValueError, match='webhook_secret'):
-            TelegramChannel(bot_token='token', webhook_secret='contains spaces', allowed_senders={22})
+            TelegramChannel(bot_id=9001, bot_token='token', webhook_secret='contains spaces', allowed_senders={22})
         with pytest.raises(ValueError, match='allowed_senders'):
-            TelegramChannel(bot_token='token', webhook_secret='secret', allowed_senders=set())
+            TelegramChannel(bot_id=9001, bot_token='token', webhook_secret='secret', allowed_senders=set())
         with pytest.raises(TypeError, match='allowed_senders'):
-            TelegramChannel(bot_token='token', webhook_secret='secret', allowed_senders='22')  # type: ignore[arg-type]
+            TelegramChannel(
+                bot_id=9001,
+                bot_token='token',
+                webhook_secret='secret',
+                allowed_senders='22',  # type: ignore[arg-type]
+            )
         with pytest.raises(TypeError, match='allowed_senders'):
-            TelegramChannel(bot_token='token', webhook_secret='secret', allowed_senders={True})
+            TelegramChannel(bot_id=9001, bot_token='token', webhook_secret='secret', allowed_senders={True})
         with pytest.raises(ValueError, match='api_url'):
-            TelegramChannel(bot_token='token', webhook_secret='secret', allowed_senders={22}, api_url='')
+            TelegramChannel(bot_id=9001, bot_token='token', webhook_secret='secret', allowed_senders={22}, api_url='')
