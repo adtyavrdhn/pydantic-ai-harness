@@ -49,7 +49,7 @@ async def _sandbox_is_file(sandbox: Sandbox, path: Path) -> bool:
     """True when `path` exists and is a regular file inside `sandbox`."""
     text = str(path)
     try:
-        entry = await sandbox.fs.stat(text)
+        entry = await sandbox.stat(text)
     except (FileNotFoundError, NotADirectoryError):
         return False
     return not entry.is_dir
@@ -81,7 +81,7 @@ async def discover_instruction_files(
                 continue
             if candidate in seen_paths:
                 continue
-            content = (await sandbox.fs.read_bytes(str(candidate))).decode('utf-8', errors='replace')
+            content = (await sandbox.read_bytes(str(candidate))).decode('utf-8', errors='replace')
             digest = hashlib.sha256(content.encode('utf-8')).hexdigest()
             if digest in seen_hashes:
                 continue
@@ -99,7 +99,7 @@ async def find_dir_context_file(sandbox: Sandbox, directory: Path, filenames: Se
             return ContextFile(
                 directory=directory,
                 path=candidate,
-                content=(await sandbox.fs.read_bytes(str(candidate))).decode('utf-8', errors='replace'),
+                content=(await sandbox.read_bytes(str(candidate))).decode('utf-8', errors='replace'),
             )
     return None
 

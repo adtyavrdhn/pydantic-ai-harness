@@ -51,7 +51,7 @@ async def scan_assets(sandbox: Sandbox, workspace_dir: Path, asset_roots: Sequen
         directory = posixpath.normpath(posixpath.join(workspace, name))
         notes = _ROOT_NOTES.get(name)
         try:
-            entry = await sandbox.fs.stat(directory)
+            entry = await sandbox.stat(directory)
         except FileNotFoundError:
             roots.append(AssetRoot(root=name, exists=False, notes=notes))
             continue
@@ -83,7 +83,7 @@ async def _scan_skills(sandbox: Sandbox, skills_root: str, workspace: str) -> li
         directory, depth = pending.popleft()
         # Defensive race: the directory may disappear after `_stat`.
         try:
-            entries = await sandbox.fs.list_dir(directory)
+            entries = await sandbox.list_dir(directory)
         except FileNotFoundError:  # pragma: no cover
             continue
         for entry in entries:
@@ -101,7 +101,7 @@ async def _scan_agents(sandbox: Sandbox, agents_root: str, workspace: str) -> li
         return []
     # Defensive race: the directory may disappear after `_stat`.
     try:
-        entries = await sandbox.fs.list_dir(agents_root)
+        entries = await sandbox.list_dir(agents_root)
     except FileNotFoundError:  # pragma: no cover
         return []
     return [_relative(entry.path, workspace) for entry in entries if not entry.is_dir and entry.name.endswith('.md')]
@@ -109,7 +109,7 @@ async def _scan_agents(sandbox: Sandbox, agents_root: str, workspace: str) -> li
 
 async def _stat(sandbox: Sandbox, path: str) -> SandboxFileEntry | None:
     try:
-        return await sandbox.fs.stat(path)
+        return await sandbox.stat(path)
     except FileNotFoundError:
         return None
 
