@@ -221,6 +221,41 @@ class _ResultBackend(_LocalFilesystemBackend):
         return self.result
 
 
+async def test_error_backend_implements_the_complete_flat_filesystem() -> None:
+    error = RuntimeError('filesystem failed')
+    backend = _ErrorBackend(error)
+
+    for operation in (
+        backend.read_bytes('/file'),
+        backend.write_bytes('/file', b'data'),
+        backend.stat('/file'),
+        backend.list_dir('/'),
+        backend.make_dir('/dir'),
+        backend.remove('/file'),
+        backend.exists('/file'),
+    ):
+        with pytest.raises(RuntimeError, match='filesystem failed'):
+            await operation
+
+
+async def test_local_test_backend_delegates_the_complete_flat_filesystem(tmp_path: Path) -> None:
+    async with LocalSandbox(root=tmp_path) as local:
+        backend = _LocalFilesystemBackend(local)
+        directory = str(tmp_path / 'nested')
+        path = f'{directory}/file.txt'
+
+        await backend.make_dir(directory)
+        await backend.write_bytes(path, b'data')
+
+        assert await backend.read_bytes(path) == b'data'
+        assert (await backend.stat(path)).size == 4
+        assert [entry.name for entry in await backend.list_dir(directory)] == ['file.txt']
+        assert await backend.exists(path) is True
+
+        await backend.remove(path)
+        assert await backend.exists(path) is False
+
+
 # --- the root directory ---
 
 

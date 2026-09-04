@@ -515,6 +515,24 @@ class _RecordingLocalBackend:
         return result
 
 
+async def test_recording_backend_delegates_the_complete_flat_filesystem(tmp_path: Path) -> None:
+    async with LocalSandbox(root=tmp_path) as local:
+        backend = _RecordingLocalBackend(local)
+        directory = str(tmp_path / 'nested')
+        path = f'{directory}/file.txt'
+
+        await backend.make_dir(directory)
+        await backend.write_bytes(path, b'data')
+
+        assert await backend.read_bytes(path) == b'data'
+        assert (await backend.stat(path)).size == 4
+        assert [entry.name for entry in await backend.list_dir(directory)] == ['file.txt']
+        assert await backend.exists(path) is True
+
+        await backend.remove(path)
+        assert await backend.exists(path) is False
+
+
 class _FailingBackend:
     ref = SandboxRef(sandbox_id='failing-1')
 
