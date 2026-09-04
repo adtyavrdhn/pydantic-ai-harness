@@ -282,26 +282,27 @@ class NotionToolset(MCPToolset[AgentDepsT]):
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
         """Return conservative read tools plus explicitly selected mutations."""
-        attribution = await self._ensure_attribution()
-        selected = set(_READ_TOOL_NAMES) | set(self.mutation_tools)
-        selected.intersection_update(self._available_tool_names)
-        tools = await super().get_tools(ctx)
-        return {
-            name: replace(
-                tool,
-                tool_def=replace(
-                    tool.tool_def,
-                    metadata={
-                        **(tool.tool_def.metadata or {}),
-                        'notion': True,
-                        'notion_attribution': attribution,
-                        'notion_mutation': name in self.mutation_tools,
-                    },
-                ),
-            )
-            for name, tool in tools.items()
-            if name in selected
-        }
+        async with self:
+            attribution = await self._ensure_attribution()
+            selected = set(_READ_TOOL_NAMES) | set(self.mutation_tools)
+            selected.intersection_update(self._available_tool_names)
+            tools = await super().get_tools(ctx)
+            return {
+                name: replace(
+                    tool,
+                    tool_def=replace(
+                        tool.tool_def,
+                        metadata={
+                            **(tool.tool_def.metadata or {}),
+                            'notion': True,
+                            'notion_attribution': attribution,
+                            'notion_mutation': name in self.mutation_tools,
+                        },
+                    ),
+                )
+                for name, tool in tools.items()
+                if name in selected
+            }
 
     async def call_tool(
         self,

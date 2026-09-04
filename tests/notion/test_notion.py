@@ -32,6 +32,29 @@ def _tool_returns(messages: list[ModelMessage], name: str) -> list[ToolReturnPar
 
 
 class TestNotionToolset:
+    async def test_tool_discovery_manages_its_own_client_lifecycle(
+        self, notion_server: FastMCP, run_context: RunContext[None]
+    ) -> None:
+        client = Client(notion_server)
+        toolset = NotionToolset[None](client=client)
+
+        tools = await toolset.get_tools(run_context)
+
+        assert 'notion-fetch' in tools
+        assert 'workspace-1' in toolset.attribution
+        assert client.is_connected() is False
+
+    async def test_failed_direct_discovery_closes_client(
+        self, attribution_error_server: FastMCP, run_context: RunContext[None]
+    ) -> None:
+        client = Client(attribution_error_server)
+        toolset = NotionToolset[None](client=client)
+
+        with pytest.raises(UserError, match='attribution failed; no workspace tools were exposed'):
+            await toolset.get_tools(run_context)
+
+        assert client.is_connected() is False
+
     async def test_default_surface_is_closed_read_only_allowlist(
         self, notion_server: FastMCP, run_context: RunContext[None]
     ) -> None:
