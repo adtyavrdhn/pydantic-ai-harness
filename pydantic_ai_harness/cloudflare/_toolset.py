@@ -4,34 +4,36 @@ External contract, verified 2026-09-04:
 
 - Cloudflare recommends `https://mcp.cloudflare.com/mcp` for broad API access. It exposes
   `docs`, `search`, and `execute`; `execute` can read or mutate and is marked destructive.
-- Sixteen focused `*.mcp.cloudflare.com/mcp` servers expose typed product tools. Their
+- Focused `*.mcp.cloudflare.com/mcp` servers expose typed product tools. Their
   `readOnlyHint` annotations distinguish calls safe to expose without mutation opt-in.
 - Managed servers support browser OAuth and bearer API tokens. Focused authenticated
-  servers accept `cf-account-id` to pin multi-account credentials. Code Mode accepts
-  `account_id` on `execute` instead.
+  servers expose account selection through explicit tool arguments when the credential
+  can access multiple accounts. Code Mode accepts `account_id` on `execute` instead.
 - Cloudflare exposes no managed-server zone header. Focused tool schemas use `zone_id`,
   `zoneId`, or `zone`; this toolset restricts and fills those arguments when `zone_id` is set.
 
-Sources: https://github.com/cloudflare/mcp and
-https://github.com/cloudflare/mcp-server-cloudflare. Re-check both READMEs and the
+Sources: https://github.com/cloudflare/mcp,
+https://github.com/cloudflare/mcp-server-cloudflare, and
+https://github.com/cloudflare/agents. Re-check their server registrations and the
 Code Mode `src/tools` implementations when the catalog or policy changes.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from enum import Enum
+from fractions import Fraction
+from math import lcm
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
 from pydantic import AnyUrl, TypeAdapter
-from pydantic_ai.exceptions import ApprovalRequired, ModelRetry, UserError
+from pydantic_ai.exceptions import ApprovalRequired, ModelRetry, ToolFailed, UserError
 from pydantic_ai.tools import AgentDepsT, ObjectJsonSchema, RunContext
 from pydantic_ai.toolsets import ToolsetTool
 from pydantic_core import to_json
 
 try:
-    from fastmcp.client.transports import StreamableHttpTransport
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -46,6 +48,7 @@ class CloudflareServer(str, Enum):
 
     API = 'api'
     DOCS = 'docs'
+    AGENTS_SDK_DOCS = 'agents_sdk_docs'
     WORKERS_BINDINGS = 'workers_bindings'
     WORKERS_BUILDS = 'workers_builds'
     OBSERVABILITY = 'observability'
@@ -53,47 +56,106 @@ class CloudflareServer(str, Enum):
     BROWSER = 'browser'
     LOGPUSH = 'logpush'
     AI_GATEWAY = 'ai_gateway'
-    AUTORAG = 'autorag'
     AUDIT_LOGS = 'audit_logs'
     DNS_ANALYTICS = 'dns_analytics'
     DEX = 'dex'
     CASB = 'casb'
-    RADAR = 'radar'
+    DEVELOPER_STACK = 'developer_stack'
     BLOG = 'blog'
     DEMO_DAY = 'demo_day'
 
 
-_SERVER_URLS: dict[CloudflareServer, str] = {
-    CloudflareServer.API: 'https://mcp.cloudflare.com/mcp',
-    CloudflareServer.DOCS: 'https://docs.mcp.cloudflare.com/mcp',
-    CloudflareServer.WORKERS_BINDINGS: 'https://bindings.mcp.cloudflare.com/mcp',
-    CloudflareServer.WORKERS_BUILDS: 'https://builds.mcp.cloudflare.com/mcp',
-    CloudflareServer.OBSERVABILITY: 'https://observability.mcp.cloudflare.com/mcp',
-    CloudflareServer.CONTAINERS: 'https://containers.mcp.cloudflare.com/mcp',
-    CloudflareServer.BROWSER: 'https://browser.mcp.cloudflare.com/mcp',
-    CloudflareServer.LOGPUSH: 'https://logs.mcp.cloudflare.com/mcp',
-    CloudflareServer.AI_GATEWAY: 'https://ai-gateway.mcp.cloudflare.com/mcp',
-    CloudflareServer.AUTORAG: 'https://autorag.mcp.cloudflare.com/mcp',
-    CloudflareServer.AUDIT_LOGS: 'https://auditlogs.mcp.cloudflare.com/mcp',
-    CloudflareServer.DNS_ANALYTICS: 'https://dns-analytics.mcp.cloudflare.com/mcp',
-    CloudflareServer.DEX: 'https://dex.mcp.cloudflare.com/mcp',
-    CloudflareServer.CASB: 'https://casb.mcp.cloudflare.com/mcp',
-    CloudflareServer.RADAR: 'https://radar.mcp.cloudflare.com/mcp',
-    CloudflareServer.BLOG: 'https://blog.mcp.cloudflare.com/mcp',
-    CloudflareServer.DEMO_DAY: 'https://demo-day.mcp.cloudflare.com/mcp',
+@dataclass(frozen=True)
+class _ServerConfig:
+    url: str
+    public: bool = False
+    safe_tools: frozenset[str] = frozenset()
+
+
+_SERVERS: dict[CloudflareServer, _ServerConfig] = {
+    CloudflareServer.API: _ServerConfig('https://mcp.cloudflare.com/mcp', safe_tools=frozenset({'docs', 'search'})),
+    CloudflareServer.DOCS: _ServerConfig('https://docs.mcp.cloudflare.com/mcp', public=True),
+    CloudflareServer.AGENTS_SDK_DOCS: _ServerConfig(
+        'https://agents.cloudflare.com/mcp', public=True, safe_tools=frozenset({'search-agent-docs'})
+    ),
+    CloudflareServer.WORKERS_BINDINGS: _ServerConfig('https://bindings.mcp.cloudflare.com/mcp'),
+    CloudflareServer.WORKERS_BUILDS: _ServerConfig('https://builds.mcp.cloudflare.com/mcp'),
+    CloudflareServer.OBSERVABILITY: _ServerConfig('https://observability.mcp.cloudflare.com/mcp'),
+    CloudflareServer.CONTAINERS: _ServerConfig('https://containers.mcp.cloudflare.com/mcp'),
+    CloudflareServer.BROWSER: _ServerConfig('https://browser.mcp.cloudflare.com/mcp'),
+    CloudflareServer.LOGPUSH: _ServerConfig('https://logs.mcp.cloudflare.com/mcp'),
+    CloudflareServer.AI_GATEWAY: _ServerConfig('https://ai-gateway.mcp.cloudflare.com/mcp'),
+    CloudflareServer.AUDIT_LOGS: _ServerConfig('https://auditlogs.mcp.cloudflare.com/mcp'),
+    CloudflareServer.DNS_ANALYTICS: _ServerConfig('https://dns-analytics.mcp.cloudflare.com/mcp'),
+    CloudflareServer.DEX: _ServerConfig('https://dex.mcp.cloudflare.com/mcp'),
+    CloudflareServer.CASB: _ServerConfig('https://casb.mcp.cloudflare.com/mcp'),
+    CloudflareServer.DEVELOPER_STACK: _ServerConfig(
+        'https://stack.mcp.cloudflare.com/mcp',
+        public=True,
+        safe_tools=frozenset({'list_libraries', 'search_dev_stack'}),
+    ),
+    CloudflareServer.BLOG: _ServerConfig('https://blog.mcp.cloudflare.com/mcp', public=True),
+    CloudflareServer.DEMO_DAY: _ServerConfig(
+        'https://demo-day.mcp.cloudflare.com/mcp', public=True, safe_tools=frozenset({'mcp_demo_day_info'})
+    ),
 }
 
 _ACCOUNT_KEYS = ('account_id', 'accountId')
 _ZONE_KEYS = ('zone_id', 'zoneId', 'zone')
-_PAGE_KEYS = ('limit', 'per_page', 'perPage', 'page_size', 'pageSize', 'first')
-_API_SAFE_TOOLS = frozenset({'docs', 'search'})
-_PUBLIC_SERVERS = frozenset({CloudflareServer.DOCS, CloudflareServer.BLOG, CloudflareServer.DEMO_DAY})
+_PAGE_KEYS = ('limit', 'per_page', 'perPage', 'page_size', 'pageSize', 'first', 'k', 'limitPerGroup')
+_PAGE_CONTAINER_KEYS = ('query', 'keysQuery', 'valuesQuery')
 _TRUNCATION_MARKER = '[... Cloudflare result truncated ...]'
+_ERROR_ENVELOPE_BYTES = len(to_json({'error': ''}))
 _OBJECT_DICT = TypeAdapter(dict[str, object])
 _STRING_LIST = TypeAdapter(list[str])
 _OBJECT_LIST = TypeAdapter(list[object])
 
-_NumericBounds: TypeAlias = tuple[int | float | None, int | float | None]
+
+@dataclass(frozen=True)
+class _PageConstraints:
+    minimum: int = 1
+    maximum: int | None = None
+    multiple: int = 1
+    allowed: frozenset[int] | None = None
+
+    def merge(self, other: _PageConstraints) -> _PageConstraints:
+        maximum = (
+            min(self.maximum, other.maximum)
+            if self.maximum is not None and other.maximum is not None
+            else self.maximum
+            if self.maximum is not None
+            else other.maximum
+        )
+        allowed = (
+            self.allowed & other.allowed
+            if self.allowed is not None and other.allowed is not None
+            else self.allowed
+            if self.allowed is not None
+            else other.allowed
+        )
+        return _PageConstraints(
+            minimum=max(self.minimum, other.minimum),
+            maximum=maximum,
+            multiple=lcm(self.multiple, other.multiple),
+            allowed=allowed,
+        )
+
+    def accepts(self, value: object) -> bool:
+        if type(value) is not int:
+            return False
+        if value < self.minimum or (self.maximum is not None and value > self.maximum):
+            return False
+        if value % self.multiple != 0:
+            return False
+        return self.allowed is None or value in self.allowed
+
+    def limit(self, configured: int) -> int | None:
+        upper = min(configured, self.maximum) if self.maximum is not None else configured
+        if self.allowed is not None:
+            candidates = [value for value in self.allowed if value <= upper and self.accepts(value)]
+            return max(candidates, default=None)
+        candidate = upper - (upper % self.multiple)
+        return candidate if self.accepts(candidate) else None
 
 
 def _object_dict(value: object) -> dict[str, object]:
@@ -108,10 +170,23 @@ def _annotations(tool: ToolsetTool[AgentDepsT]) -> dict[str, object]:
     return _object_dict(value)
 
 
-def _is_read_only(server: CloudflareServer, tool: ToolsetTool[AgentDepsT], *, official_client: bool) -> bool:
-    if official_client and server is CloudflareServer.API and tool.tool_def.name in _API_SAFE_TOOLS:
+def _is_read_only(
+    server: CloudflareServer,
+    tool: ToolsetTool[AgentDepsT],
+    *,
+    official_client: bool,
+    trust_server_annotations: bool,
+) -> bool:
+    annotations = _annotations(tool)
+    if annotations.get('readOnlyHint') is False or annotations.get('destructiveHint') is True:
+        return False
+    if official_client and tool.tool_def.name in _SERVERS[server].safe_tools:
         return True
-    return _annotations(tool).get('readOnlyHint') is True
+    return (
+        trust_server_annotations
+        and annotations.get('readOnlyHint') is True
+        and annotations.get('destructiveHint') is not True
+    )
 
 
 def _properties(tool: ToolsetTool[AgentDepsT]) -> dict[str, object]:
@@ -119,100 +194,157 @@ def _properties(tool: ToolsetTool[AgentDepsT]) -> dict[str, object]:
     return _object_dict(value)
 
 
-def _zone_key(tool: ToolsetTool[AgentDepsT]) -> str | None:
+def _scope_keys(tool: ToolsetTool[AgentDepsT], candidates: tuple[str, ...]) -> tuple[str, ...]:
     properties = _properties(tool)
-    return next((key for key in _ZONE_KEYS if key in properties), None)
-
-
-def _account_key(tool: ToolsetTool[AgentDepsT]) -> str | None:
-    properties = _properties(tool)
-    return next((key for key in _ACCOUNT_KEYS if key in properties), None)
+    return tuple(key for key in candidates if key in properties)
 
 
 def _is_api_safe_tool(server: CloudflareServer, tool: ToolsetTool[AgentDepsT], *, official_client: bool) -> bool:
-    return official_client and server is CloudflareServer.API and tool.tool_def.name in _API_SAFE_TOOLS
+    return official_client and server is CloudflareServer.API and tool.tool_def.name in _SERVERS[server].safe_tools
 
 
-def _merge_bounds(left: _NumericBounds, right: _NumericBounds) -> _NumericBounds:
-    left_minimum, left_maximum = left
-    right_minimum, right_maximum = right
-    minimum = (
-        max(left_minimum, right_minimum)
-        if left_minimum is not None and right_minimum is not None
-        else left_minimum
-        if left_minimum is not None
-        else right_minimum
-    )
-    maximum = (
-        min(left_maximum, right_maximum)
-        if left_maximum is not None and right_maximum is not None
-        else left_maximum
-        if left_maximum is not None
-        else right_maximum
-    )
-    return minimum, maximum
+def _page_integer(value: object) -> int | None:
+    if type(value) is int:
+        return value
+    if type(value) is float and value.is_integer():
+        return int(value)
+    return None
 
 
-def _union_bounds(variants: list[object]) -> _NumericBounds | None:
-    numeric_variants: list[_NumericBounds] = []
+def _fraction(value: object) -> Fraction | None:
+    if type(value) not in (int, float):
+        return None
+    try:
+        return Fraction(str(value))
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def _union_constraints(variants: list[object]) -> _PageConstraints | None:
+    numeric_variants: list[_PageConstraints] = []
     for variant in variants:
         variant_schema = _object_dict(variant)
         if variant_schema.get('type') == 'null':
             continue
-        variant_bounds = _numeric_bounds(variant)
-        if variant_bounds is None:
+        variant_constraints = _page_constraints(variant)
+        if variant_constraints is None:
             return None
-        numeric_variants.append(variant_bounds)
+        numeric_variants.append(variant_constraints)
     return numeric_variants[0] if len(numeric_variants) == 1 else None
 
 
-def _numeric_bounds(schema: object) -> _NumericBounds | None:
+def _range_constraints(field: dict[str, object]) -> _PageConstraints | None:
+    constraints = _PageConstraints()
+    for keyword, lower, exclusive in (
+        ('minimum', True, False),
+        ('exclusiveMinimum', True, True),
+        ('maximum', False, False),
+        ('exclusiveMaximum', False, True),
+    ):
+        if keyword not in field:
+            continue
+        value = _fraction(field[keyword])
+        if value is None:
+            return None
+        if lower:
+            minimum = (
+                value.numerator // value.denominator + 1 if exclusive else -(-value.numerator // value.denominator)
+            )
+            constraints = constraints.merge(_PageConstraints(minimum=minimum))
+        else:
+            maximum = (
+                -(-value.numerator // value.denominator) - 1 if exclusive else value.numerator // value.denominator
+            )
+            constraints = constraints.merge(_PageConstraints(maximum=maximum))
+    return constraints
+
+
+def _discrete_constraints(field: dict[str, object]) -> _PageConstraints | None:
+    constraints = _PageConstraints()
+    if 'multipleOf' in field:
+        multiple = _fraction(field['multipleOf'])
+        if multiple is None or multiple <= 0:
+            return None
+        constraints = constraints.merge(_PageConstraints(multiple=multiple.numerator))
+    if 'enum' in field:
+        values = field['enum']
+        if not isinstance(values, list):
+            return None
+        constraints = constraints.merge(
+            _PageConstraints(
+                allowed=frozenset(
+                    value for item in _OBJECT_LIST.validate_python(values) if (value := _page_integer(item)) is not None
+                )
+            )
+        )
+    if 'const' in field:
+        value = _page_integer(field['const'])
+        constraints = constraints.merge(_PageConstraints(allowed=frozenset() if value is None else frozenset({value})))
+    return constraints
+
+
+def _page_constraints(schema: object) -> _PageConstraints | None:
     field = _object_dict(schema)
-    minimum: int | float | None = None
-    maximum: int | float | None = None
-    minimum_value = field.get('minimum')
-    maximum_value = field.get('maximum')
-    if isinstance(minimum_value, (int, float)) and not isinstance(minimum_value, bool):
-        minimum = minimum_value
-    if isinstance(maximum_value, (int, float)) and not isinstance(maximum_value, bool):
-        maximum = maximum_value
+    if field.get('type', 'integer') not in ('integer', 'number') or any(
+        keyword in field for keyword in ('not', 'if', 'then', 'else')
+    ):
+        return None
+    range_constraints = _range_constraints(field)
+    discrete_constraints = _discrete_constraints(field)
+    if range_constraints is None or discrete_constraints is None:
+        return None
+    constraints = range_constraints.merge(discrete_constraints)
     for keyword in ('anyOf', 'oneOf'):
         variants = field.get(keyword)
         if not isinstance(variants, list):
             continue
-        variant_bounds = _union_bounds(_OBJECT_LIST.validate_python(variants))
-        if variant_bounds is None:
+        variant_constraints = _union_constraints(_OBJECT_LIST.validate_python(variants))
+        if variant_constraints is None:
             return None
-        minimum, maximum = _merge_bounds((minimum, maximum), variant_bounds)
+        constraints = constraints.merge(variant_constraints)
     variants = field.get('allOf')
     if isinstance(variants, list):
         for variant in _OBJECT_LIST.validate_python(variants):
-            variant_bounds = _numeric_bounds(variant)
-            if variant_bounds is None:
+            variant_constraints = _page_constraints(variant)
+            if variant_constraints is None:
                 return None
-            minimum, maximum = _merge_bounds((minimum, maximum), variant_bounds)
-    return minimum, maximum
+            constraints = constraints.merge(variant_constraints)
+    return constraints
 
 
-def _page_limit(tool: ToolsetTool[AgentDepsT], key: str, configured: int) -> int:
-    bounds = _numeric_bounds(_properties(tool).get(key))
-    # `get_tools` excludes unsupported schemas before either caller reaches this helper.
-    if bounds is None:  # pragma: no cover
-        return configured
-    _, maximum = bounds
-    return min(configured, int(maximum)) if maximum is not None else configured
+def _page_limit(schema: object, configured: int) -> int | None:
+    constraints = _page_constraints(schema)
+    return constraints.limit(configured) if constraints is not None else None
+
+
+def _pagination_fields(tool: ToolsetTool[AgentDepsT]) -> list[tuple[tuple[str, ...], object]]:
+    properties = _properties(tool)
+    fields: list[tuple[tuple[str, ...], object]] = [
+        ((key,), properties[key]) for key in _PAGE_KEYS if key in properties
+    ]
+    for container_key in _PAGE_CONTAINER_KEYS:
+        container = _object_dict(properties.get(container_key))
+        nested = _object_dict(container.get('properties'))
+        fields.extend(((container_key, key), nested[key]) for key in _PAGE_KEYS if key in nested)
+    return fields
 
 
 def _supports_result_limit(tool: ToolsetTool[AgentDepsT], configured: int) -> bool:
-    properties = _properties(tool)
-    for key in _PAGE_KEYS:
-        bounds = _numeric_bounds(properties.get(key))
-        if bounds is None:
-            return False
-        minimum, _ = bounds
-        if minimum is not None and minimum > _page_limit(tool, key, configured):
-            return False
-    return True
+    return all(_page_limit(schema, configured) is not None for _, schema in _pagination_fields(tool))
+
+
+def _bounded_page_schema(schema: object, configured: int) -> dict[str, object] | None:
+    field = _object_dict(schema)
+    if not field:
+        return None
+    effective_limit = _page_limit(field, configured)
+    if effective_limit is None:  # pragma: no cover - filtered before schema preparation
+        return None
+    existing_maximum = field.get('maximum')
+    if not isinstance(existing_maximum, (int, float)) or existing_maximum > effective_limit:
+        field['maximum'] = effective_limit
+    field['default'] = effective_limit
+    return field
 
 
 def _take_utf8_prefix(text: str, byte_limit: int) -> str:
@@ -235,6 +367,24 @@ def _bounded_text(text: str, *, max_bytes: int, max_lines: int) -> str:
     body_lines = lines[: max_lines - 1]
     body = _take_utf8_prefix('\n'.join(body_lines), max_bytes - marker_bytes).rstrip('\n')
     return f'{body}\n{marker}' if body else marker
+
+
+def _bounded_error_text(text: str, *, max_bytes: int, max_lines: int) -> str:
+    candidate = _bounded_text(text, max_bytes=max_bytes, max_lines=max_lines)
+    if len(to_json({'error': candidate})) <= max_bytes:
+        return candidate
+    best = ''
+    lower = 0
+    upper = min(max_bytes, len(text.encode('utf-8')))
+    while lower <= upper:
+        budget = (lower + upper) // 2
+        candidate = _bounded_text(text, max_bytes=budget, max_lines=max_lines)
+        if len(to_json({'error': candidate})) <= max_bytes:
+            best = candidate
+            lower = budget + 1
+        else:
+            upper = budget - 1
+    return best
 
 
 class CloudflareToolset(MCPToolset[AgentDepsT]):
@@ -261,6 +411,7 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
         max_output_bytes: int = 50 * 1024,
         max_output_lines: int = 500,
         client: MCPToolsetClient | None = None,
+        trust_server_annotations: bool = False,
         id: str = 'cloudflare',
         include_instructions: bool = True,
     ) -> None:
@@ -279,9 +430,12 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
             max_output_lines: Maximum serialized lines returned per call.
             client: Prebuilt MCP client or transport. It owns authentication and
                 account selection; zone and execution policies still apply.
+            trust_server_annotations: Treat a custom client's `readOnlyHint` as
+                authorization to run without mutation opt-in or approval.
             id: Toolset identifier.
-            include_instructions: Include remote MCP server instructions.
-                `Cloudflare` uses the same flag for its capability guidance.
+            include_instructions: Include remote MCP server instructions when
+                no account or zone scope is configured. `Cloudflare` uses the
+                same flag for its own capability guidance.
         """
         try:
             resolved_server = CloudflareServer(server)
@@ -295,6 +449,10 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
         ):
             if type(value) is not int or value <= 0:
                 raise ValueError(f'{name} must be a positive integer, got {value!r}.')
+        if max_output_bytes < _ERROR_ENVELOPE_BYTES:
+            raise ValueError(
+                f'max_output_bytes must be at least {_ERROR_ENVELOPE_BYTES} bytes to contain a tool error result.'
+            )
         if (
             resolved_server is CloudflareServer.API
             and (account_id is not None or zone_id is not None)
@@ -304,7 +462,8 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
                 "Cloudflare's Code Mode `execute` tool accepts arbitrary JavaScript, so this client cannot enforce "
                 'an account or zone boundary on it. Select a focused server with explicit resource arguments.'
             )
-        if resolved_server in _PUBLIC_SERVERS:
+        server_config = _SERVERS[resolved_server]
+        if server_config.public:
             if account_id is not None or zone_id is not None:
                 raise UserError(f'The public Cloudflare `{resolved_server.value}` server has no account or zone scope.')
             if api_token is not None:
@@ -315,22 +474,27 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
                 'managed server with configured OAuth or token authentication.'
             )
 
-        resolved_client: MCPToolsetClient = client if client is not None else _SERVER_URLS[resolved_server]
+        resolved_client: MCPToolsetClient = client if client is not None else server_config.url
         if client is not None and (api_token is not None or account_id is not None):
             raise UserError(
                 '`client` owns its authentication and account selection; do not also pass `api_token` or `account_id`.'
             )
+        remote_instructions = include_instructions and account_id is None and zone_id is None
         if client is None:
-            auth = None if resolved_server in _PUBLIC_SERVERS else (api_token if api_token is not None else 'oauth')
-            super().__init__(resolved_client, id=id, include_instructions=include_instructions, auth=auth)
+            auth = None if server_config.public else (api_token if api_token is not None else 'oauth')
+            super().__init__(
+                resolved_client,
+                id=id,
+                include_instructions=remote_instructions,
+                auth=auth,
+                cache_tools=False,
+            )
         else:
-            super().__init__(resolved_client, id=id, include_instructions=include_instructions)
-        transport = self.client.transport
-        self._official_client = client is None or (
-            resolved_server is CloudflareServer.API
-            and isinstance(transport, StreamableHttpTransport)
-            and str(transport.url).rstrip('/') == _SERVER_URLS[CloudflareServer.API]
-        )
+            super().__init__(resolved_client, id=id, include_instructions=remote_instructions, cache_tools=False)
+        self._official_client = client is None
+        self._trust_server_annotations = self._official_client or trust_server_annotations
+        if not self._official_client:
+            self.include_instructions = False
         self.server = resolved_server
         self.account_id = account_id
         self.zone_id = zone_id
@@ -343,77 +507,122 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
         tools = await super().get_tools(ctx)
         selected: dict[str, ToolsetTool[AgentDepsT]] = {}
         for name, tool in tools.items():
-            read_only = _is_read_only(self.server, tool, official_client=self._official_client)
-            if not read_only and not self.allow_mutations:
-                continue
-            api_safe = _is_api_safe_tool(self.server, tool, official_client=self._official_client)
-            if self.account_id is not None and not api_safe and _account_key(tool) is None:
-                continue
-            if self.zone_id is not None and not api_safe and _zone_key(tool) is None:
-                continue
-            if not _supports_result_limit(tool, self.max_results):
+            if not self._selects_tool(tool):
                 continue
             selected[name] = replace(
                 tool, tool_def=replace(tool.tool_def, parameters_json_schema=self._bounded_schema(tool))
             )
         return selected
 
+    def _selects_tool(self, tool: ToolsetTool[AgentDepsT]) -> bool:
+        read_only = _is_read_only(
+            self.server,
+            tool,
+            official_client=self._official_client,
+            trust_server_annotations=self._trust_server_annotations,
+        )
+        if not read_only and not self.allow_mutations:
+            return False
+        api_safe = _is_api_safe_tool(self.server, tool, official_client=self._official_client)
+        if self.account_id is not None and not api_safe and not _scope_keys(tool, _ACCOUNT_KEYS):
+            return False
+        if self.zone_id is not None and not api_safe and not _scope_keys(tool, _ZONE_KEYS):
+            return False
+        return _supports_result_limit(tool, self.max_results)
+
     def _bounded_schema(self, tool: ToolsetTool[AgentDepsT]) -> ObjectJsonSchema:
         schema = dict(tool.tool_def.parameters_json_schema)
         properties = _properties(tool)
         bounded_properties: ObjectJsonSchema = dict(properties)
         for key in _PAGE_KEYS:
-            value: object = properties.get(key)
-            field = _object_dict(value)
-            if not field:
+            bounded = _bounded_page_schema(properties.get(key), self.max_results)
+            if bounded is not None:
+                bounded_properties[key] = bounded
+        for container_key in _PAGE_CONTAINER_KEYS:
+            container = _object_dict(properties.get(container_key))
+            nested = _object_dict(container.get('properties'))
+            if not nested:
                 continue
-            existing_maximum = field.get('maximum')
-            effective_limit = _page_limit(tool, key, self.max_results)
-            if not isinstance(existing_maximum, (int, float)) or existing_maximum > effective_limit:
-                field['maximum'] = effective_limit
-            existing_default = field.get('default')
-            if isinstance(existing_default, (int, float)) and existing_default > effective_limit:
-                field['default'] = effective_limit
-            bounded_properties[key] = field
+            bounded_nested = dict(nested)
+            for key in _PAGE_KEYS:
+                bounded = _bounded_page_schema(nested.get(key), self.max_results)
+                if bounded is not None:
+                    bounded_nested[key] = bounded
+            container['properties'] = bounded_nested
+            bounded_properties[container_key] = container
         schema['properties'] = bounded_properties
         required = schema.get('required')
         if isinstance(required, list):
             required_keys = _STRING_LIST.validate_python(required)
-            injected = {
-                key
-                for key in (
-                    _account_key(tool) if self.account_id is not None else None,
-                    _zone_key(tool) if self.zone_id is not None else None,
-                )
-                if key is not None
-            }
+            injected: set[str] = set()
+            if self.account_id is not None:
+                injected.update(_scope_keys(tool, _ACCOUNT_KEYS))
+            if self.zone_id is not None:
+                injected.update(_scope_keys(tool, _ZONE_KEYS))
             schema['required'] = [key for key in required_keys if key not in injected]
         return schema
+
+    def _pin_scope(
+        self,
+        args: dict[str, Any],
+        tool: ToolsetTool[AgentDepsT],
+        candidates: tuple[str, ...],
+        configured: str,
+        boundary: str,
+    ) -> None:
+        declared = _scope_keys(tool, candidates)
+        for key in candidates:
+            if key in args and args[key] != configured:
+                raise ModelRetry(f'The requested operation is outside the configured Cloudflare {boundary} boundary.')
+            if key in declared:
+                args[key] = configured
+            else:
+                args.pop(key, None)
+
+    def _bound_page_arg(
+        self, args: dict[str, Any], key: str, schema: object, *, display_name: str | None = None
+    ) -> None:
+        value = args.get(key)
+        effective_limit = _page_limit(schema, self.max_results)
+        constraints = _page_constraints(schema)
+        label = display_name or key
+        if effective_limit is None or constraints is None:  # pragma: no cover - filtered by `get_tools`
+            raise ModelRetry(f'`{label}` does not support a safe bounded Cloudflare page size.')
+        if isinstance(value, (int, float)) and value > effective_limit:
+            raise ModelRetry(f'`{label}` cannot exceed the configured Cloudflare result limit of {effective_limit}.')
+        if value is not None and not constraints.accepts(value):
+            raise ModelRetry(f'`{label}` must be a valid integer page size no greater than {effective_limit}.')
+        if value is None:
+            args[key] = effective_limit
 
     def _scoped_args(self, tool_args: dict[str, Any], tool: ToolsetTool[AgentDepsT]) -> dict[str, Any]:
         args = dict(tool_args)
         properties = _properties(tool)
-        account_key = _account_key(tool)
-        if self.account_id is not None and account_key is not None:
-            if args.get(account_key, self.account_id) != self.account_id:
-                raise ModelRetry('The requested operation is outside the configured Cloudflare account boundary.')
-            args[account_key] = self.account_id
+        if self.account_id is not None:
+            self._pin_scope(args, tool, _ACCOUNT_KEYS, self.account_id, 'account')
         if self.zone_id is not None and not _is_api_safe_tool(self.server, tool, official_client=self._official_client):
-            key = _zone_key(tool)
-            if key is None:  # pragma: no cover
+            if not _scope_keys(tool, _ZONE_KEYS):  # pragma: no cover
                 raise ModelRetry('The requested tool does not expose a Cloudflare zone boundary.')
-            if args.get(key, self.zone_id) != self.zone_id:
-                raise ModelRetry('The requested operation is outside the configured Cloudflare zone boundary.')
-            args[key] = self.zone_id
+            self._pin_scope(args, tool, _ZONE_KEYS, self.zone_id, 'zone')
         for key in _PAGE_KEYS:
             if key not in properties:
                 continue
-            value = args.get(key)
-            effective_limit = _page_limit(tool, key, self.max_results)
-            if isinstance(value, (int, float)) and value > effective_limit:
-                raise ModelRetry(f'`{key}` cannot exceed the configured Cloudflare result limit of {effective_limit}.')
-            if value is None:
-                args[key] = effective_limit
+            self._bound_page_arg(args, key, properties[key])
+        for container_key in _PAGE_CONTAINER_KEYS:
+            container = _object_dict(properties.get(container_key))
+            nested_properties = _object_dict(container.get('properties'))
+            if not any(key in nested_properties for key in _PAGE_KEYS):
+                continue
+            raw_nested_args = args.get(container_key)
+            if raw_nested_args is not None and not isinstance(raw_nested_args, dict):
+                raise ModelRetry(f'`{container_key}` must be an object containing pagination arguments.')
+            nested_args = {} if raw_nested_args is None else _OBJECT_DICT.validate_python(raw_nested_args)
+            for key in _PAGE_KEYS:
+                if key in nested_properties:
+                    self._bound_page_arg(
+                        nested_args, key, nested_properties[key], display_name=f'{container_key}.{key}'
+                    )
+            args[container_key] = nested_args
         return args
 
     async def call_tool(
@@ -423,9 +632,40 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
         tool: ToolsetTool[AgentDepsT],
     ) -> Any:
-        if not _is_read_only(self.server, tool, official_client=self._official_client) and not ctx.tool_call_approved:
+        if name != tool.tool_def.name:
+            raise UserError('The requested Cloudflare tool is not available through this toolset policy.')
+        authoritative_tool = (await super().get_tools(ctx)).get(name)
+        if authoritative_tool is None or not self._selects_tool(authoritative_tool):
+            raise UserError('The requested Cloudflare tool is not available through this toolset policy.')
+        read_only = _is_read_only(
+            self.server,
+            authoritative_tool,
+            official_client=self._official_client,
+            trust_server_annotations=self._trust_server_annotations,
+        )
+        if not read_only and not ctx.tool_call_approved:
             raise ApprovalRequired
-        result = await super().call_tool(name, self._scoped_args(tool_args, tool), ctx, tool)
+        local_error: str | None = None
+        scoped_args = tool_args
+        try:
+            scoped_args = self._scoped_args(tool_args, authoritative_tool)
+        except ModelRetry as error:
+            local_error = _bounded_text(error.message, max_bytes=self.max_output_bytes, max_lines=self.max_output_lines)
+        if local_error is not None:
+            raise ModelRetry(local_error) from None
+        provider_error: str | None = None
+        result: object | None = None
+        try:
+            use_task = bool((authoritative_tool.tool_def.metadata or {}).get('task'))
+            result = await super().direct_call_tool(name, scoped_args, use_task=use_task)
+        except ModelRetry as error:
+            provider_error = _bounded_error_text(
+                error.message, max_bytes=self.max_output_bytes, max_lines=self.max_output_lines
+            )
+        if provider_error is not None:
+            if read_only:
+                raise ModelRetry(provider_error) from None
+            raise ToolFailed(provider_error) from None
         if isinstance(result, str):
             return _bounded_text(result, max_bytes=self.max_output_bytes, max_lines=self.max_output_lines)
 
@@ -436,3 +676,17 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
         ):
             return result
         return _bounded_text(_TRUNCATION_MARKER, max_bytes=self.max_output_bytes, max_lines=self.max_output_lines)
+
+    async def direct_call_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        metadata: dict[str, Any] | None = None,
+        use_task: bool = False,
+    ) -> Any:
+        """Reject direct calls that cannot participate in this toolset's policy context."""
+        raise UserError(
+            '`CloudflareToolset.direct_call_tool()` is disabled because direct MCP calls bypass tool visibility, '
+            'resource boundaries, and approval state. Execute Cloudflare tools through an `Agent`.'
+        )

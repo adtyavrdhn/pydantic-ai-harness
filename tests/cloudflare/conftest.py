@@ -47,15 +47,25 @@ def focused_server() -> FastMCP:
         """List DNS records."""
         return '\n'.join(f'{account_id}:{zoneId}:{index}' for index in range(limit))
 
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+    def zone_details(account_id: str, zoneId: str) -> str:
+        """Show zone details."""
+        return f'zone:{account_id}:{zoneId}'
+
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def delete_record(account_id: str, zoneId: str, record_id: str) -> str:
         """Delete a DNS record."""
         return f'deleted:{account_id}:{zoneId}:{record_id}'
 
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+    def failing_delete(record_id: str) -> str:
+        """Fail after accepting a delete request."""
+        raise ValueError('x' * 100 + 'SECRET')
+
     @server.tool()
     def ambiguous_tool() -> str:
         """Tool without safety annotations."""
-        return 'ambiguous'
+        return 'ambiguous'  # pragma: no cover - hidden by the read-safe policy
 
     return server
 
@@ -72,12 +82,12 @@ def api_server() -> FastMCP:
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def search(code: str) -> str:
         """Search the API schema."""
-        return code
+        return code  # pragma: no cover - catalog-only fake
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def execute(code: str, account_id: str | None = None) -> str:
         """Execute Cloudflare API code."""
-        return f'{account_id}:{code}'
+        return f'{account_id}:{code}'  # pragma: no cover - approval metadata fake
 
     return server
 
@@ -89,7 +99,7 @@ def alternate_schema_server() -> FastMCP:
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def camel_scope(accountId: str, zone: str) -> str:
         """Read data using alternate resource-key spellings."""
-        return f'{accountId}:{zone}'
+        return f'{accountId}:{zone}'  # pragma: no cover - network call is intercepted
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def limited_records(limit: Annotated[int | None, Field(ge=1, le=3)] = None) -> str:
@@ -104,12 +114,12 @@ def alternate_schema_server() -> FastMCP:
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def minimum_too_large(limit: Annotated[int | None, Field(ge=5)] = None) -> str:
         """Require more results than a restrictive client permits."""
-        return str(limit or 5)
+        return str(limit or 5)  # pragma: no cover - hidden by the result policy
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def structured_read() -> dict[str, int]:
         """Return structured data."""
-        return {'count': 2}
+        return {'count': 200}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def emoji_read() -> str:
@@ -124,7 +134,7 @@ def alternate_schema_server() -> FastMCP:
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def ambiguous_limit(limit: SmallLimit | LargeLimit = 1) -> str:
         """Use disjoint numeric ranges."""
-        return str(limit)
+        return str(limit)  # pragma: no cover - hidden by the result policy
 
     return server
 
@@ -136,6 +146,28 @@ def untrusted_api_server() -> FastMCP:
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def search(code: str) -> str:
         """Use a familiar name without a read-only contract."""
-        return code
+        return code  # pragma: no cover - hidden by the untrusted-client policy
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+    def claimed_read() -> str:
+        """Claim a read-only contract from an untrusted server."""
+        return 'read'  # pragma: no cover - catalog-only fake
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=True))
+    def contradictory() -> str:
+        """Publish contradictory safety annotations."""
+        return 'conflict'  # pragma: no cover - hidden by the safety policy
+
+    return server
+
+
+@pytest.fixture
+def error_server() -> FastMCP:
+    server = _server('cloudflare-error')
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+    def failing_read() -> str:
+        """Return a long provider error."""
+        raise ValueError('provider failure: ' + 'sensitive detail ' * 30)
 
     return server
