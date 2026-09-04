@@ -242,10 +242,13 @@ class TestLinear:
         assert 'identifiers' in instructions
         assert 'Before changing Linear data' in instructions
 
-    async def test_read_write_instructions_cover_mutations(self, linear_server: FastMCP):
-        result = await Agent(
-            TestModel(), capabilities=[Linear(client=linear_server, read_only=False, allowed_tools=['create_issue'])]
-        ).run('Create an issue')
+    async def test_read_write_instructions_cover_mutations(
+        self, linear_server: FastMCP, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr('pydantic_ai_harness.linear._capability.LINEAR_MCP_URL', linear_server)
+        result = await Agent(TestModel(), capabilities=[Linear(read_only=False, allowed_tools=['create_issue'])]).run(
+            'Create an issue'
+        )
         assert 'Before changing Linear data' in _request_instructions(result.all_messages())
         assert 'search for an existing match when a read tool is available' in _request_instructions(
             result.all_messages()
