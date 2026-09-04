@@ -89,13 +89,13 @@ Not: that spend stays under the ceiling. The request that crosses the line compl
 ```python
 from decimal import Decimal
 
-from pydantic_ai.capabilities import Capability
+from pydantic_ai.capabilities import Hooks
 from pydantic_ai_harness import SpendLimits
 from pydantic_ai_harness.spend import Budget, SpendRecordedEvent
 
-reporting = Capability()
+reporting = Hooks()
 
-@reporting.on_event(SpendRecordedEvent)
+@reporting.on.event(SpendRecordedEvent)
 async def show(ctx, event):
     print(f'{event.model} cost ${event.usd}')
 

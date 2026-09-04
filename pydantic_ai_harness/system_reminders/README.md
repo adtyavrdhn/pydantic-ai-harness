@@ -130,12 +130,12 @@ Without a durability engine, generation runs directly in all three cases, with t
 Subscribe to `ReminderFiredEvent` to observe reminders after they are appended:
 
 ```python
-from pydantic_ai.capabilities import Capability
+from pydantic_ai.capabilities import Hooks
 from pydantic_ai_harness.system_reminders import ReminderFiredEvent
 
-reporting = Capability()
+reporting = Hooks()
 
-@reporting.on_event(ReminderFiredEvent)
+@reporting.on.event(ReminderFiredEvent)
 async def record(ctx, event):
     print(event.text)
 ```

@@ -139,12 +139,12 @@ The planner's read-only discipline is a property of how you configure that agent
 Subscribe to typed plan events to react to changes made through the `Planning` tools:
 
 ```python
-from pydantic_ai.capabilities import Capability
+from pydantic_ai.capabilities import Hooks
 from pydantic_ai_harness.planning import PlanCompletedEvent
 
-reporting = Capability()
+reporting = Hooks()
 
-@reporting.on_event(PlanCompletedEvent)
+@reporting.on.event(PlanCompletedEvent)
 async def announce(ctx, event):
     print('done:', event.item.content)
 ```

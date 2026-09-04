@@ -123,13 +123,13 @@ A strategy knows when to act but says nothing about how close the run is to the 
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import Capability
+from pydantic_ai.capabilities import Hooks
 from pydantic_ai_harness import ReportContextUsage, SummarizingCompaction
 from pydantic_ai_harness.compaction import ContextUsageEvent
 
-reporting = Capability()
+reporting = Hooks()
 
-@reporting.on_event(ContextUsageEvent)
+@reporting.on.event(ContextUsageEvent)
 async def show(ctx, event):
     print(f'{event.fraction:.0%}')
 

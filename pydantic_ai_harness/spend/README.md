@@ -91,9 +91,9 @@ from pydantic_ai.capabilities import Capability, on_event
 from pydantic_ai_harness import SpendLimits
 from pydantic_ai_harness.spend import Budget, SpendRecordedEvent
 
-reporting = Capability()
+reporting = Hooks()
 
-@reporting.on_event(SpendRecordedEvent)
+@reporting.on.event(SpendRecordedEvent)
 async def show(ctx, event):
     print(f'{event.model} cost ${event.usd}')
 
