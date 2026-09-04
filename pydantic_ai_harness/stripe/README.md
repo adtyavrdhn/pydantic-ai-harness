@@ -15,8 +15,8 @@ uv add "pydantic-ai-harness[stripe]" "pydantic-ai-slim[openai]"
 
 ## Set up Stripe and your model
 
-In the Stripe Dashboard, create a restricted API key with only the read permissions the agent needs. Export that key
-and your model-provider key:
+In the Stripe Dashboard, create a restricted API key and set `Customers` to `Read` for the example below. Grant only
+the other read permissions the agent needs. Export that key and your model-provider key:
 
 ```bash
 export STRIPE_API_KEY='rk_test_...'
@@ -32,7 +32,7 @@ Do not use an unrestricted `sk_...` key.
 import os
 
 from pydantic_ai import Agent
-from pydantic_ai_harness import Stripe
+from pydantic_ai_harness.stripe import Stripe
 
 agent = Agent(
     'openai:gpt-5.6-sol',
@@ -54,7 +54,13 @@ You can ask the agent to:
 
 - Access is read-only by default. `enable_writes=True` exposes `stripe_api_write`; every call returns a
   `DeferredToolRequests` approval request before Stripe receives the write. Preserve the request metadata when
-  resuming. Approved results are replayable within the same scope, so persist and consume them atomically.
+  resuming. The restricted key must grant write permission for each resource the agent may change. An approved result
+  remains replayable for the same operation and account scope, so persist and consume it atomically. Approval is not
+  idempotency; after a timeout or unknown response, verify the resource before retrying a write. If an API or UI
+  accepts approval decisions, it must authenticate the caller and authorize that caller for the exact operation and
+  account scope before accepting one.
+- Stripe list reads can be paginated. Follow the pagination fields returned by Stripe when complete results are
+  required.
 - `mode='sandbox'` accepts `rk_test_...` keys. Set `mode='live'` explicitly for an `rk_live_...` key.
 - Set `connected_account='acct_...'` to send every request to one Connect account. Connected-account access requires
   a restricted platform key with the needed connected-account permissions and does not support OAuth.
