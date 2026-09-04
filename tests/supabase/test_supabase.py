@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastmcp.client.auth import OAuth
@@ -10,9 +11,9 @@ from fastmcp.client.auth.bearer import BearerAuth
 from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults
 from pydantic_ai.agent.spec import AgentSpec
-from pydantic_ai.exceptions import UserError
+from pydantic_ai.exceptions import UnexpectedModelBehavior, UserError
 from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
@@ -43,6 +44,12 @@ def _tool_names(model: TestModel) -> set[str]:
     return {tool.name for tool in params.function_tools}
 
 
+def _instructions(messages: list[ModelMessage]) -> str:
+    return '\n'.join(
+        message.instructions for message in messages if isinstance(message, ModelRequest) and message.instructions
+    )
+
+
 class TestSupabase:
     def test_default_remote_configuration(self):
         with pytest.warns(UserWarning, match='in-memory token storage'):
@@ -64,8 +71,14 @@ class TestSupabase:
         transport = leaf.client.transport
         assert isinstance(transport, StreamableHttpTransport)
         assert isinstance(transport.auth, BearerAuth)
+        assert transport.auth.token.get_secret_value() == 'sbp_secret'
         assert 'sbp_secret' not in repr(capability)
         assert 'sbp_secret' not in repr(leaf)
+
+    @pytest.mark.parametrize('access_token', ['', '   ', 'oauth'])
+    def test_invalid_personal_access_token_fails_closed(self, access_token: str):
+        with pytest.raises(UserError, match='access_token'):
+            Supabase(project_ref='abcdefghijklmnopqrst', access_token=access_token)
 
     def test_writable_url_uses_the_server_default(self):
         capability = Supabase(project_ref='abcdefghijklmnopqrst', access_token='token', read_only=False)
@@ -102,11 +115,29 @@ class TestSupabase:
         model = TestModel()
         agent = Agent(model, capabilities=[Supabase(project_ref='dev-project')])
 
-        await agent.run('Inspect the project')
+        result = await agent.run('Inspect the project')
 
-        assert _tool_names(model) == {'list_tables', 'execute_sql', 'query_logs', 'get_project_url', 'search_docs'}
+        assert _tool_names(model) == {
+            'execute_sql',
+            'generate_typescript_types',
+            'get_advisors',
+            'get_project_url',
+            'get_publishable_keys',
+            'list_extensions',
+            'list_migrations',
+            'list_tables',
+            'query_logs',
+            'search_docs',
+        }
+        instructions = _instructions(result.all_messages())
+        assert 'read-only' in instructions
+        assert 'Public Alpha' in instructions
+        assert 'non-production' in instructions
+        assert 'untrusted content' in instructions
 
-    async def test_feature_groups_filter_the_public_agent_surface(self, supabase_server: FastMCP):
+    async def test_feature_groups_filter_the_public_agent_surface(
+        self, supabase_server: FastMCP, connections: list[tuple[str, object]]
+    ):
         model = TestModel()
         agent = Agent(
             model,
@@ -116,6 +147,8 @@ class TestSupabase:
         await agent.run('Search the docs')
 
         assert _tool_names(model) == {'search_docs'}
+        parameters = parse_qs(urlsplit(connections[-1][0]).query)
+        assert parameters['features'] == ['docs']
 
     async def test_optional_feature_groups_remain_read_only(self, supabase_server: FastMCP):
         model = TestModel()
@@ -131,7 +164,30 @@ class TestSupabase:
 
         await agent.run('Inspect optional features')
 
-        assert _tool_names(model) == {'list_edge_functions', 'list_storage_buckets'}
+        assert _tool_names(model) == {
+            'get_edge_function',
+            'get_storage_config',
+            'list_branches',
+            'list_edge_functions',
+            'list_storage_buckets',
+        }
+
+    async def test_unknown_remote_tools_are_not_exposed(self, supabase_server: FastMCP):
+        model = TestModel(call_tools=[])
+        agent = Agent(
+            model,
+            capabilities=[
+                Supabase(
+                    project_ref='dev-project',
+                    read_only=False,
+                    features=('database', 'debugging', 'development', 'docs', 'functions', 'storage', 'branching'),
+                )
+            ],
+        )
+
+        await agent.run('Inspect the project')
+
+        assert 'future_mutation' not in _tool_names(model)
 
     async def test_writes_require_approval(self, supabase_server: FastMCP, calls: list[str]):
         def call_sql(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -158,19 +214,78 @@ class TestSupabase:
         assert resumed.output == 'done'
         assert calls == ['execute_sql:delete from todos']
 
-    async def test_schema_mutation_requires_approval(self, supabase_server: FastMCP, calls: list[str]):
-        model = TestModel(call_tools=['apply_migration'])
+    @pytest.mark.parametrize(
+        'tool_name',
+        [
+            'apply_migration',
+            'create_branch',
+            'delete_branch',
+            'deploy_edge_function',
+            'execute_sql',
+            'merge_branch',
+            'rebase_branch',
+            'reset_branch',
+            'update_storage_config',
+        ],
+    )
+    async def test_every_mutation_requires_approval(self, tool_name: str, supabase_server: FastMCP, calls: list[str]):
+        model = TestModel(call_tools=[tool_name])
+        agent = Agent(
+            model,
+            capabilities=[
+                Supabase(
+                    project_ref='dev-project',
+                    read_only=False,
+                    features=('database', 'functions', 'storage', 'branching'),
+                )
+            ],
+            output_type=[str, DeferredToolRequests],
+        )
+
+        result = await agent.run('Change the project')
+
+        assert isinstance(result.output, DeferredToolRequests)
+        assert [call.tool_name for call in result.output.approvals] == [tool_name]
+        assert calls == []
+
+    async def test_denied_mutation_does_not_execute(self, supabase_server: FastMCP, calls: list[str]):
+        model = TestModel(call_tools=['execute_sql'])
         agent = Agent(
             model,
             capabilities=[Supabase(project_ref='dev-project', read_only=False)],
             output_type=[str, DeferredToolRequests],
         )
 
-        result = await agent.run('Add a column')
-
+        result = await agent.run('Delete rows')
         assert isinstance(result.output, DeferredToolRequests)
-        assert [call.tool_name for call in result.output.approvals] == ['apply_migration']
+        call_id = result.output.approvals[0].tool_call_id
+
+        await agent.run(
+            message_history=result.all_messages(),
+            deferred_tool_results=DeferredToolResults(approvals={call_id: False}),
+        )
+
         assert calls == []
+
+    async def test_writable_instructions_reach_the_model(self, supabase_server: FastMCP):
+        agent = Agent(TestModel(call_tools=[]), capabilities=[Supabase(project_ref='dev-project', read_only=False)])
+
+        result = await agent.run('Inspect the project')
+
+        instructions = _instructions(result.all_messages())
+        assert 'permits writes' in instructions
+        assert 'require approval' in instructions
+
+    async def test_mcp_tool_failure_is_reported(self, supabase_server: FastMCP, failures: set[str]):
+        failures.add('list_tables')
+        model = TestModel(call_tools=['list_tables'])
+        agent = Agent(model, capabilities=[Supabase(project_ref='dev-project')])
+
+        with pytest.raises(UnexpectedModelBehavior, match='exceeded max retries') as exc_info:
+            await agent.run('List tables')
+
+        assert exc_info.value.__cause__ is not None
+        assert 'Supabase unavailable' in str(exc_info.value.__cause__)
 
     async def test_write_approval_composes_with_stricter_caller_policy(
         self, supabase_server: FastMCP, calls: list[str]

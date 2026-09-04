@@ -52,7 +52,6 @@ if TYPE_CHECKING:
     from .stackone import StackOne
     from .step_persistence import StepPersistence
     from .subagents import SubAgent, SubAgents
-    from .supabase import Supabase
     from .system_reminders import SystemReminders
     from .tool_output_limits import ToolOutputLimits
     from .warn_on_cache_busts import WarnOnCacheBusts
@@ -105,7 +104,6 @@ __all__ = [
     'StepPersistence',
     'SubAgent',
     'SubAgents',
-    'Supabase',
     'SummarizingCompaction',
     'SystemReminders',
     'TieredCompaction',
@@ -150,7 +148,6 @@ _CAPABILITY_EXPORTS = {
     'StackOne': 'stackone',
     'StepPersistence': 'step_persistence',
     'SubAgents': 'subagents',
-    'Supabase': 'supabase',
     'SummarizingCompaction': 'compaction',
     'SystemReminders': 'system_reminders',
     'TieredCompaction': 'compaction',

@@ -9,10 +9,10 @@ MCP server. The server is Public Alpha. Do not use this integration with product
 
 ## Installation
 
-Install Harness and Pydantic AI's MCP extra:
+Install Harness with its Supabase extra and the model provider you use:
 
 ```bash
-uv add pydantic-ai-harness "pydantic-ai-slim[mcp,openai]"
+uv add "pydantic-ai-harness[supabase]" "pydantic-ai-slim[openai]"
 ```
 
 ## Read one development project
@@ -21,7 +21,7 @@ uv add pydantic-ai-harness "pydantic-ai-slim[mcp,openai]"
 import os
 
 from pydantic_ai import Agent
-from pydantic_ai_harness import Supabase
+from pydantic_ai_harness.supabase import Supabase
 
 agent = Agent(
     'openai:gpt-5.6-sol',
@@ -37,6 +37,10 @@ The default uses browser OAuth and may open a browser on first connection. FastM
 in-memory, so the token does not persist across process restarts. For CI, pass a PAT explicitly:
 
 ```python
+import os
+
+from pydantic_ai_harness.supabase import Supabase
+
 Supabase(
     project_ref=os.environ['SUPABASE_PROJECT_REF'],
     access_token=os.environ['SUPABASE_ACCESS_TOKEN'],
@@ -56,6 +60,8 @@ can access.
 read-only Postgres user and removes other mutation tools. The default `features` are:
 
 ```python
+from pydantic_ai_harness.supabase import Supabase
+
 Supabase(
     project_ref='your-development-project-ref',
     features=('database', 'debugging', 'development', 'docs'),
@@ -67,8 +73,8 @@ and `branching`. The capability sends this exact list to the server and exposes 
 in those groups. This fail-closed list prevents a new Public Alpha server tool from appearing before Harness has
 classified it.
 
-Storage is not enabled by Supabase by default. Updating Storage configuration requires a paid plan. Branching is
-experimental and also requires a paid plan.
+The Supabase MCP Storage feature group is disabled by default. Updating Storage configuration requires a paid plan.
+Branching is experimental and also requires a paid plan.
 
 ## Enable writes and approvals
 
@@ -77,7 +83,7 @@ documented mutation tool then require Pydantic AI approval by default:
 
 ```python
 from pydantic_ai import Agent, DeferredToolRequests
-from pydantic_ai_harness import Supabase
+from pydantic_ai_harness.supabase import Supabase
 
 agent = Agent(
     'openai:gpt-5.6-sol',
@@ -93,7 +99,7 @@ To add a stricter caller policy, compose the returned toolset with the public to
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness import Supabase
+from pydantic_ai_harness.supabase import Supabase
 
 supabase = Supabase(
     project_ref='your-development-project-ref',

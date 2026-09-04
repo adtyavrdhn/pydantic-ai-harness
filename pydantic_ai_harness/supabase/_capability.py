@@ -38,8 +38,7 @@ try:
     from pydantic_ai.mcp import MCPToolset
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
-        'MCP support is required for the Supabase capability. '
-        'Install it with: uv add pydantic-ai-harness "pydantic-ai-slim[mcp]"'
+        'MCP support is required for the Supabase capability. Install it with: uv add "pydantic-ai-harness[supabase]"'
     ) from _import_error
 
 SupabaseFeature = Literal['database', 'debugging', 'development', 'docs', 'functions', 'storage', 'branching']
@@ -108,6 +107,10 @@ class Supabase(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         if not _PROJECT_REF_RE.fullmatch(self.project_ref):
             raise UserError('`project_ref` must be a non-empty URL-safe Supabase project ID.')
+        if self.access_token is not None and not self.access_token.strip():
+            raise UserError('`access_token` must be non-empty when supplied; omit it to use OAuth.')
+        if self.access_token == 'oauth':
+            raise UserError('`access_token="oauth"` is reserved; omit `access_token` to use OAuth.')
         resolved_features = tuple(self.features)
         if not resolved_features or len(set(resolved_features)) != len(resolved_features):
             raise UserError('`features` must contain unique project-scoped feature groups.')
@@ -123,7 +126,7 @@ class Supabase(AbstractCapability[AgentDepsT]):
         toolset: MCPToolset[AgentDepsT] = MCPToolset(
             self._url(),
             id=self.id,
-            auth=self.access_token or 'oauth',
+            auth='oauth' if self.access_token is None else self.access_token,
         )
 
         allowed_tools: set[str] = {tool_name for feature in self.features for tool_name in _FEATURE_TOOLS[feature]}
@@ -166,7 +169,7 @@ class Supabase(AbstractCapability[AgentDepsT]):
         read_only: bool = True,
         features: Sequence[SupabaseFeature] = _DEFAULT_FEATURES,
     ) -> Supabase[AgentDepsT]:
-        """Construct from serializable options, excluding the runtime-only `client`."""
+        """Construct from serializable options. PATs stay outside agent spec files."""
         return cls(
             project_ref=project_ref,
             id=id,
