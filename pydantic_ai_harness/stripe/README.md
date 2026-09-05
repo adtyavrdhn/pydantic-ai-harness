@@ -57,10 +57,10 @@ You can ask the agent to:
 - Access is read-only by default. `enable_writes=True` exposes `stripe_api_write`; every call returns a
   `DeferredToolRequests` approval request before Stripe receives the write. Preserve the request metadata when
   resuming. The restricted key must grant write permission for each resource the agent may change. An approved result
-  remains replayable for the same operation and account scope, so persist and consume it atomically. Approval is not
-  idempotency; after a timeout or unknown response, verify the resource before retrying a write. If an API or UI
-  accepts approval decisions, it must authenticate the caller and authorize that caller for the exact operation and
-  account scope before accepting one.
+  remains replayable for the same tool call ID, arguments, and account scope, so persist and consume it atomically.
+  Approval is not idempotency; after a timeout or unknown response, verify the resource before retrying a write. If an
+  API or UI accepts approval decisions, it must authenticate the caller and authorize that caller for the exact
+  operation and account scope before accepting one.
 - Stripe list reads can be paginated. Follow the pagination fields returned by Stripe when complete results are
   required.
 - `mode='sandbox'` accepts `rk_test_...` keys. Set `mode='live'` explicitly for an `rk_live_...` key.
@@ -70,8 +70,8 @@ You can ask the agent to:
   the same tool names and are rejected instead of merging their access.
 - `include_instructions=True` adds the Stripe usage guidance shown to the model. Set it to `False` when supplying
   equivalent instructions elsewhere; the code-enforced allowlist and approval checks remain active.
-- Treat Stripe object fields and tool results as untrusted model input. The built-in guidance tells the model not to
-  follow instructions in that content, but it cannot prevent disclosure through another tool. Apply host policy and
-  approval before combining Stripe with unrelated outbound or mutation tools.
+- Treat Stripe object fields and tool results as untrusted model input. When enabled, the built-in guidance tells the
+  model not to follow instructions in that content, but it cannot prevent disclosure through another tool. Apply host
+  policy and approval before combining Stripe with unrelated outbound or mutation tools.
 - The capability sends requests only to `https://mcp.stripe.com` and exposes an exact tool allowlist. Stripe labels
   the MCP server Public preview. Confirm that preview services meet your requirements before using live mode.
