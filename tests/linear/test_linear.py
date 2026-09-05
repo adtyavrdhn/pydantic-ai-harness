@@ -144,6 +144,30 @@ class TestLinear:
         with pytest.raises(UserError, match='must use HTTPS'):
             Linear(client=client, auth='lin_api_secret').get_toolset()
 
+    @pytest.mark.parametrize(
+        'client',
+        [
+            'http://user:secret@proxy.example/mcp',
+            AnyUrl('http://user:secret@proxy.example/mcp'),
+            'https://user:secret@proxy.example/mcp',
+            AnyUrl('https://user:secret@proxy.example/mcp'),
+        ],
+    )
+    def test_url_credentials_are_rejected(self, client: str | AnyUrl):
+        with pytest.raises(UserError, match='must not contain credentials'):
+            Linear(client=client).get_toolset()
+
+    def test_falsey_injected_client_is_preserved(self, linear_server: FastMCP):
+        class FalseyFastMCPTransport(FastMCPTransport):
+            def __bool__(self) -> bool:
+                return False
+
+        client = FalseyFastMCPTransport(linear_server)
+        assert not client
+        toolset = Linear(client=client).get_toolset()
+        assert isinstance(toolset, MCPToolset)
+        assert toolset.client.transport is client
+
     def test_no_auth_is_supported(self):
         transport = _http_transport(Linear(auth=None))
         assert transport.auth is None

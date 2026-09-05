@@ -68,5 +68,9 @@ print(result.output)
   does not switch workspaces.
 - An injected FastMCP client or `MCPToolset` owns its endpoint and authentication. Do not also pass `auth`.
 - URL clients that receive `auth` directly must use HTTPS.
+- Treat issue text, comments, and tool errors as untrusted model input. Limit other agent tools or add a guard when that
+  content must not influence external actions or data disclosure.
+- Approval does not make writes idempotent. After an uncertain mutation error, reconcile the Linear record before retrying
+  or provide application-level deduplication.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/linear/)

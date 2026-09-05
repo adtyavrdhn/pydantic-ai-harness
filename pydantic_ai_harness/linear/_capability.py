@@ -93,7 +93,11 @@ class Linear(AbstractCapability[AgentDepsT]):
                 raise UserError('`auth` cannot be used with a prebuilt `MCPToolset`; configure auth on its client.')
             toolset: AbstractToolset[AgentDepsT] = self.client
         else:
-            client = self.client or (LINEAR_READ_ONLY_MCP_URL if self.read_only else LINEAR_MCP_URL)
+            client = (
+                self.client
+                if self.client is not None
+                else (LINEAR_READ_ONLY_MCP_URL if self.read_only else LINEAR_MCP_URL)
+            )
             if isinstance(client, (str, AnyUrl)):
                 parsed_url = urlsplit(str(client))
                 url_scheme = parsed_url.scheme.lower()
@@ -101,6 +105,12 @@ class Linear(AbstractCapability[AgentDepsT]):
                 parsed_url = None
                 url_scheme = None
             is_http_url = url_scheme in ('http', 'https')
+            if (
+                is_http_url
+                and parsed_url is not None
+                and (parsed_url.username is not None or parsed_url.password is not None)
+            ):
+                raise UserError('Linear MCP client URLs must not contain credentials; pass `auth` separately.')
             if self.auth is not None and url_scheme == 'http':
                 raise UserError('Authenticated Linear MCP URLs must use HTTPS.')
             if self.auth is not None and not is_http_url:
