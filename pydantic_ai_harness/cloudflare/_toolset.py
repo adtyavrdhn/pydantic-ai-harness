@@ -164,13 +164,14 @@ class _PageConstraints:
         )
 
     def accepts(self, value: object) -> bool:
-        if type(value) is not int:
+        integer = _page_integer(value)
+        if integer is None:
             return False
-        if value < self.minimum or (self.maximum is not None and value > self.maximum):
+        if integer < self.minimum or (self.maximum is not None and integer > self.maximum):
             return False
-        if value % self.multiple != 0:
+        if integer % self.multiple != 0:
             return False
-        return self.allowed is None or value in self.allowed
+        return self.allowed is None or integer in self.allowed
 
     def limit(self, configured: int) -> int | None:
         upper = min(configured, self.maximum) if self.maximum is not None else configured
@@ -356,7 +357,7 @@ def _page_constraints(schema: object, depth: int = 0) -> _PageConstraints | None
             else None
         )
     if (
-        '$ref' in field
+        any(keyword in field for keyword in ('$ref', '$dynamicRef', '$recursiveRef'))
         or field_type not in ('integer', 'number')
         or any(keyword in field for keyword in ('not', 'if', 'then', 'else'))
     ):
@@ -367,15 +368,19 @@ def _page_constraints(schema: object, depth: int = 0) -> _PageConstraints | None
         return None
     constraints = range_constraints.merge(discrete_constraints)
     for keyword in ('anyOf', 'oneOf'):
-        variants = field.get(keyword)
-        if not isinstance(variants, list):
+        if keyword not in field:
             continue
+        variants = field[keyword]
+        if not isinstance(variants, list):
+            return None
         variant_constraints = _union_constraints(_OBJECT_LIST.validate_python(variants), depth)
         if variant_constraints is None:
             return None
         constraints = constraints.merge(variant_constraints)
-    variants = field.get('allOf')
-    if isinstance(variants, list):
+    if 'allOf' in field:
+        variants = field['allOf']
+        if not isinstance(variants, list):
+            return None
         for variant in _OBJECT_LIST.validate_python(variants):
             variant_constraints = _page_constraints(variant, depth + 1)
             if variant_constraints is None:
@@ -397,27 +402,49 @@ def _pagination_fields(tool: ToolsetTool[AgentDepsT]) -> list[tuple[tuple[str, .
     ]
     for container_key in _PAGE_CONTAINER_KEYS:
         container = _object_dict(_resolve_schema(root, properties.get(container_key)))
+        if container.get('type') not in (None, 'object'):
+            continue
         nested = _object_dict(container.get('properties'))
         fields.extend(((container_key, key), _resolve_schema(root, nested[key])) for key in _PAGE_KEYS if key in nested)
     return fields
 
 
-def _supports_result_limit(tool: ToolsetTool[AgentDepsT], configured: int) -> bool:
-    root = tool.tool_def.parameters_json_schema
-    resolved_root = _object_dict(_resolve_schema(root, root))
-    if any(key not in _OBJECT_SCHEMA_KEYS and not key.startswith('x-') for key in resolved_root):
-        return False
-    required = resolved_root.get('required')
+def _supported_object_schema(schema: object) -> dict[str, object] | None:
+    field = _object_dict(schema)
+    if not isinstance(schema, dict):
+        return None
+    if any(key not in _OBJECT_SCHEMA_KEYS and not key.startswith('x-') for key in field):
+        return None
+    if field.get('type', 'object') != 'object':
+        return None
+    properties = field.get('properties')
+    if properties is not None and not isinstance(properties, dict):
+        return None
+    required = field.get('required')
     if required is not None:
         if not isinstance(required, list):
-            return False
+            return None
         required_items = _OBJECT_LIST.validate_python(required)
         if not all(isinstance(key, str) for key in required_items):
-            return False
+            return None
+    return field
+
+
+def _supports_result_limit(tool: ToolsetTool[AgentDepsT], configured: int) -> bool:
+    root = tool.tool_def.parameters_json_schema
+    resolved_root = _supported_object_schema(_resolve_schema(root, root))
+    if resolved_root is None:
+        return False
     properties = _object_dict(resolved_root.get('properties'))
     for container_key in _PAGE_CONTAINER_KEYS:
-        container = _object_dict(_resolve_schema(root, properties.get(container_key)))
-        if any(key not in _OBJECT_SCHEMA_KEYS and not key.startswith('x-') for key in container):
+        if container_key not in properties:
+            continue
+        resolved_container = _resolve_schema(root, properties[container_key])
+        container_field = _object_dict(resolved_container)
+        if container_field.get('type') not in (None, 'object'):
+            continue
+        container = _supported_object_schema(resolved_container)
+        if container is None:
             return False
     return all(_page_limit(schema, configured) is not None for _, schema in _pagination_fields(tool))
 
@@ -631,6 +658,8 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
                 bounded_properties[key] = bounded
         for container_key in _PAGE_CONTAINER_KEYS:
             container = _object_dict(_resolve_schema(root, properties.get(container_key)))
+            if container.get('type') not in (None, 'object'):
+                continue
             nested = _object_dict(container.get('properties'))
             if not nested:
                 continue
@@ -720,21 +749,29 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
             if not _scope_keys(tool, _ZONE_KEYS):  # pragma: no cover
                 raise ModelRetry('The requested tool does not expose a Cloudflare zone boundary.')
             self._pin_scope(args, tool, _ZONE_KEYS, self.zone_id, 'zone')
+        undeclared = next((key for key in _PAGE_KEYS if key in args and key not in properties), None)
+        if undeclared is not None:
+            raise ModelRetry(f'`{undeclared}` is not declared by the current Cloudflare tool schema.')
         for key in _PAGE_KEYS:
             if key not in properties:
                 continue
             self._bound_page_arg(args, key, _resolve_schema(root, properties[key]))
         for container_key in _PAGE_CONTAINER_KEYS:
             container = _object_dict(_resolve_schema(root, properties.get(container_key)))
-            nested_properties = _object_dict(container.get('properties'))
-            if not any(key in nested_properties for key in _PAGE_KEYS):
+            if container.get('type') not in (None, 'object'):
                 continue
+            nested_properties = _object_dict(container.get('properties'))
             if container_key not in args or args[container_key] is None:
                 continue
             raw_nested_args = args.get(container_key)
             if raw_nested_args is not None and not isinstance(raw_nested_args, dict):
                 raise ModelRetry(f'`{container_key}` must be an object containing pagination arguments.')
             nested_args = {} if raw_nested_args is None else _OBJECT_DICT.validate_python(raw_nested_args)
+            undeclared = next((key for key in _PAGE_KEYS if key in nested_args and key not in nested_properties), None)
+            if undeclared is not None:
+                raise ModelRetry(
+                    f'`{container_key}.{undeclared}` is not declared by the current Cloudflare tool schema.'
+                )
             for key in _PAGE_KEYS:
                 if key in nested_properties:
                     self._bound_page_arg(

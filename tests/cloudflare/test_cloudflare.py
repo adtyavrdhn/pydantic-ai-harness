@@ -304,11 +304,18 @@ class TestCloudflareToolset:
             result = await toolset.call_tool(
                 'list_records', {'account_id': 'a1', 'zoneId': 'z1'}, run_context, tools['list_records']
             )
+            integral_float = await toolset.call_tool(
+                'list_records',
+                {'account_id': 'a1', 'zoneId': 'z1', 'limit': 5.0},
+                run_context,
+                tools['list_records'],
+            )
             with pytest.raises(ModelRetry, match='cannot exceed.*7'):
                 await toolset.call_tool(
                     'list_records', {'account_id': 'a1', 'zoneId': 'z1', 'limit': 8}, run_context, tools['list_records']
                 )
         assert len(str(result).splitlines()) == 7
+        assert len(str(integral_float).splitlines()) == 5
 
     async def test_current_nested_and_product_pagination_shapes_are_bounded(
         self,
@@ -670,6 +677,22 @@ class TestCloudflareToolset:
                 },
             },
         )
+        dynamic_field_ref = with_schema(
+            'dynamic_field_ref',
+            {
+                'type': 'object',
+                '$defs': {'PageLimit': {'$dynamicAnchor': 'page', 'type': 'integer', 'maximum': 3}},
+                'properties': {'limit': {'$dynamicRef': '#page'}},
+            },
+        )
+        malformed_union = with_schema(
+            'malformed_union',
+            {'type': 'object', 'properties': {'limit': {'type': 'integer', 'anyOf': 'invalid'}}},
+        )
+        malformed_intersection = with_schema(
+            'malformed_intersection',
+            {'type': 'object', 'properties': {'limit': {'type': 'integer', 'allOf': {}}}},
+        )
         dependent_schema = with_schema(
             'dependent_schema',
             {
@@ -699,6 +722,46 @@ class TestCloudflareToolset:
                 'required': 'limit',
             },
         )
+        malformed_properties = with_schema(
+            'malformed_properties',
+            {'type': 'object', 'properties': ['limit']},
+        )
+        malformed_root_type = with_schema(
+            'malformed_root_type',
+            {'type': 'array', 'properties': {'limit': {'type': 'integer', 'maximum': 3}}},
+        )
+        malformed_container = with_schema(
+            'malformed_container',
+            {'type': 'object', 'properties': {'query': {'type': 'object', 'properties': ['limit']}}},
+        )
+        malformed_container_required = with_schema(
+            'malformed_container_required',
+            {
+                'type': 'object',
+                'properties': {'query': {'type': 'object', 'properties': {}, 'required': [1]}},
+            },
+        )
+        boolean_container = with_schema(
+            'boolean_container',
+            {'type': 'object', 'properties': {'query': False}},
+        )
+        open_container = with_schema(
+            'open_container',
+            {'type': 'object', 'properties': {'query': {'type': 'object', 'properties': {}}}},
+        )
+        scalar_container = with_schema(
+            'scalar_container',
+            {
+                'type': 'object',
+                'properties': {
+                    'query': {
+                        'type': 'string',
+                        'properties': {'limit': {'type': 'integer', 'maximum': 3}},
+                    }
+                },
+            },
+        )
+        open_root = with_schema('open_root', {'type': 'object', 'properties': {}})
         aliased_mutation = with_schema(
             'aliased_mutation',
             {
@@ -735,11 +798,22 @@ class TestCloudflareToolset:
                 'container_composition': container_composition,
                 'deep_composition': deep_composition,
                 'dynamic_ref': dynamic_ref,
+                'dynamic_field_ref': dynamic_field_ref,
+                'malformed_union': malformed_union,
+                'malformed_intersection': malformed_intersection,
                 'dependent_schema': dependent_schema,
                 'empty_schema': empty_schema,
                 'malformed_types': malformed_types,
                 'malformed_required': malformed_required,
                 'malformed_required_type': malformed_required_type,
+                'malformed_properties': malformed_properties,
+                'malformed_root_type': malformed_root_type,
+                'malformed_container': malformed_container,
+                'malformed_container_required': malformed_container_required,
+                'boolean_container': boolean_container,
+                'open_container': open_container,
+                'scalar_container': scalar_container,
+                'open_root': open_root,
                 'aliased_mutation': aliased_mutation,
             }
 
@@ -750,13 +824,28 @@ class TestCloudflareToolset:
             max_results=5,
         )
         tools = await toolset.get_tools(run_context)
-        assert set(tools) == {'nullable', 'false_branch', 'field_ref', 'root_ref'}
+        assert set(tools) == {
+            'nullable',
+            'false_branch',
+            'field_ref',
+            'root_ref',
+            'open_container',
+            'scalar_container',
+            'open_root',
+        }
         assert tools['nullable'].tool_def.parameters_json_schema['properties']['limit']['default'] == 5
         assert tools['false_branch'].tool_def.parameters_json_schema['properties']['limit']['default'] == 5
         assert tools['field_ref'].tool_def.parameters_json_schema['properties']['limit']['default'] == 3
         assert tools['root_ref'].tool_def.parameters_json_schema['properties']['limit']['default'] == 4
         with pytest.raises(ModelRetry, match='cannot exceed.*3'):
             await toolset.call_tool('field_ref', {'limit': 4}, run_context, tools['field_ref'])
+        with pytest.raises(ModelRetry, match='not declared by the current Cloudflare tool schema'):
+            await toolset.call_tool('open_container', {'query': {'limit': 4}}, run_context, tools['open_container'])
+        with pytest.raises(ModelRetry, match='`query` must be an object'):
+            await toolset.call_tool('open_container', {'query': 'not-an-object'}, run_context, tools['open_container'])
+        assert tools['scalar_container'].tool_def.parameters_json_schema['properties']['query']['type'] == 'string'
+        with pytest.raises(ModelRetry, match='not declared by the current Cloudflare tool schema'):
+            await toolset.call_tool('open_root', {'limit': 1000}, run_context, tools['open_root'])
 
         mutation_toolset = CloudflareToolset[None](
             server=CloudflareServer.DNS_ANALYTICS,
