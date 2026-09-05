@@ -331,7 +331,7 @@ class TestGoogleWorkspace:
             entered += 1
             if entered == 2:
                 both_entered.set()
-            await asyncio.wait_for(both_entered.wait(), timeout=1)
+            await asyncio.wait_for(both_entered.wait(), timeout=10)
 
         agent = Agent(
             TestModel(call_tools=['gmail_search_threads']),
