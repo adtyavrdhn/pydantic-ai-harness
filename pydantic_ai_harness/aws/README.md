@@ -22,7 +22,11 @@ grants `signin:AuthorizeOAuth2Access` and `signin:CreateOAuth2Token`. Configure 
 `authentication='oauth'`. FastMCP handles OAuth and opens a browser on the first request. Configure encrypted token
 storage for persistent or multi-user applications. OAuth does not use AWS access-key environment variables.
 
-For SigV4, install AWS CLI 2.32.0 or later, then authenticate and verify the selected identity:
+For SigV4, install AWS CLI 2.32.0 or later. Before using `aws login`, attach the
+`SignInLocalDevelopmentAccess` managed policy to the IAM user, role, or group. Do not use root credentials for agent
+operations; use a least-privilege IAM role or user instead.
+The command opens the default browser. On a headless host, use `aws login --remote` and finish sign-in on a
+browser-enabled device. Then authenticate and verify the selected identity:
 
 ```bash
 aws login
@@ -41,6 +45,7 @@ operation Region to the proxy. Replace the `OPENAI_API_KEY` value before running
 This example asks for an account inventory and requires approval before any non-read tool runs:
 
 ```python
+import json
 import os
 
 from fastmcp.client.transports import StdioTransport
@@ -59,6 +64,7 @@ transport = StdioTransport(
         '--metadata',
         f'AWS_REGION={region}',
     ],
+    keep_alive=False,
 )
 agent = Agent(
     'openai:gpt-5.6-sol',
@@ -76,10 +82,11 @@ agent = Agent(
 
 result = agent.run_sync('List the S3 buckets in this account and report each bucket Region.')
 if isinstance(result.output, DeferredToolRequests):
-    approvals = {
-        call.tool_call_id: (True if input(f'Approve {call.tool_name}? [y/N] ') == 'y' else ToolDenied('denied'))
-        for call in result.output.approvals
-    }
+    approvals = {}
+    for call in result.output.approvals:
+        details = json.dumps(call.args, indent=2, sort_keys=True)
+        prompt = f'Approve {call.tool_name} for AWS account {account_id} in {region}?\n{details}\n[y/N] '
+        approvals[call.tool_call_id] = True if input(prompt) == 'y' else ToolDenied('denied')
     result = agent.run_sync(
         message_history=result.all_messages(),
         deferred_tool_results=DeferredToolResults(approvals=approvals),
@@ -105,9 +112,12 @@ print(result.output)
 - `access='unrestricted'` removes the Harness approval gate; IAM still applies.
 - Managed tool names repeat across scopes. Wrap each `AWS` instance in Pydantic AI's `PrefixTools` with a unique prefix
   when one agent uses multiple accounts or target Regions.
-- `AWS` does not choose a result-reduction policy. Add
-  [`ToolOutputLimits`](https://pydantic.dev/docs/ai/harness/tool-output-limits/) to the agent when large results could
-  exceed its model context.
+- `max_output_bytes` and `max_output_lines` cap each managed tool result before it enters model context and history.
+  FastMCP still receives the full response. Ask for a narrower or paginated result when the response is truncated.
+- Presigned URLs are temporary bearer credentials that enter model context and message history. Use short expiries,
+  redact them from logs and traces, and avoid generating them in conversations whose history is retained.
+- The caller owns transport timeout, retry, cancellation, and cleanup behavior. Cancellation does not roll back an AWS
+  side effect. The single-run example uses `keep_alive=False` so the proxy exits after the toolset disconnects.
 - A supplied transport must point to the managed AWS MCP Server. Use [LocalStack](../localstack/) for emulated AWS.
 - Without SigV4 `AWS_REGION` metadata, AWS operations default to `us-east-1`.
 - The server is GA with no additional service fee. Normal AWS resource and data-transfer charges still apply.

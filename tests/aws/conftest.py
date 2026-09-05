@@ -41,7 +41,7 @@ def aws_server() -> tuple[FastMCP, list[str]]:
     def aws___run_script(code: str) -> str:
         """Run an AWS API script."""
         calls.append(f'run:{code}')
-        return 'created'
+        return f'created:{code}'
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def aws___failing_write() -> str:
