@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
@@ -95,6 +96,14 @@ class TestNotionToolset:
         toolset = NotionToolset(client=notion_server)
         with pytest.raises(UserError, match='has not been established'):
             _ = toolset.attribution
+        with pytest.raises(UserError, match='identity has not been established'):
+            _ = toolset.connection_identity
+
+    def test_expected_identity_is_validated(self, notion_server: FastMCP) -> None:
+        with pytest.raises(UserError, match='must be a .* tuple'):
+            NotionToolset(client=notion_server, expected_identity=('workspace-1',))  # pyright: ignore[reportArgumentType]
+        with pytest.raises(UserError, match='workspace and user IDs are invalid'):
+            NotionToolset(client=notion_server, expected_identity=('workspace 1', 'user-1'))
 
     async def test_caller_owned_prebuilt_client_is_used(
         self, notion_server: FastMCP, run_context: RunContext[None]
@@ -220,7 +229,10 @@ class TestNotion:
             assert 'explicitly selected Notion mutation tools' in info.instructions
             assert 'IDs returned by search or fetch' in info.instructions
             assert '`notion-get-async-task`' in info.instructions
-            assert 'do not automatically retry a\nnon-idempotent mutation' in info.instructions
+            assert '`poll_after_seconds` delay' in info.instructions
+            assert 'stop on `succeeded` or `failed`' in info.instructions
+            assert "caller's deadline or cancellation" in info.instructions
+            assert 'do not automatically\nretry a non-idempotent mutation' in info.instructions
             assert 'request fresh approval' in info.instructions
             return ModelResponse(parts=[TextPart('done')])
 
@@ -359,6 +371,79 @@ class TestNotion:
         )
         assert resumed.output == 'Updated.'
         assert notion_state['page_content'] == 'New launch plan'
+
+    async def test_restored_approval_requires_original_connection_identity(
+        self, notion_server: FastMCP, notion_state: NotionState
+    ) -> None:
+        def propose(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        'notion-update-page',
+                        {'page_id': 'page-1', 'command': 'replace_content', 'new_str': 'Wrong workspace'},
+                        'update-1',
+                    )
+                ]
+            )
+
+        original = NotionToolset[None](client=notion_server, mutations='notion-update-page')
+        deferred = await Agent(
+            FunctionModel(propose),
+            deps_type=type(None),
+            toolsets=[original.approval_required()],
+            output_type=[str, DeferredToolRequests],
+        ).run('Replace the launch plan')
+        assert isinstance(deferred.output, DeferredToolRequests)
+        expected_identity = original.connection_identity
+
+        notion_state['workspace_id'] = 'workspace-2'
+        restored = NotionToolset[None](
+            client=notion_server,
+            mutations='notion-update-page',
+            expected_identity=expected_identity,
+        )
+        restored_agent = Agent(
+            FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart('should not run')])),
+            deps_type=type(None),
+            toolsets=[restored.approval_required()],
+            output_type=[str, DeferredToolRequests],
+        )
+        with pytest.raises(UserError, match='connection identity changed'):
+            await restored_agent.run(
+                message_history=deferred.all_messages(),
+                deferred_tool_results=DeferredToolResults(approvals={'update-1': True}),
+            )
+        assert notion_state['page_content'] == 'Old launch plan'
+
+    async def test_mutation_provider_error_is_not_model_retryable(
+        self, notion_server: FastMCP, notion_state: NotionState
+    ) -> None:
+        notion_state['mutation_error'] = True
+        model_calls = 0
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal model_calls
+            model_calls += 1
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        'notion-update-page',
+                        {'page_id': 'page-1', 'command': 'replace_content', 'new_str': 'Applied once'},
+                        f'update-{model_calls}',
+                    )
+                ]
+            )
+
+        agent = Agent(
+            FunctionModel(model),
+            capabilities=[Notion(client=notion_server, mutations='notion-update-page')],
+        )
+        with pytest.raises(ToolError, match='ambiguous provider failure'):
+            await agent.run('Replace the launch plan')
+
+        update_calls = [name for name, _args in notion_state['calls'] if name == 'notion-update-page']
+        assert update_calls == ['notion-update-page']
+        assert model_calls == 1
 
     async def test_approved_mutation_is_rejected_after_connection_identity_changes(
         self, notion_server: FastMCP, notion_state: NotionState

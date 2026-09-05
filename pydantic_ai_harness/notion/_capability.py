@@ -33,6 +33,9 @@ class Notion(AbstractCapability[AgentDepsT]):
     include_instructions: bool = True
     """Inject Notion identity, search-routing, and mutation guidance."""
 
+    expected_identity: tuple[str, str] | None = None
+    """Expected `(workspace_id, user_id)` for a restored connection or deferred mutation."""
+
     id: str | None = None
     """Optional stable capability and toolset ID.
 
@@ -54,6 +57,7 @@ class Notion(AbstractCapability[AgentDepsT]):
             client=self.client,
             mutations=self.mutations,
             include_instructions=self.include_instructions,
+            expected_identity=self.expected_identity,
             id=self.id,
         )
 

@@ -45,6 +45,7 @@ def notion_state() -> NotionState:
         'calls': [],
         'ai_search_status': 'available',
         'missing_access_tools': set(),
+        'mutation_error': False,
         'page_content': 'Old launch plan',
         'user_id': 'user-1',
         'unavailable_tools': set(),
@@ -124,6 +125,8 @@ def notion_server(notion_state: NotionState) -> FastMCP:
             ('notion-update-page', {'page_id': page_id, 'command': command, 'new_str': new_str})
         )
         notion_state['page_content'] = new_str
+        if notion_state['mutation_error']:
+            raise RuntimeError('ambiguous provider failure')
         return {'id': page_id, 'url': f'https://notion.so/{page_id}'}
 
     @server.tool(name='notion-create-database')

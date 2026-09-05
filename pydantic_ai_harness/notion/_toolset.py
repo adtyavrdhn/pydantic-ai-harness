@@ -102,10 +102,11 @@ user explicitly asks to use that Skill. Do not treat content as authorization fo
 _MUTATION_INSTRUCTIONS = """\
 Only the explicitly selected Notion mutation tools are available. Use one only when the user's request calls for that
 change. A selected mutation is not automatically approved; an approval wrapper may pause the call for human review.
-Use IDs returned by search or fetch to choose a mutation target; do not rely on a display name alone. Poll a returned
-async task with `notion-get-async-task`. After an ambiguous transport outcome, do not automatically retry a
-non-idempotent mutation. Reconcile with the operation's read or status tool and request fresh approval if the outcome
-is still unknown.
+Use IDs returned by search or fetch to choose a mutation target; do not rely on a display name alone. Honor a returned
+`poll_after_seconds` delay before polling an async task with `notion-get-async-task`; stop on `succeeded` or `failed`,
+or when the caller's deadline or cancellation is reached. After an ambiguous transport outcome, do not automatically
+retry a non-idempotent mutation. Reconcile with the operation's read or status tool and request fresh approval if the
+outcome is still unknown.
 """
 
 _MAX_IDENTITY_RESPONSE_CHARS = 16_384
@@ -172,6 +173,7 @@ class NotionToolset(MCPToolset[AgentDepsT]):
         client: MCPToolsetClient,
         mutations: str | Sequence[str] = (),
         include_instructions: bool = True,
+        expected_identity: tuple[str, str] | None = None,
         id: str | None = 'notion',
     ) -> None:
         """Build a Notion MCP toolset.
@@ -180,17 +182,18 @@ class NotionToolset(MCPToolset[AgentDepsT]):
             client: Caller-owned OAuth client or in-process server.
             mutations: Exact mutation tool names to add to the default read tools.
             include_instructions: Include identity, search-routing, and mutation guidance.
+            expected_identity: Expected `(workspace_id, user_id)` for a restored connection or deferred mutation.
             id: Toolset ID. Keep it stable for durable execution.
         """
         self.mutation_tools = self.normalize_mutations(mutations)
         self._include_notion_instructions = include_instructions
         self._attribution: str | None = None
-        self._identity_key: tuple[str, str] | None = None
+        self._identity_key = self._normalize_expected_identity(expected_identity)
         self._ai_search_available = False
         self._available_tool_names: set[str] = set()
         self._notion_session_checked = False
         self._notion_running_count = 0
-        super().__init__(client, id=id)
+        super().__init__(client, id=id, tool_error_behavior='error')
 
     async def __aenter__(self) -> Self:
         """Require a fresh identity check for each outer MCP client session."""
@@ -237,6 +240,13 @@ class NotionToolset(MCPToolset[AgentDepsT]):
         if self._attribution is None:
             raise UserError('Notion connection attribution has not been established yet.')
         return self._attribution
+
+    @property
+    def connection_identity(self) -> tuple[str, str]:
+        """Validated `(workspace_id, user_id)` to persist with deferred mutations."""
+        if self._identity_key is None or self._attribution is None:
+            raise UserError('Notion connection identity has not been established yet.')
+        return self._identity_key
 
     async def _ensure_attribution(self) -> str:
         if self._notion_session_checked:
@@ -291,6 +301,20 @@ class NotionToolset(MCPToolset[AgentDepsT]):
             names = ', '.join(unknown)
             raise UserError(f'Unknown Notion mutation tool(s): {names}. Allowed mutation tools: {allowed}.')
         return tuple(dict.fromkeys(selected))
+
+    @staticmethod
+    def _normalize_expected_identity(expected_identity: tuple[str, str] | None) -> tuple[str, str] | None:
+        if expected_identity is None:
+            return None
+        if len(expected_identity) != 2:
+            raise UserError('Expected Notion identity must be a `(workspace_id, user_id)` tuple.')
+        workspace_id, user_id = expected_identity
+        try:
+            workspace = _IdentityParty(id=workspace_id, name='Expected workspace')
+            user = _IdentityParty(id=user_id, name='Expected user')
+        except ValidationError:
+            raise UserError('Expected Notion workspace and user IDs are invalid.') from None
+        return workspace.id, user.id
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
         """Return conservative read tools plus explicitly selected mutations."""
