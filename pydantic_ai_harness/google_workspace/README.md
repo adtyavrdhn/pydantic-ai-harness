@@ -48,7 +48,7 @@ Save this as `workspace_agent.py` after setting the two environment variables ab
 import asyncio
 
 from pydantic_ai import Agent
-from pydantic_ai_harness import GoogleWorkspace
+from pydantic_ai_harness.google_workspace import GoogleWorkspace
 
 agent = Agent('openai:gpt-5.6-sol', capabilities=[GoogleWorkspace()])
 
