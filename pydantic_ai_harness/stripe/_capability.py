@@ -90,6 +90,11 @@ def _validate_connected_account(connected_account: str | None) -> None:
         raise UserError('`connected_account` must be a Stripe account ID beginning with `acct_`.')
 
 
+def _validate_enable_writes(enable_writes: object) -> None:
+    if not isinstance(enable_writes, bool):
+        raise UserError('`enable_writes` must be `True` or `False`.')
+
+
 def _stripe_http_client(
     headers: dict[str, str] | None = None,
     timeout: httpx.Timeout | None = None,
@@ -163,6 +168,7 @@ class Stripe(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         _validate_api_key(self.api_key, self.mode)
         _validate_connected_account(self.connected_account)
+        _validate_enable_writes(self.enable_writes)
 
     def get_instructions(self) -> str | None:
         """Return account-safe usage guidance without embedding the key or account ID."""
@@ -172,9 +178,17 @@ class Stripe(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build a filtered Stripe MCP toolset and approval-gate the optional write tool."""
-        headers = {'Authorization': f'Bearer {self.api_key}'}
-        if self.connected_account is not None:
-            headers['Stripe-Account'] = self.connected_account
+        api_key = self.api_key
+        mode = self.mode
+        connected_account = self.connected_account
+        enable_writes = self.enable_writes
+        _validate_api_key(api_key, mode)
+        _validate_connected_account(connected_account)
+        _validate_enable_writes(enable_writes)
+
+        headers = {'Authorization': f'Bearer {api_key}'}
+        if connected_account is not None:
+            headers['Stripe-Account'] = connected_account
 
         transport = StreamableHttpTransport(
             url=_STRIPE_MCP_URL,
@@ -183,15 +197,15 @@ class Stripe(AbstractCapability[AgentDepsT]):
         )
         toolset = MCPToolset[AgentDepsT](transport, id=self.id)
         allowed = _READ_TOOL_NAMES
-        if self.enable_writes:
+        if enable_writes:
             allowed = allowed | frozenset((_WRITE_TOOL_NAME,))
         filtered = toolset.filtered(lambda _ctx, tool_def: tool_def.name in allowed)
-        if self.enable_writes:
+        if enable_writes:
             return _StripeApprovalToolset(
                 filtered,
-                api_key=self.api_key,
-                mode=self.mode,
-                connected_account=self.connected_account,
+                api_key=api_key,
+                mode=mode,
+                connected_account=connected_account,
             )
         return filtered
 

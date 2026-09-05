@@ -57,6 +57,8 @@ You can ask the agent to:
 
 ## Operational constraints
 
+- The default tool allowlist is `get_stripe_account_info`, `search_stripe_documentation`, `stripe_api_details`,
+  `stripe_api_read`, and `stripe_api_search`. `stripe_api_write` is the only tool added by `enable_writes=True`.
 - Access is read-only by default. `enable_writes=True` exposes `stripe_api_write`; every call returns a
   `DeferredToolRequests` approval request before Stripe receives the write. Preserve the request metadata when
   resuming. The restricted key must grant write permission for each resource the agent may change. An approved result
@@ -69,6 +71,13 @@ You can ask the agent to:
 - `mode='sandbox'` accepts `rk_test_...` keys. Set `mode='live'` explicitly for an `rk_live_...` key.
 - Set `connected_account='acct_...'` to send every request to one Connect account. Connected-account access requires
   a restricted platform key with the needed connected-account permissions and does not support OAuth.
+- Use a separate agent for each platform or connected-account scope. Two `Stripe` capabilities on one agent expose
+  the same tool names and are rejected instead of merging their access.
+- `include_instructions=True` adds the Stripe usage guidance shown to the model. Set it to `False` when supplying
+  equivalent instructions elsewhere; the code-enforced allowlist and approval checks remain active.
+- Treat Stripe object fields and tool results as untrusted model input. The built-in guidance tells the model not to
+  follow instructions in that content, but it cannot prevent disclosure through another tool. Apply host policy and
+  approval before combining Stripe with unrelated outbound or mutation tools.
 - The capability sends requests only to `https://mcp.stripe.com` and exposes an exact tool allowlist. Stripe labels
   the MCP server Public preview. Confirm that preview services meet your requirements before using live mode.
 

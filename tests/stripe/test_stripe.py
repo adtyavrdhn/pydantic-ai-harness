@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal, Protocol
 
 import httpx
@@ -75,7 +76,18 @@ class TestStripe:
         )
         result = await agent.run('Create a refund')
         assert isinstance(result.output, DeferredToolRequests)
-        assert [call.tool_name for call in result.output.approvals] == ['stripe_api_write']
+        assert result.output.calls == []
+        assert result.output.approvals == [
+            ToolCallPart(
+                'stripe_api_write',
+                {'additionalProperty': 'a'},
+                tool_call_id='pyd_ai_tool_call_id__stripe_api_write',
+            )
+        ]
+        assert set(result.output.metadata) == {'pyd_ai_tool_call_id__stripe_api_write'}
+        approval_metadata = result.output.metadata['pyd_ai_tool_call_id__stripe_api_write']
+        assert set(approval_metadata) == {'stripe_scope_binding'}
+        assert re.fullmatch(r'[0-9a-f]{64}', approval_metadata['stripe_scope_binding'])
         assert 'rk_test_write' not in repr(result.output.metadata)
 
         resumed = await agent.run(
@@ -320,6 +332,35 @@ class TestStripe:
     def test_connected_account_is_validated(self, account: str) -> None:
         with pytest.raises(UserError, match='connected_account'):
             Stripe(api_key='rk_test_secret', connected_account=account)
+
+    @pytest.mark.parametrize('enable_writes', [1, 'false'])
+    def test_enable_writes_requires_a_boolean(self, enable_writes: object) -> None:
+        with pytest.raises(UserError, match='enable_writes'):
+            Stripe(api_key='rk_test_secret', enable_writes=enable_writes)  # pyright: ignore[reportArgumentType]
+
+    async def test_mutated_security_fields_are_revalidated(self, stripe_server: StripeServer) -> None:
+        unrestricted = Stripe(api_key='rk_test_initial')
+        unrestricted.api_key = 'sk_live_unrestricted_secret'
+        unrestricted.mode = 'live'
+        with pytest.raises(UserError, match='restricted API key'):
+            await Agent(TestModel(), capabilities=[unrestricted]).run('List customers')
+
+        wrong_mode = Stripe(api_key='rk_test_initial')
+        wrong_mode.mode = 'live'
+        with pytest.raises(UserError, match='does not match'):
+            await Agent(TestModel(), capabilities=[wrong_mode]).run('List customers')
+
+        wrong_account = Stripe(api_key='rk_test_initial')
+        wrong_account.connected_account = 'customer_123'
+        with pytest.raises(UserError, match='connected_account'):
+            await Agent(TestModel(), capabilities=[wrong_account]).run('List customers')
+
+        wrong_write_setting = Stripe(api_key='rk_test_initial')
+        object.__setattr__(wrong_write_setting, 'enable_writes', 1)
+        with pytest.raises(UserError, match='enable_writes'):
+            await Agent(TestModel(), capabilities=[wrong_write_setting]).run('List customers')
+
+        assert stripe_server.headers == []
 
     async def test_two_accounts_are_not_merged(self, stripe_server: StripeServer) -> None:
         first = Stripe(api_key='rk_test_first')
