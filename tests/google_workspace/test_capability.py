@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -108,6 +108,33 @@ class TestGoogleWorkspace:
             'id': f'google-workspace-{service}',
             'auth': 'token',
         }
+
+    def test_missing_client_falls_back_to_bearer_token(
+        self,
+        gmail_server: FastMCP,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        captured: list[tuple[object, str, str | None]] = []
+
+        class RecordingMCPToolset(FunctionToolset[object]):
+            def __init__(self, client: object, *, id: str, auth: str | None = None) -> None:
+                captured.append((client, id, auth))
+                super().__init__()
+
+        monkeypatch.setattr('pydantic_ai_harness.google_workspace._capability.MCPToolset', RecordingMCPToolset)
+        Agent(
+            TestModel(),
+            capabilities=[
+                GoogleWorkspace(
+                    clients={'gmail': gmail_server},
+                    access_token='calendar-token',
+                )
+            ],
+        )
+        assert captured == [
+            (gmail_server, 'google-workspace-gmail', None),
+            ('https://calendarmcp.googleapis.com/mcp/v1', 'google-workspace-calendar', 'calendar-token'),
+        ]
 
     def test_rejects_allowlist_for_unselected_service(self):
         with pytest.raises(UserError, match='does not belong to a selected service'):
@@ -270,10 +297,10 @@ class TestGoogleWorkspace:
 
     async def test_same_service_identities_collide_without_outer_prefix(
         self,
-        gmail_server_factory: Callable[[str], FastMCP],
+        gmail_server_factory: Callable[[str, Callable[[], Awaitable[None]] | None], FastMCP],
     ):
-        alice = GoogleWorkspace[object](services=('gmail',), clients={'gmail': gmail_server_factory('alice')})
-        bob = GoogleWorkspace[object](services=('gmail',), clients={'gmail': gmail_server_factory('bob')})
+        alice = GoogleWorkspace[object](services=('gmail',), clients={'gmail': gmail_server_factory('alice', None)})
+        bob = GoogleWorkspace[object](services=('gmail',), clients={'gmail': gmail_server_factory('bob', None)})
 
         with pytest.raises(UserError, match='conflict'):
             await Agent(TestModel(), toolsets=[alice.get_toolset(), bob.get_toolset()]).run('Read both inboxes')
@@ -294,8 +321,18 @@ class TestGoogleWorkspace:
 
     async def test_dynamic_toolset_isolated_across_overlapping_runs(
         self,
-        gmail_server_factory: Callable[[str], FastMCP],
+        gmail_server_factory: Callable[[str, Callable[[], Awaitable[None]] | None], FastMCP],
     ):
+        entered = 0
+        both_entered = asyncio.Event()
+
+        async def await_peer() -> None:
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await asyncio.wait_for(both_entered.wait(), timeout=1)
+
         agent = Agent(
             TestModel(call_tools=['gmail_search_threads']),
             deps_type=FastMCP,
@@ -312,9 +349,10 @@ class TestGoogleWorkspace:
             ).get_toolset()
 
         alice_result, bob_result = await asyncio.gather(
-            agent.run('Read Alice inbox', deps=gmail_server_factory('alice')),
-            agent.run('Read Bob inbox', deps=gmail_server_factory('bob')),
+            agent.run('Read Alice inbox', deps=gmail_server_factory('alice', await_peer)),
+            agent.run('Read Bob inbox', deps=gmail_server_factory('bob', await_peer)),
         )
+        assert entered == 2
 
         for result, identity in ((alice_result, 'alice'), (bob_result, 'bob')):
             assert any(

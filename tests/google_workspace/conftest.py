@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 
 import pytest
 
@@ -36,14 +36,16 @@ def gmail_server() -> FastMCP:
 
 
 @pytest.fixture
-def gmail_server_factory() -> Callable[[str], FastMCP]:
-    def make_server(identity: str) -> FastMCP:
+def gmail_server_factory() -> Callable[[str, Callable[[], Awaitable[None]] | None], FastMCP]:
+    def make_server(identity: str, rendezvous: Callable[[], Awaitable[None]] | None) -> FastMCP:
         Settings.model_rebuild()
         server = FastMCP(f'gmail-{identity}-fake')
 
         @server.tool()
-        def search_threads(query: str = '') -> list[dict[str, str]]:
+        async def search_threads(query: str = '') -> list[dict[str, str]]:
             """Search Gmail threads for one identity."""
+            if rendezvous is not None:
+                await rendezvous()
             return [{'id': f'{identity}-thread-1', 'subject': identity, 'query': query}]
 
         return server
