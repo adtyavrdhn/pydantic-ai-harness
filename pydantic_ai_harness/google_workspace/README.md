@@ -48,7 +48,7 @@ Save this as `workspace_agent.py` after setting the two environment variables ab
 import asyncio
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.google_workspace import GoogleWorkspace
+from pydantic_ai_harness import GoogleWorkspace
 
 agent = Agent('openai:gpt-5.6-sol', capabilities=[GoogleWorkspace()])
 
@@ -66,9 +66,9 @@ Run it with `uv run python workspace_agent.py`.
 ## What you can ask
 
 - "Summarize unread project mail and list my meetings today."
-- "Find the launch plan in Drive, read the linked Doc, and show the budget values from its Sheet."
-- "Read the quarterly Slides presentation and list the files I can share with the team."
-- "Search Chat for the release decision and find the email address for its author in People."
+- With Drive, Docs, and Sheets selected: "Find the launch plan in Drive, read the linked Doc, and show the budget values from its Sheet."
+- With Slides and Drive selected: "Read the quarterly Slides presentation and list the files I can share with the team."
+- With Chat and People selected: "Search Chat for the release decision and find the email address for its author in People."
 
 ## Operational constraints
 
