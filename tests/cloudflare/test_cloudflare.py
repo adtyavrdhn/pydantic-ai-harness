@@ -762,6 +762,73 @@ class TestCloudflareToolset:
                 },
             },
         )
+        nullable_container = with_schema(
+            'nullable_container',
+            {
+                'type': 'object',
+                'properties': {
+                    'query': {
+                        'type': ['object', 'null'],
+                        'properties': {'limit': {'type': 'integer', 'maximum': 10}},
+                    }
+                },
+            },
+        )
+        nullable_scalar_container = with_schema(
+            'nullable_scalar_container',
+            {
+                'type': 'object',
+                'properties': {
+                    'query': {
+                        'type': ['string', 'null'],
+                        'properties': {'limit': {'type': 'integer', 'maximum': 3}},
+                    }
+                },
+            },
+        )
+        malformed_container_types = with_schema(
+            'malformed_container_types',
+            {
+                'type': 'object',
+                'properties': {
+                    'query': {
+                        'type': ['object', 1],
+                        'properties': {'limit': {'type': 'integer', 'maximum': 3}},
+                    }
+                },
+            },
+        )
+        ambiguous_container_types = with_schema(
+            'ambiguous_container_types',
+            {
+                'type': 'object',
+                'properties': {
+                    'query': {
+                        'type': ['object', 'string'],
+                        'properties': {'limit': {'type': 'integer', 'maximum': 3}},
+                    }
+                },
+            },
+        )
+        duplicate_container_types = with_schema(
+            'duplicate_container_types',
+            {
+                'type': 'object',
+                'properties': {
+                    'query': {
+                        'type': ['object', 'object'],
+                        'properties': {'limit': {'type': 'integer', 'maximum': 3}},
+                    }
+                },
+            },
+        )
+        empty_container_types = with_schema(
+            'empty_container_types',
+            {
+                'type': 'object',
+                'properties': {'query': {'type': [], 'properties': {'limit': {'type': 'integer', 'maximum': 3}}}},
+            },
+        )
         open_root = with_schema('open_root', {'type': 'object', 'properties': {}})
         aliased_mutation = with_schema(
             'aliased_mutation',
@@ -773,6 +840,13 @@ class TestCloudflareToolset:
                     'zoneId': {'type': 'string'},
                     'zone': {'type': 'string'},
                 },
+            },
+        )
+        non_list_container_type = with_schema(
+            'non_list_container_type',
+            {
+                'type': 'object',
+                'properties': {'query': {'type': 1, 'properties': {'limit': {'type': 'integer', 'maximum': 3}}}},
             },
         )
         aliased_mutation = replace(
@@ -814,11 +888,34 @@ class TestCloudflareToolset:
                 'boolean_container': boolean_container,
                 'open_container': open_container,
                 'scalar_container': scalar_container,
+                'nullable_container': nullable_container,
+                'nullable_scalar_container': nullable_scalar_container,
+                'malformed_container_types': malformed_container_types,
+                'ambiguous_container_types': ambiguous_container_types,
+                'duplicate_container_types': duplicate_container_types,
+                'empty_container_types': empty_container_types,
+                'non_list_container_type': non_list_container_type,
                 'open_root': open_root,
                 'aliased_mutation': aliased_mutation,
             }
 
+        captured_args: dict[str, object] = {}
+
+        async def fake_direct_call_tool(
+            _toolset: MCPToolset[None],
+            _name: str,
+            tool_args: dict[str, object],
+            *,
+            metadata: dict[str, object] | None = None,
+            use_task: bool = False,
+        ) -> object:
+            assert metadata is None
+            assert use_task is False
+            captured_args.update(tool_args)
+            return 'bounded'
+
         monkeypatch.setattr(MCPToolset, 'get_tools', fake_get_tools)
+        monkeypatch.setattr(MCPToolset, 'direct_call_tool', fake_direct_call_tool)
         toolset = CloudflareToolset[None](
             server=CloudflareServer.DNS_ANALYTICS,
             api_token='secret',
@@ -832,6 +929,8 @@ class TestCloudflareToolset:
             'root_ref',
             'open_container',
             'scalar_container',
+            'nullable_container',
+            'nullable_scalar_container',
             'open_root',
         }
         assert tools['nullable'].tool_def.parameters_json_schema['properties']['limit']['default'] == 5
@@ -845,6 +944,19 @@ class TestCloudflareToolset:
         with pytest.raises(ModelRetry, match='`query` must be an object'):
             await toolset.call_tool('open_container', {'query': 'not-an-object'}, run_context, tools['open_container'])
         assert tools['scalar_container'].tool_def.parameters_json_schema['properties']['query']['type'] == 'string'
+        nullable_query = tools['nullable_container'].tool_def.parameters_json_schema['properties']['query']
+        assert nullable_query['type'] == ['object', 'null']
+        assert nullable_query['properties']['limit']['maximum'] == 5
+        assert nullable_query['properties']['limit']['default'] == 5
+        assert (
+            await toolset.call_tool('nullable_container', {'query': {}}, run_context, tools['nullable_container'])
+            == 'bounded'
+        )
+        assert captured_args == {'query': {'limit': 5}}
+        assert tools['nullable_scalar_container'].tool_def.parameters_json_schema['properties']['query']['type'] == [
+            'string',
+            'null',
+        ]
         with pytest.raises(ModelRetry, match='not declared by the current Cloudflare tool schema'):
             await toolset.call_tool('open_root', {'limit': 1000}, run_context, tools['open_root'])
 

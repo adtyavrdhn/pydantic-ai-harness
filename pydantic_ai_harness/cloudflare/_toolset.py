@@ -394,6 +394,25 @@ def _page_limit(schema: object, configured: int) -> int | None:
     return constraints.limit(configured) if constraints is not None else None
 
 
+def _object_schema_type(field: dict[str, object]) -> bool | None:
+    field_type = field.get('type')
+    if field_type is None or field_type == 'object':
+        return True
+    if isinstance(field_type, str):
+        return False
+    if not isinstance(field_type, list):
+        return None
+    raw_types = _OBJECT_LIST.validate_python(field_type)
+    if not raw_types or not all(isinstance(item, str) for item in raw_types):
+        return None
+    types = set(raw_types)
+    if len(types) != len(raw_types):
+        return None
+    if 'object' not in types:
+        return False
+    return True if types <= {'object', 'null'} else None
+
+
 def _pagination_fields(tool: ToolsetTool[AgentDepsT]) -> list[tuple[tuple[str, ...], object]]:
     properties = _properties(tool)
     root = tool.tool_def.parameters_json_schema
@@ -402,7 +421,7 @@ def _pagination_fields(tool: ToolsetTool[AgentDepsT]) -> list[tuple[tuple[str, .
     ]
     for container_key in _PAGE_CONTAINER_KEYS:
         container = _object_dict(_resolve_schema(root, properties.get(container_key)))
-        if container.get('type') not in (None, 'object'):
+        if _object_schema_type(container) is not True:
             continue
         nested = _object_dict(container.get('properties'))
         fields.extend(((container_key, key), _resolve_schema(root, nested[key])) for key in _PAGE_KEYS if key in nested)
@@ -415,7 +434,7 @@ def _supported_object_schema(schema: object) -> dict[str, object] | None:
         return None
     if any(key not in _OBJECT_SCHEMA_KEYS and not key.startswith('x-') for key in field):
         return None
-    if field.get('type', 'object') != 'object':
+    if _object_schema_type(field) is not True:
         return None
     properties = field.get('properties')
     if properties is not None and not isinstance(properties, dict):
@@ -441,8 +460,11 @@ def _supports_result_limit(tool: ToolsetTool[AgentDepsT], configured: int) -> bo
             continue
         resolved_container = _resolve_schema(root, properties[container_key])
         container_field = _object_dict(resolved_container)
-        if container_field.get('type') not in (None, 'object'):
+        object_type = _object_schema_type(container_field)
+        if object_type is False:
             continue
+        if object_type is None:
+            return False
         container = _supported_object_schema(resolved_container)
         if container is None:
             return False
@@ -658,7 +680,7 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
                 bounded_properties[key] = bounded
         for container_key in _PAGE_CONTAINER_KEYS:
             container = _object_dict(_resolve_schema(root, properties.get(container_key)))
-            if container.get('type') not in (None, 'object'):
+            if _object_schema_type(container) is not True:
                 continue
             nested = _object_dict(container.get('properties'))
             if not nested:
@@ -758,7 +780,7 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
             self._bound_page_arg(args, key, _resolve_schema(root, properties[key]))
         for container_key in _PAGE_CONTAINER_KEYS:
             container = _object_dict(_resolve_schema(root, properties.get(container_key)))
-            if container.get('type') not in (None, 'object'):
+            if _object_schema_type(container) is not True:
                 continue
             nested_properties = _object_dict(container.get('properties'))
             if container_key not in args or args[container_key] is None:
