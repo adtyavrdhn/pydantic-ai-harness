@@ -68,8 +68,8 @@ _INSTRUCTIONS = (
 
 
 def _validate_configuration(
-    account_id: str,
-    region: str,
+    account_id: object,
+    region: object,
     endpoint_region: str,
     access: str,
     authentication: str,
@@ -77,9 +77,9 @@ def _validate_configuration(
     max_output_bytes: int,
     max_output_lines: int,
 ) -> tuple[AWSAccess, Literal['unauthenticated', 'oauth', 'sigv4']]:
-    if _ACCOUNT_ID_PATTERN.fullmatch(account_id) is None:
+    if not isinstance(account_id, str) or _ACCOUNT_ID_PATTERN.fullmatch(account_id) is None:
         raise UserError('`account_id` must be a 12-digit AWS account ID.')
-    if _REGION_PATTERN.fullmatch(region) is None:
+    if not isinstance(region, str) or _REGION_PATTERN.fullmatch(region) is None:
         raise UserError('`region` must be an AWS Region identifier such as `us-west-2`.')
     if endpoint_region not in _ENDPOINTS:
         supported = ', '.join(f'`{value}`' for value in _ENDPOINTS)

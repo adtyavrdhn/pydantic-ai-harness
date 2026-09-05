@@ -100,15 +100,15 @@ capabilities:
         assert capability.max_output_bytes == 50 * 1024
         assert capability.max_output_lines == 2000
 
-    @pytest.mark.parametrize('account_id', ['', '1234', '12345678901x'])
-    def test_rejects_invalid_account_id(self, account_id: str):
+    @pytest.mark.parametrize('account_id', ['', '1234', '12345678901x', 123456789012])
+    def test_rejects_invalid_account_id(self, account_id: object):
         with pytest.raises(UserError, match='12-digit AWS account ID'):
-            AWS(account_id, 'us-west-2')
+            AWS(account_id, 'us-west-2')  # pyright: ignore[reportArgumentType]
 
-    @pytest.mark.parametrize('region', ['', 'US West', 'us_west_2'])
-    def test_rejects_invalid_target_region(self, region: str):
+    @pytest.mark.parametrize('region', ['', 'US West', 'us_west_2', 1])
+    def test_rejects_invalid_target_region(self, region: object):
         with pytest.raises(UserError, match='AWS Region identifier'):
-            AWS('123456789012', region)
+            AWS('123456789012', region)  # pyright: ignore[reportArgumentType]
 
     def test_rejects_unsupported_endpoint_region(self):
         with pytest.raises(UserError, match='`us-east-1`.*`eu-central-1`'):
