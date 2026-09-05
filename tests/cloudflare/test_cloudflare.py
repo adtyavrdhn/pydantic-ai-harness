@@ -599,10 +599,105 @@ class TestCloudflareToolset:
                 'properties': {'limit': {'$ref': '#/$defs/PageLimit', 'maximum': 10}},
             },
         )
+        conflicting_root_ref = with_schema(
+            'conflicting_root_ref',
+            {
+                '$ref': '#/$defs/Arguments',
+                '$defs': {
+                    'Arguments': {
+                        'type': 'object',
+                        'properties': {'limit': {'type': 'integer', 'maximum': 3}},
+                    }
+                },
+                'properties': {'query': {'type': 'string'}},
+            },
+        )
+        deep_definitions: dict[str, object] = {
+            f'Level{index}': {'$ref': f'#/$defs/Level{index + 1}'} for index in range(65)
+        }
+        deep_definitions['Level65'] = {'type': 'integer', 'maximum': 3}
+        deep_ref = with_schema(
+            'deep_ref',
+            {
+                'type': 'object',
+                '$defs': deep_definitions,
+                'properties': {'limit': {'$ref': '#/$defs/Level0'}},
+            },
+        )
+        root_composition = with_schema(
+            'root_composition',
+            {
+                'type': 'object',
+                '$defs': {
+                    'Arguments': {
+                        'type': 'object',
+                        'properties': {'limit': {'type': 'integer', 'maximum': 3}},
+                    }
+                },
+                'allOf': [{'$ref': '#/$defs/Arguments'}],
+            },
+        )
+        container_composition = with_schema(
+            'container_composition',
+            {
+                'type': 'object',
+                '$defs': {
+                    'Query': {
+                        'type': 'object',
+                        'properties': {'limit': {'type': 'integer', 'maximum': 3}},
+                    }
+                },
+                'properties': {'query': {'allOf': [{'$ref': '#/$defs/Query'}]}},
+            },
+        )
+        deep_composition_limit: object = {'type': 'integer', 'maximum': 3}
+        for _ in range(65):
+            deep_composition_limit = {'allOf': [deep_composition_limit]}
+        deep_composition = with_schema(
+            'deep_composition',
+            {'type': 'object', 'properties': {'limit': deep_composition_limit}},
+        )
+        dynamic_ref = with_schema(
+            'dynamic_ref',
+            {
+                '$dynamicRef': '#arguments',
+                '$defs': {
+                    'Arguments': {
+                        '$dynamicAnchor': 'arguments',
+                        'type': 'object',
+                        'properties': {'limit': {'type': 'integer', 'maximum': 3}},
+                    }
+                },
+            },
+        )
+        dependent_schema = with_schema(
+            'dependent_schema',
+            {
+                'type': 'object',
+                'properties': {'mode': {'type': 'string'}},
+                'dependentSchemas': {'mode': {'properties': {'limit': {'type': 'integer', 'maximum': 3}}}},
+            },
+        )
         empty_schema = with_schema('empty_schema', {'type': 'object', 'properties': {'limit': {}}})
         malformed_types = with_schema(
             'malformed_types',
             {'type': 'object', 'properties': {'limit': {'type': ['integer', 1]}}},
+        )
+        malformed_required = with_schema(
+            'malformed_required',
+            {
+                'type': 'object',
+                'properties': {'limit': {'type': 'integer', 'maximum': 3}},
+                'required': ['limit', 1],
+            },
+        )
+        malformed_required_type = with_schema(
+            'malformed_required_type',
+            {
+                'type': 'object',
+                'properties': {'limit': {'type': 'integer', 'maximum': 3}},
+                'required': 'limit',
+            },
         )
         aliased_mutation = with_schema(
             'aliased_mutation',
@@ -634,8 +729,17 @@ class TestCloudflareToolset:
                 'unresolved_ref': unresolved_ref,
                 'boolean_ref': boolean_ref,
                 'conflicting_ref': conflicting_ref,
+                'conflicting_root_ref': conflicting_root_ref,
+                'deep_ref': deep_ref,
+                'root_composition': root_composition,
+                'container_composition': container_composition,
+                'deep_composition': deep_composition,
+                'dynamic_ref': dynamic_ref,
+                'dependent_schema': dependent_schema,
                 'empty_schema': empty_schema,
                 'malformed_types': malformed_types,
+                'malformed_required': malformed_required,
+                'malformed_required_type': malformed_required_type,
                 'aliased_mutation': aliased_mutation,
             }
 
@@ -666,6 +770,106 @@ class TestCloudflareToolset:
         mutation_schema = mutation_tools['aliased_mutation'].tool_def.parameters_json_schema
         assert set(mutation_schema['properties']) == {'account_id', 'zoneId'}
         assert mutation_schema['required'] == ['account_id', 'zoneId']
+
+    async def test_approved_mutation_rejects_authoritative_scope_schema_drift(
+        self,
+        alternate_schema_server: FastMCP,
+        run_context: RunContext[None],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = CloudflareToolset[None](client=alternate_schema_server, trust_server_annotations=True)
+        async with source:
+            base = (await source.get_tools(run_context))['simple_limited']
+        metadata = {'annotations': {'readOnlyHint': False, 'destructiveHint': True}}
+        displayed = replace(
+            base,
+            tool_def=replace(
+                base.tool_def,
+                name='delete_record',
+                parameters_json_schema={
+                    'type': 'object',
+                    'properties': {'zoneId': {'type': 'string'}, 'record_id': {'type': 'string'}},
+                },
+                metadata=metadata,
+            ),
+        )
+        authoritative = replace(
+            displayed,
+            tool_def=replace(
+                displayed.tool_def,
+                parameters_json_schema={
+                    'type': 'object',
+                    'properties': {'zone': {'type': 'string'}, 'record_id': {'type': 'string'}},
+                },
+                metadata={'annotations': {'readOnlyHint': True, 'destructiveHint': False}},
+            ),
+        )
+
+        async def fake_get_tools(_toolset: MCPToolset[None], _ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
+            return {'delete_record': authoritative}
+
+        async def unexpected_provider_call(*_args: object, **_kwargs: object) -> object:
+            pytest.fail('schema drift must be rejected before the provider call')
+
+        monkeypatch.setattr(MCPToolset, 'get_tools', fake_get_tools)
+        monkeypatch.setattr(MCPToolset, 'direct_call_tool', unexpected_provider_call)
+        toolset = CloudflareToolset[None](
+            server=CloudflareServer.DNS_ANALYTICS,
+            api_token='secret',
+            zone_id='z1',
+            allow_mutations=True,
+        )
+        approved_context = replace(run_context, tool_call_approved=True)
+        with pytest.raises(ToolFailed, match='would change the approved provider arguments'):
+            await toolset.call_tool(
+                'delete_record',
+                {'zoneId': 'z1', 'record_id': 'r1'},
+                approved_context,
+                displayed,
+            )
+
+    async def test_approved_mutation_failure_remains_terminal_after_annotation_drift(
+        self,
+        focused_server: FastMCP,
+        run_context: RunContext[None],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = CloudflareToolset[None](
+            client=focused_server,
+            trust_server_annotations=True,
+            allow_mutations=True,
+        )
+        async with source:
+            displayed = (await source.get_tools(run_context))['delete_record']
+        authoritative = replace(
+            displayed,
+            tool_def=replace(
+                displayed.tool_def,
+                metadata={'annotations': {'readOnlyHint': True, 'destructiveHint': False}},
+            ),
+        )
+
+        async def fake_get_tools(_toolset: MCPToolset[None], _ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
+            return {'delete_record': authoritative}
+
+        async def uncertain_provider_call(*_args: object, **_kwargs: object) -> object:
+            raise ModelRetry('uncertain transport status')
+
+        monkeypatch.setattr(MCPToolset, 'get_tools', fake_get_tools)
+        monkeypatch.setattr(MCPToolset, 'direct_call_tool', uncertain_provider_call)
+        toolset = CloudflareToolset[None](
+            server=CloudflareServer.DNS_ANALYTICS,
+            api_token='secret',
+            allow_mutations=True,
+        )
+        approved_context = replace(run_context, tool_call_approved=True)
+        with pytest.raises(ToolFailed, match='uncertain transport status'):
+            await toolset.call_tool(
+                'delete_record',
+                {'account_id': 'a1', 'zoneId': 'z1', 'record_id': 'r1'},
+                approved_context,
+                displayed,
+            )
 
     async def test_text_within_limits_is_unchanged(
         self, alternate_schema_server: FastMCP, run_context: RunContext[None]

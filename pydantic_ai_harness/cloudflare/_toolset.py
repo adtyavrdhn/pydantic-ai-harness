@@ -106,13 +106,16 @@ _PAGE_KEYS = ('limit', 'per_page', 'perPage', 'page_size', 'pageSize', 'first', 
 _PAGE_CONTAINER_KEYS = ('query', 'keysQuery', 'valuesQuery')
 _TRUNCATION_MARKER = '[... Cloudflare result truncated ...]'
 _ERROR_ENVELOPE_BYTES = len(to_json({'error': ''}))
+_MAX_SCHEMA_DEPTH = 64
 _REF_ANNOTATION_KEYS = frozenset(
     {
         '$anchor',
         '$comment',
         '$defs',
+        '$dynamicAnchor',
         '$id',
         '$schema',
+        '$vocabulary',
         'default',
         'definitions',
         'deprecated',
@@ -122,6 +125,9 @@ _REF_ANNOTATION_KEYS = frozenset(
         'title',
         'writeOnly',
     }
+)
+_OBJECT_SCHEMA_KEYS = _REF_ANNOTATION_KEYS | frozenset(
+    {'type', 'properties', 'required', 'additionalProperties', 'minProperties', 'maxProperties'}
 )
 _OBJECT_DICT = TypeAdapter(dict[str, object])
 _STRING_LIST = TypeAdapter(list[str])
@@ -184,7 +190,12 @@ def _object_dict(value: object) -> dict[str, object]:
 def _resolve_schema(root: dict[str, object], schema: object, seen: frozenset[str] = frozenset()) -> object:
     field = _object_dict(schema)
     reference = field.get('$ref')
-    if not isinstance(reference, str) or not reference.startswith('#/') or reference in seen:
+    if (
+        not isinstance(reference, str)
+        or not reference.startswith('#/')
+        or reference in seen
+        or len(seen) >= _MAX_SCHEMA_DEPTH
+    ):
         return schema
     if any(key not in _REF_ANNOTATION_KEYS and not key.startswith('x-') for key in field if key != '$ref'):
         return schema
@@ -260,7 +271,7 @@ def _fraction(value: object) -> Fraction | None:
         return None
 
 
-def _union_constraints(variants: list[object]) -> _PageConstraints | None:
+def _union_constraints(variants: list[object], depth: int) -> _PageConstraints | None:
     numeric_variants: list[_PageConstraints] = []
     for variant in variants:
         if variant is False:
@@ -270,7 +281,7 @@ def _union_constraints(variants: list[object]) -> _PageConstraints | None:
         variant_schema = _object_dict(variant)
         if variant_schema.get('type') == 'null':
             continue
-        variant_constraints = _page_constraints(variant)
+        variant_constraints = _page_constraints(variant, depth + 1)
         if variant_constraints is None:
             return None
         numeric_variants.append(variant_constraints)
@@ -327,7 +338,9 @@ def _discrete_constraints(field: dict[str, object]) -> _PageConstraints | None:
     return constraints
 
 
-def _page_constraints(schema: object) -> _PageConstraints | None:
+def _page_constraints(schema: object, depth: int = 0) -> _PageConstraints | None:
+    if depth >= _MAX_SCHEMA_DEPTH:
+        return None
     field = _object_dict(schema)
     if not field:
         return None
@@ -357,14 +370,14 @@ def _page_constraints(schema: object) -> _PageConstraints | None:
         variants = field.get(keyword)
         if not isinstance(variants, list):
             continue
-        variant_constraints = _union_constraints(_OBJECT_LIST.validate_python(variants))
+        variant_constraints = _union_constraints(_OBJECT_LIST.validate_python(variants), depth)
         if variant_constraints is None:
             return None
         constraints = constraints.merge(variant_constraints)
     variants = field.get('allOf')
     if isinstance(variants, list):
         for variant in _OBJECT_LIST.validate_python(variants):
-            variant_constraints = _page_constraints(variant)
+            variant_constraints = _page_constraints(variant, depth + 1)
             if variant_constraints is None:
                 return None
             constraints = constraints.merge(variant_constraints)
@@ -390,6 +403,22 @@ def _pagination_fields(tool: ToolsetTool[AgentDepsT]) -> list[tuple[tuple[str, .
 
 
 def _supports_result_limit(tool: ToolsetTool[AgentDepsT], configured: int) -> bool:
+    root = tool.tool_def.parameters_json_schema
+    resolved_root = _object_dict(_resolve_schema(root, root))
+    if any(key not in _OBJECT_SCHEMA_KEYS and not key.startswith('x-') for key in resolved_root):
+        return False
+    required = resolved_root.get('required')
+    if required is not None:
+        if not isinstance(required, list):
+            return False
+        required_items = _OBJECT_LIST.validate_python(required)
+        if not all(isinstance(key, str) for key in required_items):
+            return False
+    properties = _object_dict(resolved_root.get('properties'))
+    for container_key in _PAGE_CONTAINER_KEYS:
+        container = _object_dict(_resolve_schema(root, properties.get(container_key)))
+        if any(key not in _OBJECT_SCHEMA_KEYS and not key.startswith('x-') for key in container):
+            return False
     return all(_page_limit(schema, configured) is not None for _, schema in _pagination_fields(tool))
 
 
@@ -745,7 +774,15 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
             )
         if local_error is not None:
             raise ModelRetry(local_error) from None
-        if not read_only and not ctx.tool_call_approved:
+        if scoped_args != tool_args and ctx.tool_call_approved:
+            message = _bounded_error_text(
+                'The current Cloudflare tool schema would change the approved provider arguments. Start a new '
+                'approval request using the current tool schema.',
+                max_bytes=self.max_output_bytes,
+                max_lines=self.max_output_lines,
+            )
+            raise ToolFailed(message)
+        if not read_only:
             if scoped_args != tool_args:
                 message = _bounded_error_text(
                     'Repeat the mutation with the configured Cloudflare scope and result limits shown in the tool schema '
@@ -754,7 +791,8 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
                     max_lines=self.max_output_lines,
                 )
                 raise ModelRetry(message)
-            raise ApprovalRequired
+            if not ctx.tool_call_approved:
+                raise ApprovalRequired
         provider_error: str | None = None
         result: object | None = None
         try:
@@ -765,7 +803,7 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
                 error.message, max_bytes=self.max_output_bytes, max_lines=self.max_output_lines
             )
         if provider_error is not None:
-            if read_only:
+            if read_only and not ctx.tool_call_approved:
                 raise ModelRetry(provider_error) from None
             raise ToolFailed(provider_error) from None
         if isinstance(result, str):
