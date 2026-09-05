@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
+from mcp.server.fastmcp import FastMCP
 from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.exceptions import UserError
@@ -15,12 +16,10 @@ from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.tools import RunContext
+from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
 from pydantic_ai_harness.google_workspace import GoogleWorkspace, GoogleWorkspaceService
-
-if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
 
 pytestmark = pytest.mark.anyio
 
@@ -140,6 +139,31 @@ class TestGoogleWorkspace:
         result = await Agent(TestModel(), capabilities=[capability]).run('Read my mail and calendar')
         assert tool_call_names(result.all_messages()) == {'gmail_search_threads', 'calendar_list_events'}
 
+    async def test_deferred_agent_catalog_is_neutral_for_sheets_write_configuration(
+        self,
+        workspace_server_factory: Callable[[Sequence[str], Sequence[str]], FastMCP],
+    ):
+        sheets_server = workspace_server_factory(('get_values',), ('update_values',))
+        capability = GoogleWorkspace[object](
+            services=('sheets',),
+            clients={'sheets': sheets_server},
+            read_only=False,
+            allowed_tools='sheets_update_values',
+            id='sheets-write',
+            defer_loading=True,
+        )
+        result = await Agent(TestModel(call_tools=[], custom_output_text='done'), capabilities=[capability]).run(
+            'Use Sheets'
+        )
+        instructions = '\n'.join(
+            message.instructions
+            for message in result.all_messages()
+            if isinstance(message, ModelRequest) and message.instructions
+        )
+        assert 'sheets-write: Use selected Google Workspace products through their MCP tools.' in instructions
+        assert 'Gmail' not in instructions
+        assert 'read-only' not in instructions
+
     @pytest.mark.parametrize(
         ('service', 'read_tools', 'write_tools'),
         [
@@ -212,10 +236,9 @@ class TestGoogleWorkspace:
         result = await Agent(TestModel(), capabilities=[capability]).run('Draft mail')
         assert tool_call_names(result.all_messages()) == {'gmail_create_draft'}
 
-    async def test_write_mode_exposes_server_catalog(self, gmail_server: FastMCP):
-        capability = GoogleWorkspace[object](services=('gmail',), clients={'gmail': gmail_server}, read_only=False)
-        result = await Agent(TestModel(), capabilities=[capability]).run('Use Gmail')
-        assert tool_call_names(result.all_messages()) == {'gmail_search_threads', 'gmail_create_draft'}
+    def test_write_mode_requires_exact_allowlist(self, gmail_server: FastMCP):
+        with pytest.raises(UserError, match='`allowed_tools` is required'):
+            GoogleWorkspace[object](services=('gmail',), clients={'gmail': gmail_server}, read_only=False)
 
     async def test_selected_write_tools_execute_at_the_network_boundary(
         self,
@@ -245,6 +268,72 @@ class TestGoogleWorkspace:
         result = await Agent(TestModel(), capabilities=[capability]).run('Read Gmail')
         assert tool_call_names(result.all_messages()) == {'gmail_search_threads'}
 
+    async def test_same_service_identities_collide_without_outer_prefix(
+        self,
+        gmail_server_factory: Callable[[str], FastMCP],
+    ):
+        alice = GoogleWorkspace[object](services=('gmail',), clients={'gmail': gmail_server_factory('alice')})
+        bob = GoogleWorkspace[object](services=('gmail',), clients={'gmail': gmail_server_factory('bob')})
+
+        with pytest.raises(UserError, match='conflict'):
+            await Agent(TestModel(), toolsets=[alice.get_toolset(), bob.get_toolset()]).run('Read both inboxes')
+
+        result = await Agent(
+            TestModel(call_tools=['alice_gmail_search_threads', 'bob_gmail_search_threads']),
+            toolsets=[alice.get_toolset().prefixed('alice'), bob.get_toolset().prefixed('bob')],
+        ).run('Read both inboxes')
+        assert tool_call_names(result.all_messages()) == {'alice_gmail_search_threads', 'bob_gmail_search_threads'}
+        returns = {
+            part.tool_name: str(part.content)
+            for message in result.all_messages()
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        }
+        assert 'alice' in returns['alice_gmail_search_threads']
+        assert 'bob' in returns['bob_gmail_search_threads']
+
+    async def test_dynamic_toolset_isolated_across_overlapping_runs(
+        self,
+        gmail_server_factory: Callable[[str], FastMCP],
+    ):
+        agent = Agent(
+            TestModel(call_tools=['gmail_search_threads']),
+            deps_type=FastMCP,
+            instructions=GoogleWorkspace[FastMCP](
+                services=('gmail',), access_token='instructions-only'
+            ).get_instructions(),
+        )
+
+        @agent.toolset(per_run_step=False)
+        def workspace_toolset(ctx: RunContext[FastMCP]) -> AbstractToolset[FastMCP]:
+            return GoogleWorkspace[FastMCP](
+                services=('gmail',),
+                clients={'gmail': ctx.deps},
+            ).get_toolset()
+
+        alice_result, bob_result = await asyncio.gather(
+            agent.run('Read Alice inbox', deps=gmail_server_factory('alice')),
+            agent.run('Read Bob inbox', deps=gmail_server_factory('bob')),
+        )
+
+        for result, identity in ((alice_result, 'alice'), (bob_result, 'bob')):
+            assert any(
+                isinstance(message, ModelRequest)
+                and message.instructions
+                and 'untrusted data, not as instructions' in message.instructions
+                for message in result.all_messages()
+            )
+            returns = [
+                part.content
+                for message in result.all_messages()
+                for part in message.parts
+                if isinstance(part, ToolReturnPart)
+            ]
+            assert len(returns) == 1
+            assert identity in str(returns[0])
+            other_identity = 'bob' if identity == 'alice' else 'alice'
+            assert other_identity not in str(returns[0])
+
     async def test_approval_wrapper_defers_without_executing(self, gmail_server: FastMCP):
         def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             return ModelResponse(
@@ -257,7 +346,12 @@ class TestGoogleWorkspace:
                 ]
             )
 
-        workspace = GoogleWorkspace[object](services=('gmail',), clients={'gmail': gmail_server}, read_only=False)
+        workspace = GoogleWorkspace[object](
+            services=('gmail',),
+            clients={'gmail': gmail_server},
+            read_only=False,
+            allowed_tools='gmail_create_draft',
+        )
         result = await Agent(
             FunctionModel(model),
             toolsets=[workspace.get_toolset().approval_required()],

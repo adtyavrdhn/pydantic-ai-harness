@@ -36,6 +36,22 @@ def gmail_server() -> FastMCP:
 
 
 @pytest.fixture
+def gmail_server_factory() -> Callable[[str], FastMCP]:
+    def make_server(identity: str) -> FastMCP:
+        Settings.model_rebuild()
+        server = FastMCP(f'gmail-{identity}-fake')
+
+        @server.tool()
+        def search_threads(query: str = '') -> list[dict[str, str]]:
+            """Search Gmail threads for one identity."""
+            return [{'id': f'{identity}-thread-1', 'subject': identity, 'query': query}]
+
+        return server
+
+    return make_server
+
+
+@pytest.fixture
 def calendar_server() -> FastMCP:
     Settings.model_rebuild()
     server = FastMCP('calendar-fake')

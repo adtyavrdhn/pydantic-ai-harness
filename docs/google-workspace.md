@@ -38,6 +38,8 @@ Set these environment variables:
 
 The capability does not open a browser, mint tokens, or refresh tokens. Your application owns OAuth, including its pre-registered client, redirect URI, scope ceiling, storage, and refresh policy.
 
+Google requires screening prompts sent to and responses returned from Workspace MCP servers for malicious content and prompt injection. Use [Model Armor or another documented screening solution accepted by your users](https://developers.google.com/workspace/guides/configure-mcp-security). Static `instructions=` text is model guidance, not a screening control. When Model Armor logging is enabled, it logs the entire payload, which can expose sensitive content in logs.
+
 ## Example
 
 Save this as `workspace_agent.py` after setting the two environment variables above:
@@ -72,8 +74,8 @@ Run it with `uv run python workspace_agent.py`.
 
 - Gmail and Calendar are selected by default. Pass `services=('drive', 'docs', 'sheets', 'slides', 'chat', 'people')` to select other products.
 - Tool names are prefixed by service. Use `allowed_tools=('gmail_search_threads', 'calendar_list_events')` for an exact allowlist.
-- `read_only=True` is the default. It filters exposed tools, but it does not reduce the bearer token's scopes. Issue the token with the narrowest scopes your application permits. To require approval for every exposed operation, including writes, create the workspace with `read_only=False`, then pass `workspace.get_toolset().approval_required()` through `toolsets`, `workspace.get_instructions()` through `instructions`, and include `DeferredToolRequests` in `output_type`. Follow the [deferred tools guide](/ai/deferred-tools/) to approve and resume the run.
-- Pass a token with `GOOGLE_ACCESS_TOKEN` or `access_token=`. Hosted applications can instead pass a caller-owned MCP client or `MCPToolset` for each selected service through `clients=`. One client represents one authenticated identity.
+- `read_only=True` is the default. It filters exposed tools, but it does not reduce the bearer token's scopes. Issue the token with the narrowest scopes your application permits. `read_only=False` requires an explicit `allowed_tools` list. To require approval for every exposed operation, including writes, create the workspace with `read_only=False` and an `allowed_tools` list, then pass `workspace.get_toolset().approval_required()` through `toolsets`, `workspace.get_instructions()` through `instructions`, and include `DeferredToolRequests` in `output_type`. Follow the [deferred tools guide](/ai/deferred-tools/) to approve and resume the run.
+- Pass a token with `GOOGLE_ACCESS_TOKEN` or `access_token=`. Hosted applications can instead pass a caller-owned MCP client or `MCPToolset` for each selected service through `clients=`. One MCP client or `MCPToolset` represents one authenticated identity. For concurrent runs, use `@agent.toolset(per_run_step=False)` with credentials or clients from `deps` to create a fresh `GoogleWorkspace` and toolset per run. Also pass the text returned by a configured workspace's `get_instructions()` as Agent instructions. See [per-user authentication](/ai/mcp/client/#per-user-authentication). If one run uses multiple identities for the same service, wrap each workspace toolset in an outer `.prefixed('alice')` or `.prefixed('bob')` label because the service prefixes alone collide.
 - Automatic local OAuth is unavailable because the upstream MCP client currently replaces an explicit scope ceiling during discovery. Track [modelcontextprotocol/python-sdk#2317](https://github.com/modelcontextprotocol/python-sdk/issues/2317).
 - Workspace content can contain instructions aimed at the model. Keep mutation tools narrow and review proposed changes before approval.
 
