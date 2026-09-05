@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 from fastmcp import Client
@@ -897,11 +898,9 @@ class TestCloudflareToolset:
         async def fake_get_tools(_toolset: MCPToolset[None], _ctx: RunContext[None]) -> dict[str, ToolsetTool[None]]:
             return {'delete_record': authoritative}
 
-        async def unexpected_provider_call(*_args: object, **_kwargs: object) -> object:
-            pytest.fail('schema drift must be rejected before the provider call')
-
+        provider_call = AsyncMock()
         monkeypatch.setattr(MCPToolset, 'get_tools', fake_get_tools)
-        monkeypatch.setattr(MCPToolset, 'direct_call_tool', unexpected_provider_call)
+        monkeypatch.setattr(MCPToolset, 'direct_call_tool', provider_call)
         toolset = CloudflareToolset[None](
             server=CloudflareServer.DNS_ANALYTICS,
             api_token='secret',
@@ -916,6 +915,7 @@ class TestCloudflareToolset:
                 approved_context,
                 displayed,
             )
+        provider_call.assert_not_awaited()
 
     async def test_approved_mutation_failure_remains_terminal_after_annotation_drift(
         self,
