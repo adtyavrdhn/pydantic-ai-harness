@@ -93,7 +93,8 @@ uv run python examples/notion_page_update.py "Find the launch plan and replace i
 
 ## What you can ask
 
-- Search Notion pages and connected sources, then fetch and summarize a selected page.
+- Search Notion pages and, when Notion AI search is available, connected sources; then fetch and summarize a selected
+  Notion page.
 - Read data sources, meeting notes, comments, users, teams, and Custom Agent sessions when the workspace exposes them.
 - Create or update pages, databases, views, comments, and attachments after adding each exact mutation tool name.
 - Start or continue a Custom Agent session after adding the relevant session mutation tool names.
