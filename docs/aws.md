@@ -21,11 +21,13 @@ uv add "pydantic-ai-harness[aws]" "pydantic-ai-slim[openai]"
 
 Public AWS knowledge needs no credentials, environment variables, or browser sign-in.
 
-For OAuth, attach the `AWSMCPSignInOAuthAccessPolicy` managed policy to the IAM user or role that will sign in. This
-grants `signin:AuthorizeOAuth2Access` and `signin:CreateOAuth2Token`. Configure a FastMCP
+For the interactive OAuth flow shown here, attach the `AWSMCPSignInOAuthAccessPolicy` managed policy, or a custom
+policy that grants `signin:AuthorizeOAuth2Access` and `signin:CreateOAuth2Token`, to the IAM user or role that will sign
+in. Configure a FastMCP
 `StreamableHttpTransport('https://aws-mcp.us-east-1.api.aws/mcp', auth='oauth')`, then pass it as `managed_transport` with
 `authentication='oauth'`. FastMCP handles OAuth and opens a browser on the first request. Configure encrypted token
-storage for persistent or multi-user applications. OAuth does not use AWS access-key environment variables.
+storage for persistent or multi-user applications. This interactive flow does not use AWS access-key environment
+variables. Other caller-owned OAuth transports retain their own credential, token, and browser lifecycle.
 
 For SigV4, install AWS CLI 2.32.0 or later. Before using `aws login`, attach the
 `SignInLocalDevelopmentAccess` managed policy to the IAM user, role, or group. Do not use root credentials for agent
