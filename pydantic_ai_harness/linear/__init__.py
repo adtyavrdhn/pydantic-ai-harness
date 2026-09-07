@@ -1,5 +1,5 @@
-"""Linear capability for reading and updating work through Linear's hosted MCP server."""
+"""Connect Pydantic AI agents to Linear's hosted MCP server."""
 
-from ._capability import LINEAR_MCP_URL, LINEAR_READ_ONLY_MCP_URL, Linear
+from ._capability import Linear
 
-__all__ = ('LINEAR_MCP_URL', 'LINEAR_READ_ONLY_MCP_URL', 'Linear')
+__all__ = ('Linear',)
