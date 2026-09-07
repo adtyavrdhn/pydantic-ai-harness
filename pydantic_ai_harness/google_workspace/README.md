@@ -1,6 +1,6 @@
 # Google Workspace
 
-Google Workspace lets an agent read selected Gmail, Calendar, Drive, Docs, Sheets, Slides, Chat, and People data, with explicit opt-in for changes.
+Google Workspace lets an agent read, and optionally change, a user's Gmail, Calendar, Drive, Docs, Sheets, Slides, Chat, and People data through Google's official remote MCP servers.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/google_workspace/)
 
@@ -14,35 +14,28 @@ uv add "pydantic-ai-harness[google-workspace]" "pydantic-ai-slim[openai]"
 
 ## Provider setup
 
-In Google Cloud:
+Google's Workspace MCP servers are in Developer Preview. In Google Cloud:
 
 1. Join the Google Workspace Developer Preview Program, then enable the Workspace API and MCP service for each product you will select.
-2. If you select Chat, configure the Google Chat API app and turn off **Enable interactive features**.
-3. Use your application's OAuth flow to obtain a bearer token with the read-only scopes for each selected product. Add mutation scopes only when using `read_only=False`. Each value below starts with `https://www.googleapis.com/auth/`.
+2. Create an OAuth client. Google's servers do not support dynamic client registration, so your application runs the OAuth flow and owns the token.
+3. Obtain a bearer token with the scope for each selected product. Each scope below starts with `https://www.googleapis.com/auth/`.
 
-| Product | Read-only scope suffixes | Additional mutation scope suffixes |
+| Product | Read scope | Write scope |
 |---|---|---|
-| Gmail | `gmail.readonly` | `gmail.compose`, `gmail.modify` |
+| Gmail | `gmail.readonly` | `gmail.modify` |
 | Drive | `drive.readonly` | `drive.file` |
-| Docs | `drive.readonly`, `documents.readonly` | `drive.file`, `documents` |
-| Sheets | `drive.readonly`, `spreadsheets.readonly` | `drive.file`, `spreadsheets` |
-| Slides | `drive.readonly`, `presentations.readonly` | `drive.file`, `presentations` |
-| Calendar | `calendar.calendarlist.readonly`, `calendar.events.freebusy`, `calendar.events.readonly` | `calendar.events` |
-| Chat | `chat.spaces.readonly`, `chat.memberships.readonly`, `chat.messages.readonly` | `chat.messages.create`, `chat.users.readstate` |
-| People | `directory.readonly`, `userinfo.profile`, `contacts.readonly` | None |
+| Docs | `documents.readonly` | `documents` |
+| Sheets | `spreadsheets.readonly` | `spreadsheets` |
+| Slides | `presentations.readonly` | `presentations` |
+| Calendar | `calendar.readonly` | `calendar.events` |
+| Chat | `chat.messages.readonly` | `chat.messages.create` |
+| People | `contacts.readonly` | none |
 
-Set these environment variables:
+Each tool's reference page in the [Workspace MCP guide](https://developers.google.com/workspace/guides/configure-mcp-servers) lists every scope it accepts.
 
-- `GOOGLE_ACCESS_TOKEN`: a caller-managed Google OAuth bearer token.
-- `OPENAI_API_KEY`: the key used by the example model.
-
-The capability does not open a browser, mint tokens, or refresh tokens. Your application owns OAuth, including its pre-registered client, redirect URI, scope ceiling, storage, and refresh policy.
-
-Google requires screening prompts sent to and responses returned from Workspace MCP servers for malicious content and prompt injection. Use [Model Armor or another documented screening solution accepted by your users](https://developers.google.com/workspace/guides/configure-mcp-security). Static `instructions=` text is model guidance, not a screening control. When Model Armor logging is enabled, it logs the entire payload, which can expose sensitive content in logs.
+Set `GOOGLE_ACCESS_TOKEN` to the token, or pass it as `auth=`. Set `OPENAI_API_KEY` for the example model.
 
 ## Example
-
-Save this as `workspace_agent.py` after setting the two environment variables above:
 
 ```python
 import asyncio
@@ -50,7 +43,7 @@ import asyncio
 from pydantic_ai import Agent
 from pydantic_ai_harness.google_workspace import GoogleWorkspace
 
-agent = Agent('openai:gpt-5.6-sol', capabilities=[GoogleWorkspace()])
+agent = Agent('openai:gpt-5.6-sol', capabilities=[GoogleWorkspace(['gmail', 'calendar'])])
 
 
 async def main() -> None:
@@ -61,22 +54,28 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Run it with `uv run python workspace_agent.py`.
+Only the tools Google marks read-only are exposed. Tool names are prefixed by product, such as `gmail_search_threads` and `calendar_list_events`.
 
-## What you can ask
+## Allowing changes
 
-- "Summarize unread project mail and list my meetings today."
-- With Drive, Docs, and Sheets selected: "Find the launch plan in Drive, read the linked Doc, and show the budget values from its Sheet."
-- With Slides and Drive selected: "Read the quarterly Slides presentation and list the files I can share with the team."
-- With Chat and People selected: "Search Chat for the release decision and find the email address for its author in People."
+Pass `access='write'` to expose every tool for the selected products. Add `require_approval=True` to pause the run before each tool that is not read-only, then approve and resume it as the [deferred tools guide](https://pydantic.dev/docs/ai/deferred-tools/) describes:
+
+```python
+from pydantic_ai import Agent, DeferredToolRequests
+from pydantic_ai_harness.google_workspace import GoogleWorkspace
+
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    capabilities=[GoogleWorkspace('calendar', access='write', require_approval=True)],
+    output_type=[str, DeferredToolRequests],
+)
+```
+
+`allowed_tools` is an exact allowlist of prefixed names, such as `allowed_tools=['calendar_create_event']`. It narrows what the access mode exposes and never widens it.
 
 ## Operational constraints
 
-- Gmail and Calendar are selected by default. Pass `services=('drive', 'docs', 'sheets', 'slides', 'chat', 'people')` to select other products.
-- Tool names are prefixed by service. Use `allowed_tools=('gmail_search_threads', 'calendar_list_events')` for an exact allowlist.
-- `read_only=True` is the default. It filters exposed tools, but it does not reduce the bearer token's scopes. Issue the token with the narrowest scopes your application permits. `read_only=False` requires an explicit `allowed_tools` list. To require approval for every exposed operation, including writes, create the workspace with `read_only=False` and an `allowed_tools` list, then pass `workspace.get_toolset().approval_required()` through `toolsets`, `workspace.get_instructions()` through `instructions`, and include `DeferredToolRequests` in `output_type`. Follow the [deferred tools guide](https://ai.pydantic.dev/deferred-tools/) to approve and resume the run.
-- Pass a token with `GOOGLE_ACCESS_TOKEN` or `access_token=`. Hosted applications can instead pass a caller-owned MCP client or `MCPToolset` for each selected service through `clients=`. One MCP client or `MCPToolset` represents one authenticated identity. For concurrent runs, use `@agent.toolset(per_run_step=False)` with credentials or clients from `deps` to create a fresh `GoogleWorkspace` and toolset per run. Also pass the text returned by a configured workspace's `get_instructions()` as Agent instructions. See [per-user authentication](https://pydantic.dev/docs/ai/mcp/client/#per-user-authentication). If one run uses multiple identities for the same service, wrap each workspace toolset in an outer `.prefixed('alice')` or `.prefixed('bob')` label because the service prefixes alone collide.
-- Automatic local OAuth is unavailable because the upstream MCP client currently replaces an explicit scope ceiling during discovery. Track [modelcontextprotocol/python-sdk#2317](https://github.com/modelcontextprotocol/python-sdk/issues/2317).
-- Workspace content can contain instructions aimed at the model. Keep mutation tools narrow and review proposed changes before approval.
-
-Google's [Workspace MCP configuration guide](https://developers.google.com/workspace/guides/configure-mcp-servers) lists the provider setup and current tool catalog.
+- `access='read'` filters the tools the agent sees. It does not narrow the token's scopes, so issue the token with read scopes unless you enable writes.
+- `auth` accepts a bearer token or an `httpx.Auth`. Use an `httpx.Auth` when the token must be refreshed or looked up per request. For per-user credentials, build the capability inside a [per-run toolset](https://pydantic.dev/docs/ai/mcp/client/#per-user-authentication).
+- Use one instance per agent. Two instances for the same product produce colliding tool names. When one run needs two identities, pass each `.get_toolset().prefixed('alice')` through `toolsets` instead; the capability's instructions are then not added automatically.
+- Workspace content can contain instructions aimed at the model. The default instructions tell the model to treat it as untrusted data. Google asks applications to screen prompts and responses with [Model Armor or an equivalent](https://developers.google.com/workspace/guides/configure-mcp-security).
