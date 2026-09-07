@@ -4,7 +4,7 @@ Verified 2026-09-07 against the live servers and
 https://developers.google.com/workspace/guides/configure-mcp-servers:
 
 - Each product has its own Streamable HTTP endpoint, listed in `_MCP_URLS`.
-- Every tool carries MCP annotations; `readOnlyHint` is what `access='read'` filters on.
+- Every tool carries MCP annotations; `readOnlyHint` is what `read_only=True` filters on.
   `tools/list` answers without a token, so the catalog can be re-checked with one request.
 - Authentication is a Google OAuth bearer token. Google's authorization server has no dynamic
   client registration, so the caller owns the OAuth client and the token.
@@ -35,9 +35,6 @@ except ImportError as _import_error:  # pragma: no cover
 GoogleWorkspaceService = Literal['gmail', 'drive', 'docs', 'sheets', 'slides', 'calendar', 'chat', 'people']
 """A Google Workspace product with an official remote MCP server."""
 
-GoogleWorkspaceAccess = Literal['read', 'write']
-"""Whether the agent may only read Workspace data or also change it."""
-
 _MCP_URLS: dict[str, str] = {
     'gmail': 'https://gmailmcp.googleapis.com/mcp/v1',
     'drive': 'https://drivemcp.googleapis.com/mcp/v1',
@@ -66,7 +63,7 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
     """Tools from the official Google Workspace remote MCP servers.
 
     Tools are prefixed with their product name, such as `gmail_search_threads`.
-    Only tools Google marks read-only are exposed unless `access='write'`.
+    Every tool for the selected products is exposed unless `read_only=True`.
     """
 
     services: GoogleWorkspaceService | Sequence[GoogleWorkspaceService]
@@ -74,11 +71,11 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
 
     _: KW_ONLY
 
-    access: GoogleWorkspaceAccess = 'read'
-    """`'read'` exposes only tools Google marks read-only; `'write'` exposes every tool."""
+    read_only: bool = False
+    """Expose only the tools Google marks read-only. The token's scopes still decide what Google allows."""
 
-    require_approval: bool = False
-    """In write mode, require approval for every tool that is not read-only.
+    requires_approval: bool = False
+    """Require approval for every tool that is not read-only; inert when `read_only=True`.
 
     The run then returns `DeferredToolRequests`; see the deferred tools guide.
     """
@@ -107,9 +104,6 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
             if service not in _MCP_URLS:
                 raise UserError(f'Unknown Google Workspace service {service!r}; expected one of {sorted(_MCP_URLS)}.')
 
-        if self.access not in ('read', 'write'):
-            raise UserError('`access` must be `read` or `write`.')
-
         if self.allowed_tools is not None:
             self.allowed_tools = (
                 (self.allowed_tools,) if isinstance(self.allowed_tools, str) else tuple(self.allowed_tools)
@@ -130,12 +124,12 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
                 for service in self.services
             ]
         )
-        if self.access == 'read':
+        if self.read_only:
             toolset = toolset.filtered(lambda _ctx, tool_def: is_read_only(tool_def))
         if self.allowed_tools is not None:
             allowed = frozenset(self.allowed_tools)
             toolset = toolset.filtered(lambda _ctx, tool_def: tool_def.name in allowed)
-        if self.access == 'write' and self.require_approval:
+        if self.requires_approval and not self.read_only:
             toolset = toolset.approval_required(lambda _ctx, tool_def, _args: not is_read_only(tool_def))
         return toolset
 
@@ -143,7 +137,7 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
         """Return Google Workspace usage and safety guidance."""
         if not self.include_instructions:
             return None
-        return _INSTRUCTIONS + (_READ_INSTRUCTIONS if self.access == 'read' else _WRITE_INSTRUCTIONS)
+        return _INSTRUCTIONS + (_READ_INSTRUCTIONS if self.read_only else _WRITE_INSTRUCTIONS)
 
     def _auth(self) -> str | httpx.Auth:
         auth = self.auth or os.environ.get('GOOGLE_ACCESS_TOKEN')
@@ -159,8 +153,8 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
         id: str | None = None,
         description: str | None = _DEFAULT_DESCRIPTION,
         defer_loading: bool = False,
-        access: GoogleWorkspaceAccess = 'read',
-        require_approval: bool = False,
+        read_only: bool = False,
+        requires_approval: bool = False,
         allowed_tools: str | Sequence[str] | None = None,
         include_instructions: bool = True,
     ) -> GoogleWorkspace[AgentDepsT]:
@@ -170,8 +164,8 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
             id=id,
             description=description,
             defer_loading=defer_loading,
-            access=access,
-            require_approval=require_approval,
+            read_only=read_only,
+            requires_approval=requires_approval,
             allowed_tools=allowed_tools,
             include_instructions=include_instructions,
         )

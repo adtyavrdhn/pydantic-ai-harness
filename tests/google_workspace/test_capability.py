@@ -56,10 +56,6 @@ class TestGoogleWorkspace:
         with pytest.raises(UserError, match=message):
             GoogleWorkspace(services)  # pyright: ignore[reportArgumentType]
 
-    def test_rejects_unknown_access(self):
-        with pytest.raises(UserError, match='`access` must be `read` or `write`'):
-            GoogleWorkspace('gmail', access='admin')  # pyright: ignore[reportArgumentType]
-
     @pytest.mark.parametrize('allowed_tool', ['calendar_list_events', 'search_threads'])
     def test_rejects_allowed_tool_outside_selected_services(self, allowed_tool: str):
         with pytest.raises(UserError, match='does not belong to a selected service'):
@@ -78,7 +74,7 @@ class TestGoogleWorkspace:
     def test_credentials_stay_out_of_specs_and_reprs(self):
         schema = json.dumps(AgentSpec.model_json_schema_with_capabilities([GoogleWorkspace]))
         assert '"auth"' not in schema
-        assert all(f'"{name}"' in schema for name in ('services', 'access', 'require_approval', 'allowed_tools'))
+        assert all(f'"{name}"' in schema for name in ('services', 'read_only', 'requires_approval', 'allowed_tools'))
         assert 'secret-token' not in repr(GoogleWorkspace('gmail', auth='secret-token'))
 
     def test_agent_spec_loads(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -89,8 +85,8 @@ class TestGoogleWorkspace:
             'capabilities:\n'
             '  - GoogleWorkspace:\n'
             '      services: [gmail, calendar]\n'
-            '      access: write\n'
-            '      require_approval: true\n',
+            '      read_only: false\n'
+            '      requires_approval: true\n',
             encoding='utf-8',
         )
         agent = Agent.from_file(spec, custom_capability_types=[GoogleWorkspace], model=TestModel())
@@ -101,8 +97,7 @@ class TestGoogleWorkspace:
             ['gmail'],
             id='ws',
             defer_loading=True,
-            access='write',
-            require_approval=True,
+            requires_approval=True,
             allowed_tools=['gmail_create_draft'],
             include_instructions=False,
         )
@@ -110,8 +105,7 @@ class TestGoogleWorkspace:
             ['gmail'],
             id='ws',
             defer_loading=True,
-            access='write',
-            require_approval=True,
+            requires_approval=True,
             allowed_tools=['gmail_create_draft'],
             include_instructions=False,
         )
@@ -119,13 +113,13 @@ class TestGoogleWorkspace:
 
     # --- access policy ------------------------------------------------------
 
-    async def test_read_access_exposes_only_tools_google_marks_read_only(self, gmail: str, calendar: str):
-        agent = Agent(TestModel(), capabilities=[GoogleWorkspace(['gmail', 'calendar'], auth='token')])
+    async def test_read_only_exposes_only_tools_google_marks_read_only(self, gmail: str, calendar: str):
+        agent = Agent(TestModel(), capabilities=[GoogleWorkspace(['gmail', 'calendar'], read_only=True, auth='token')])
         result = await agent.run('Read my mail and calendar')
         assert set(tool_returns(result.all_messages())) == {'gmail_search_threads', 'calendar_list_events'}
 
-    async def test_write_access_exposes_every_tool(self, gmail: str, calendar: str):
-        agent = Agent(TestModel(), capabilities=[GoogleWorkspace(['gmail', 'calendar'], access='write', auth='token')])
+    async def test_default_exposes_every_tool(self, gmail: str, calendar: str):
+        agent = Agent(TestModel(), capabilities=[GoogleWorkspace(['gmail', 'calendar'], auth='token')])
         result = await agent.run('Change my mail and calendar')
         assert set(tool_returns(result.all_messages())) == {
             'gmail_search_threads',
@@ -134,20 +128,22 @@ class TestGoogleWorkspace:
             'calendar_create_event',
         }
 
-    @pytest.mark.parametrize(('access', 'expected'), [('read', set[str]()), ('write', {'docs_update_doc'})])
-    async def test_unannotated_tool_counts_as_a_write(self, access: str, expected: set[str], fake_google: FakeGoogle):
+    @pytest.mark.parametrize(('read_only', 'expected'), [(True, set[str]()), (False, {'docs_update_doc'})])
+    async def test_unannotated_tool_counts_as_a_write(
+        self, read_only: bool, expected: set[str], fake_google: FakeGoogle
+    ):
         fake_google.serve('docs', unannotated_tools=('update_doc',))
-        agent = Agent(TestModel(), capabilities=[GoogleWorkspace('docs', access=access, auth='token')])  # pyright: ignore[reportArgumentType]
+        agent = Agent(TestModel(), capabilities=[GoogleWorkspace('docs', read_only=read_only, auth='token')])
         result = await agent.run('Update the doc')
         assert set(tool_returns(result.all_messages())) == expected
 
     async def test_allowed_tools_narrows_but_never_widens_access(self, gmail: str, calendar: str):
         allowed = ('gmail_create_draft', 'calendar_list_events')
-        writer = GoogleWorkspace(['gmail', 'calendar'], access='write', allowed_tools=allowed, auth='token')
+        writer = GoogleWorkspace(['gmail', 'calendar'], allowed_tools=allowed, auth='token')
         result = await Agent(TestModel(), capabilities=[writer]).run('Draft mail and read my calendar')
         assert set(tool_returns(result.all_messages())) == set(allowed)
 
-        reader = GoogleWorkspace(['gmail', 'calendar'], allowed_tools=allowed, auth='token')
+        reader = GoogleWorkspace(['gmail', 'calendar'], read_only=True, allowed_tools=allowed, auth='token')
         result = await Agent(TestModel(), capabilities=[reader]).run('Draft mail and read my calendar')
         assert set(tool_returns(result.all_messages())) == {'calendar_list_events'}
 
@@ -167,7 +163,7 @@ class TestGoogleWorkspace:
 
     # --- approval -----------------------------------------------------------
 
-    async def test_require_approval_defers_writes_and_runs_reads(self, gmail: str):
+    async def test_requires_approval_defers_writes_and_runs_reads(self, gmail: str):
         def call_read_and_write(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             if any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
                 return ModelResponse(parts=[TextPart('done')])
@@ -180,7 +176,7 @@ class TestGoogleWorkspace:
 
         agent = Agent(
             FunctionModel(call_read_and_write),
-            capabilities=[GoogleWorkspace('gmail', access='write', require_approval=True, auth='token')],
+            capabilities=[GoogleWorkspace('gmail', requires_approval=True, auth='token')],
             output_type=[str, DeferredToolRequests],
         )
         paused = await agent.run('Find the launch thread and draft a reply')
@@ -194,8 +190,8 @@ class TestGoogleWorkspace:
         )
         assert set(tool_returns(resumed.all_messages())) == {'gmail_search_threads', 'gmail_create_draft'}
 
-    async def test_require_approval_is_inert_in_read_mode(self, gmail: str):
-        capability = GoogleWorkspace('gmail', require_approval=True, auth='token')
+    async def test_requires_approval_is_inert_when_read_only(self, gmail: str):
+        capability = GoogleWorkspace('gmail', read_only=True, requires_approval=True, auth='token')
         result = await Agent(TestModel(), capabilities=[capability]).run('Read my mail')
         assert set(tool_returns(result.all_messages())) == {'gmail_search_threads'}
 
@@ -224,12 +220,14 @@ class TestGoogleWorkspace:
 
     # --- instructions -------------------------------------------------------
 
-    async def test_instructions_follow_access_mode(self, gmail: str):
-        result = await Agent(TestModel(), capabilities=[GoogleWorkspace('gmail', auth='token')]).run('Read')
+    async def test_instructions_follow_read_only(self, gmail: str):
+        result = await Agent(TestModel(), capabilities=[GoogleWorkspace('gmail', read_only=True, auth='token')]).run(
+            'Read'
+        )
         text = instructions(result.all_messages())
         assert 'untrusted data' in text
         assert 'read-only' in text
 
-        writer = GoogleWorkspace('gmail', access='write', auth='token')
+        writer = GoogleWorkspace('gmail', auth='token')
         assert 'Ask for confirmation before changing data' in (writer.get_instructions() or '')
         assert GoogleWorkspace('gmail', auth='token', include_instructions=False).get_instructions() is None
