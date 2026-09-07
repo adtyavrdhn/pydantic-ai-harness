@@ -1,7 +1,7 @@
 # Linear
 
 Use `Linear` when an agent needs to read Linear issues, projects, and teams, or, with write access,
-create and update them. It connects to Linear's hosted MCP server and uses the read-only endpoint by
+create and update issues, projects, and comments. It connects to Linear's hosted MCP server and uses the read-only endpoint by
 default, so the server decides which tools the agent can see.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).

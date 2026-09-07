@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from fastmcp.client.auth import BearerAuth, OAuth
 from fastmcp.client.transports import StreamableHttpTransport
@@ -35,6 +36,11 @@ class TestLinear:
         assert isinstance(auth, BearerAuth)
         assert auth.token.get_secret_value() == 'lin_api_secret'
         assert 'lin_api_secret' not in repr(capability)
+
+    def test_custom_httpx_auth_reaches_transport(self):
+        auth = httpx.BasicAuth('user', 'secret')
+
+        assert _http_transport(Linear(auth=auth)).auth is auth
 
     def test_oauth_reaches_transport(self):
         with pytest.warns(UserWarning, match='in-memory token storage'):
