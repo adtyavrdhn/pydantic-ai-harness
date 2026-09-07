@@ -1,28 +1,32 @@
 """Fixtures for Google Workspace capability tests.
 
-Google's servers are stood in for by FastMCP servers on localhost, served over real
-HTTP so the bearer token and the wire annotations travel the same path they do in
-production. Each fake tool returns the `Authorization` header it received.
+Google's servers are stood in for by FastMCP servers running in a child process and
+served over real HTTP, so the bearer token and the wire annotations travel the same
+path they do in production. Each fake tool returns the `Authorization` header it
+received. One child process serves each distinct tool set for the whole session.
 """
 
 from __future__ import annotations
 
-import asyncio
-import gc
+import multiprocessing
 import socket
-from collections.abc import AsyncIterator, Callable
+import time
+from collections.abc import Callable, Generator, Iterator
+from contextlib import ExitStack, contextmanager
 
 import pytest
 
-pytest.importorskip('fastmcp')
+# `fastmcp-slim` imports but raises ImportError for server support, so widen the skip.
+pytest.importorskip('fastmcp.server', exc_type=ImportError)
 pytest.importorskip('mcp')
 
-import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_http_request
 from mcp.types import ToolAnnotations
 
 from pydantic_ai_harness.google_workspace import _capability
+
+ToolNames = tuple[str, ...]
 
 
 @pytest.fixture
@@ -39,72 +43,125 @@ def _tool(name: str) -> Callable[[str], dict[str, str | None]]:
     return tool
 
 
+def run_fake_server(
+    *, host: str, port: int, read_tools: ToolNames, write_tools: ToolNames, unannotated_tools: ToolNames
+) -> None:
+    """Serve one stand-in product server with Google-style annotations; runs in the child process."""
+    server = FastMCP('google-workspace-fake')
+    for name in read_tools:
+        server.tool(_tool(name), annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+    for name in write_tools:
+        server.tool(_tool(name), annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+    for name in unannotated_tools:
+        server.tool(_tool(name))
+    # Google's servers are stateless; matching that keeps the fake honest.
+    server.run(transport='http', host=host, port=port, path='/mcp', stateless_http=True, log_level='error')
+
+
+def _free_port(host: str) -> int:
+    with socket.socket() as sock:
+        sock.bind((host, 0))
+        return sock.getsockname()[1]
+
+
+@contextmanager
+def _server_process(
+    read_tools: ToolNames, write_tools: ToolNames, unannotated_tools: ToolNames
+) -> Generator[str, None, None]:
+    """Run a stand-in server in a spawned process and yield its URL once it accepts connections.
+
+    Spawn rather than fork: on Linux a forked child inherits the test's running event
+    loop and cannot start the server's own.
+    """
+    host = '127.0.0.1'
+    port = _free_port(host)
+    process = multiprocessing.get_context('spawn').Process(
+        target=run_fake_server,
+        kwargs={
+            'host': host,
+            'port': port,
+            'read_tools': read_tools,
+            'write_tools': write_tools,
+            'unannotated_tools': unannotated_tools,
+        },
+        daemon=True,
+    )
+    process.start()
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                break
+        except OSError:
+            if not process.is_alive() or time.monotonic() > deadline:
+                raise RuntimeError('the fake Google server did not start') from None
+            time.sleep(0.05)
+    try:
+        yield f'http://{host}:{port}/mcp'
+    finally:
+        process.terminate()
+        process.join(timeout=5)
+
+
+class FakeServers:
+    """Session-wide cache of child-process servers, one per distinct tool set."""
+
+    def __init__(self) -> None:
+        self._stack = ExitStack()
+        self._urls: dict[tuple[ToolNames, ToolNames, ToolNames], str] = {}
+
+    def url_for(self, read_tools: ToolNames, write_tools: ToolNames, unannotated_tools: ToolNames) -> str:
+        key = (read_tools, write_tools, unannotated_tools)
+        if key not in self._urls:
+            self._urls[key] = self._stack.enter_context(_server_process(*key))
+        return self._urls[key]
+
+    def close(self) -> None:
+        self._stack.close()
+
+
 class FakeGoogle:
-    """Serves stand-ins for Google's product servers and points the capability at them."""
+    """Points the capability's product URLs at stand-in servers for one test."""
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def __init__(self, servers: FakeServers, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._servers = servers
         self._monkeypatch = monkeypatch
-        self._servers: list[tuple[uvicorn.Server, asyncio.Task[None]]] = []
 
-    async def serve(
+    def serve(
         self,
         service: str,
         *,
-        read_tools: tuple[str, ...] = (),
-        write_tools: tuple[str, ...] = (),
-        unannotated_tools: tuple[str, ...] = (),
+        read_tools: ToolNames = (),
+        write_tools: ToolNames = (),
+        unannotated_tools: ToolNames = (),
     ) -> str:
-        """Serve one product with Google-style annotations and return its URL."""
-        server = FastMCP(f'{service}-fake')
-        for name in read_tools:
-            server.tool(_tool(name), annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-        for name in write_tools:
-            server.tool(_tool(name), annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
-        for name in unannotated_tools:
-            server.tool(_tool(name))
-
-        # Bind the port here and hand the socket to uvicorn, so no other process can grab it in between.
-        sock = socket.socket()
-        sock.bind(('127.0.0.1', 0))
-        port = sock.getsockname()[1]
-        # Google's servers are stateless; matching that also avoids leaking per-session streams.
-        app = server.http_app(path='/mcp', stateless_http=True)
-        uvicorn_server = uvicorn.Server(uvicorn.Config(app, log_level='error'))
-        task = asyncio.create_task(uvicorn_server.serve(sockets=[sock]))
-        while not uvicorn_server.started:
-            if task.done():
-                task.result()
-            await asyncio.sleep(0.01)
-        self._servers.append((uvicorn_server, task))
-
-        url = f'http://127.0.0.1:{port}/mcp'
+        """Route `service` to a stand-in with these tools and return its URL."""
+        url = self._servers.url_for(read_tools, write_tools, unannotated_tools)
         self._monkeypatch.setitem(_capability._MCP_URLS, service, url)  # pyright: ignore[reportPrivateUsage]
         return url
 
-    async def close(self) -> None:
-        for uvicorn_server, task in self._servers:
-            uvicorn_server.should_exit = True
-            await task
-        # Collect the server SDK's leaked per-request streams here, inside the test's warning filter.
-        gc.collect()
 
-
-@pytest.fixture
-async def fake_google(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[FakeGoogle]:
-    fake = FakeGoogle(monkeypatch)
+@pytest.fixture(scope='session')
+def fake_servers() -> Iterator[FakeServers]:
+    servers = FakeServers()
     try:
-        yield fake
+        yield servers
     finally:
-        await fake.close()
+        servers.close()
 
 
 @pytest.fixture
-async def gmail(fake_google: FakeGoogle) -> str:
+def fake_google(fake_servers: FakeServers, monkeypatch: pytest.MonkeyPatch) -> FakeGoogle:
+    return FakeGoogle(fake_servers, monkeypatch)
+
+
+@pytest.fixture
+def gmail(fake_google: FakeGoogle) -> str:
     """A Gmail stand-in with one read and one write tool."""
-    return await fake_google.serve('gmail', read_tools=('search_threads',), write_tools=('create_draft',))
+    return fake_google.serve('gmail', read_tools=('search_threads',), write_tools=('create_draft',))
 
 
 @pytest.fixture
-async def calendar(fake_google: FakeGoogle) -> str:
+def calendar(fake_google: FakeGoogle) -> str:
     """A Calendar stand-in with one read and one write tool."""
-    return await fake_google.serve('calendar', read_tools=('list_events',), write_tools=('create_event',))
+    return fake_google.serve('calendar', read_tools=('list_events',), write_tools=('create_event',))

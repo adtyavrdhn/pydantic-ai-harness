@@ -20,10 +20,6 @@ from pydantic_ai_harness.google_workspace import GoogleWorkspace, GoogleWorkspac
 
 from .conftest import FakeGoogle
 
-# The MCP server SDK's streamable HTTP handler leaks one memory stream per request
-# (`mcp/server/streamable_http.py`). That is the fake Google server, not the code under test.
-pytestmark = pytest.mark.filterwarnings('ignore:Unclosed <MemoryObjectReceiveStream:ResourceWarning')
-
 
 def tool_returns(messages: list[ModelMessage]) -> dict[str, dict[str, Any]]:
     """Map each executed tool to the structured content it returned."""
@@ -143,7 +139,7 @@ class TestGoogleWorkspace:
 
     @pytest.mark.parametrize(('access', 'expected'), [('read', set[str]()), ('write', {'docs_update_doc'})])
     async def test_unannotated_tool_counts_as_a_write(self, access: str, expected: set[str], fake_google: FakeGoogle):
-        await fake_google.serve('docs', unannotated_tools=('update_doc',))
+        fake_google.serve('docs', unannotated_tools=('update_doc',))
         agent = Agent(TestModel(), capabilities=[GoogleWorkspace('docs', access=access, auth='token')])  # pyright: ignore[reportArgumentType]
         result = await agent.run('Update the doc')
         assert set(tool_returns(result.all_messages())) == expected
@@ -162,7 +158,7 @@ class TestGoogleWorkspace:
     async def test_every_service_is_selectable_and_prefixed(
         self, service: GoogleWorkspaceService, fake_google: FakeGoogle
     ):
-        await fake_google.serve(service, read_tools=('get_item',))
+        fake_google.serve(service, read_tools=('get_item',))
         result = await Agent(TestModel(), capabilities=[GoogleWorkspace(service, auth='token')]).run('Read')
         assert set(tool_returns(result.all_messages())) == {f'{service}_get_item'}
 
