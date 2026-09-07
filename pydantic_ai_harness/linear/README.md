@@ -1,7 +1,8 @@
 # Linear
 
-`Linear` connects an agent to Linear's hosted MCP server. It uses Linear's
-server-enforced read-only endpoint by default.
+Use `Linear` when an agent needs to read Linear issues, projects, and teams, or, with write access,
+create and update them. It connects to Linear's hosted MCP server and uses the read-only endpoint by
+default, so the server decides which tools the agent can see.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
@@ -11,13 +12,13 @@ server-enforced read-only endpoint by default.
 uv add "pydantic-ai-harness[linear]" "pydantic-ai-slim[openai]"
 ```
 
-The second package installs the OpenAI provider used by the example. For
-another model, install its matching provider extra instead.
+The second package installs the OpenAI provider used by the example. For another model, install its
+matching provider extra instead.
 
 ## Connect
 
-Create a Linear API key under **Settings > Account > Security & Access >
-Personal API keys**, then set the Linear and model-provider credentials:
+Create a Linear API key under **Settings > Account > Security & Access > Personal API keys**, then
+set the Linear and model-provider credentials:
 
 ```bash
 export LINEAR_ACCESS_TOKEN="your-linear-api-key"
@@ -38,21 +39,32 @@ result = agent.run_sync('Summarize my assigned issues that were updated this wee
 print(result.output)
 ```
 
-Pass `auth='oauth'` instead of a token to use Linear's interactive OAuth flow.
-If an OAuth connection stalls or fails, use a bearer token to avoid the Python
-MCP SDK's OAuth code path.
+Pass `auth='oauth'` instead of a token for Linear's browser login. OAuth connections can stall on the
+first tool call ([python-sdk #3209](https://github.com/modelcontextprotocol/python-sdk/issues/3209));
+an API key avoids that.
 
-## Read and write access
+## Write access
 
-`read_only=True` uses Linear's `/mcp/readonly` endpoint. To connect to the
-read-write endpoint, opt in explicitly:
+`access='write'` connects to Linear's read-write endpoint, which adds the tools that create and
+update issues, projects, and comments. Pair it with [tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval) so a person confirms each
+change:
 
 ```python
-linear = Linear(auth=os.environ['LINEAR_ACCESS_TOKEN'], read_only=False)
+import os
+
+from pydantic_ai import Agent
+from pydantic_ai.messages import DeferredToolRequests
+from pydantic_ai_harness.linear import Linear
+
+linear = Linear(auth=os.environ['LINEAR_ACCESS_TOKEN'], access='write')
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    toolsets=[linear.get_toolset().approval_required()],
+    output_type=[str, DeferredToolRequests],
+)
 ```
 
-`Linear` only configures the connection. For custom clients, tool filtering,
-or approval policy, use Pydantic AI's generic `MCP` capability or `MCPToolset`
-directly.
+`Linear` only configures the connection. For tool filtering or a custom client, use Pydantic AI's
+`MCPToolset` directly.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/linear/)

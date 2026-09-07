@@ -1,107 +1,65 @@
-"""Behavioral tests for Linear through `Agent(capabilities=[...])`."""
+"""Tests for the connection `Linear` hands to `MCPToolset`."""
 
 from __future__ import annotations
 
-import warnings
-
 import pytest
+from fastmcp.client.auth import BearerAuth, OAuth
 from fastmcp.client.transports import StreamableHttpTransport
-from mcp.server.fastmcp.server import FastMCP, Settings
-from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.models.test import TestModel
+from pydantic_ai import UserError
+from pydantic_ai.agent.spec import AgentSpec
 
 from pydantic_ai_harness.linear import Linear
 
-# The MCP SDK leaves a settings annotation unresolved in some supported dependency
-# combinations. Rebuild it before warnings are escalated by the test suite.
-Settings.model_rebuild()
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return 'asyncio'
-
 
 def _http_transport(linear: Linear[None]) -> StreamableHttpTransport:
-    toolset = linear.get_toolset()
-    transport = toolset.client.transport
+    transport = linear.get_toolset().client.transport
     assert isinstance(transport, StreamableHttpTransport)
     return transport
 
 
 class TestLinear:
-    def test_agent_accepts_capability(self):
-        capability = Linear(auth='token')
+    def test_default_uses_read_only_endpoint(self):
+        assert _http_transport(Linear(auth='token')).url == 'https://mcp.linear.app/mcp/readonly'
 
-        agent = Agent(TestModel(), capabilities=[capability])
+    def test_write_access_uses_read_write_endpoint(self):
+        assert _http_transport(Linear(auth='token', access='write')).url == 'https://mcp.linear.app/mcp'
 
-        assert capability in agent.root_capability.capabilities
+    def test_access_rejects_unknown_value(self):
+        with pytest.raises(UserError, match='`access` must be `read` or `write`'):
+            Linear(auth='token', access='readonly')  # pyright: ignore[reportArgumentType]
 
-    @pytest.mark.anyio
-    async def test_agent_runs_with_linear_tools(self):
-        server = FastMCP('linear-fake')
+    def test_bearer_token_reaches_transport_and_stays_out_of_repr(self):
+        capability = Linear(auth='lin_api_secret')
+        auth = _http_transport(capability).auth
 
-        @server.tool()
-        def get_issue(issue_id: str) -> dict[str, str]:
-            """Get one Linear issue."""
-            return {'id': issue_id, 'title': 'Fix the build'}
+        assert isinstance(auth, BearerAuth)
+        assert auth.token.get_secret_value() == 'lin_api_secret'
+        assert 'lin_api_secret' not in repr(capability)
 
-        class FakeLinear(Linear[None]):
-            def get_toolset(self) -> MCPToolset[None]:
-                return MCPToolset(server)
+    def test_oauth_reaches_transport(self):
+        with pytest.warns(UserWarning, match='in-memory token storage'):
+            auth = _http_transport(Linear(auth='oauth')).auth
 
-        agent = Agent[None, str](
-            TestModel(call_tools=['get_issue']), deps_type=type(None), capabilities=[FakeLinear(auth='token')]
-        )
+        assert isinstance(auth, OAuth)
 
-        result = await agent.run('Read ENG-123')
+    def test_toolset_id_defaults_to_linear_and_follows_capability_id(self):
+        assert Linear(auth='token').get_toolset().id == 'linear'
+        assert Linear(auth='token', id='tenant-linear').get_toolset().id == 'tenant-linear'
 
-        assert 'Fix the build' in result.output
+    def test_spec_schema_requires_auth(self):
+        schema = AgentSpec.model_json_schema_with_capabilities([Linear])
+        params = schema['$defs']['spec_params_Linear']
 
-    def test_serialization_name(self):
-        assert Linear.get_serialization_name() == 'Linear'
+        assert set(params['properties']) == {'id', 'description', 'defer_loading', 'access', 'auth'}
+        assert params['required'] == ['auth']
 
     def test_from_spec_forwards_options(self):
         capability = Linear.from_spec(
-            id='tenant-linear',
-            description='Tenant issues',
-            defer_loading=True,
-            read_only=False,
-            auth='token',
+            id='tenant-linear', description='Tenant issues', defer_loading=True, access='write', auth='token'
         )
+
         assert capability.id == 'tenant-linear'
         assert capability.description == 'Tenant issues'
         assert capability.defer_loading is True
-        assert capability.read_only is False
+        assert capability.access == 'write'
         assert capability.auth == 'token'
-
-    def test_default_uses_read_only_endpoint(self):
-        transport = _http_transport(Linear(auth='token'))
-
-        assert transport.url == 'https://mcp.linear.app/mcp/readonly'
-
-    def test_read_write_is_explicit(self):
-        transport = _http_transport(Linear(auth='token', read_only=False))
-
-        assert transport.url == 'https://mcp.linear.app/mcp'
-
-    def test_oauth_is_forwarded(self):
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            transport = _http_transport(Linear(auth='oauth'))
-
-        assert transport.auth is not None
-
-    def test_bearer_auth_is_forwarded_and_hidden_from_repr(self):
-        capability = Linear(auth='lin_api_secret')
-        transport = _http_transport(capability)
-
-        assert transport.auth is not None
-        assert 'lin_api_secret' not in repr(capability)
-
-    def test_custom_id_is_forwarded(self):
-        toolset = Linear(auth='token', id='tenant-linear').get_toolset()
-
-        assert isinstance(toolset, MCPToolset)
-        assert toolset.id == 'tenant-linear'
