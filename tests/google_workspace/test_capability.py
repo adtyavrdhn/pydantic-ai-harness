@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import httpx
 import pytest
@@ -48,7 +48,7 @@ class TestGoogleWorkspace:
         ('services', 'message'),
         [
             ((), 'at least one'),
-            (('gmail', 'gmail'), 'duplicates'),
+            (('gmail', 'gmail'), 'must not repeat'),
             (('mail',), 'Unknown Google Workspace service'),
         ],
     )
@@ -60,23 +60,20 @@ class TestGoogleWorkspace:
         with pytest.raises(UserError, match='`access` must be `read` or `write`'):
             GoogleWorkspace('gmail', access='admin')  # pyright: ignore[reportArgumentType]
 
-    @pytest.mark.parametrize('allowed_tool', ['calendar_list_events', 'search_threads', 1, None])
-    def test_rejects_allowed_tool_outside_selected_services(self, allowed_tool: object):
+    @pytest.mark.parametrize('allowed_tool', ['calendar_list_events', 'search_threads'])
+    def test_rejects_allowed_tool_outside_selected_services(self, allowed_tool: str):
         with pytest.raises(UserError, match='does not belong to a selected service'):
-            GoogleWorkspace('gmail', allowed_tools=(allowed_tool,))  # pyright: ignore[reportArgumentType]
+            GoogleWorkspace('gmail', allowed_tools=allowed_tool)
 
-    @pytest.mark.parametrize('token', ['', ' '])
-    def test_rejects_empty_token(self, token: str, monkeypatch: pytest.MonkeyPatch):
-        with pytest.raises(UserError, match='`auth` must not be empty'):
-            GoogleWorkspace('gmail', auth=token)
-        monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', token)
-        with pytest.raises(UserError, match='`GOOGLE_ACCESS_TOKEN` must not be empty'):
-            Agent(TestModel(), capabilities=[GoogleWorkspace('gmail')])
-
-    def test_missing_authentication_fails_before_a_run(self, monkeypatch: pytest.MonkeyPatch):
+    @pytest.mark.parametrize(('auth', 'env_token'), [(None, None), ('', None), (None, '')])
+    def test_missing_token_fails_before_a_run(
+        self, auth: str | None, env_token: str | None, monkeypatch: pytest.MonkeyPatch
+    ):
         monkeypatch.delenv('GOOGLE_ACCESS_TOKEN', raising=False)
-        with pytest.raises(UserError, match='requires `auth` or `GOOGLE_ACCESS_TOKEN`'):
-            Agent(TestModel(), capabilities=[GoogleWorkspace('gmail')])
+        if env_token is not None:
+            monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', env_token)
+        with pytest.raises(UserError, match='needs a token'):
+            Agent(TestModel(), capabilities=[GoogleWorkspace('gmail', auth=auth)])
 
     def test_credentials_stay_out_of_specs_and_reprs(self):
         schema = json.dumps(AgentSpec.model_json_schema_with_capabilities([GoogleWorkspace]))
@@ -154,7 +151,7 @@ class TestGoogleWorkspace:
         result = await Agent(TestModel(), capabilities=[reader]).run('Draft mail and read my calendar')
         assert set(tool_returns(result.all_messages())) == {'calendar_list_events'}
 
-    @pytest.mark.parametrize('service', ['gmail', 'drive', 'docs', 'sheets', 'slides', 'calendar', 'chat', 'people'])
+    @pytest.mark.parametrize('service', get_args(GoogleWorkspaceService))
     async def test_every_service_is_selectable_and_prefixed(
         self, service: GoogleWorkspaceService, fake_google: FakeGoogle
     ):

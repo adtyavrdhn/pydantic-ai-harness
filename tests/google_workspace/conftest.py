@@ -34,7 +34,8 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
-def _tool(name: str) -> Callable[[str], dict[str, str | None]]:
+# `_tool` and `run_fake_server` execute only in the spawned child, which coverage does not measure.
+def _tool(name: str) -> Callable[[str], dict[str, str | None]]:  # pragma: no cover
     def tool(query: str = '') -> dict[str, str | None]:
         """A Workspace tool that reports the credentials it was called with."""
         return {'tool': name, 'authorization': get_http_request().headers.get('authorization')}
@@ -43,7 +44,7 @@ def _tool(name: str) -> Callable[[str], dict[str, str | None]]:
     return tool
 
 
-def run_fake_server(
+def run_fake_server(  # pragma: no cover
     *, host: str, port: int, read_tools: ToolNames, write_tools: ToolNames, unannotated_tools: ToolNames
 ) -> None:
     """Serve one stand-in product server with Google-style annotations; runs in the child process."""
@@ -94,7 +95,7 @@ def _server_process(
                 break
         except OSError:
             if not process.is_alive() or time.monotonic() > deadline:
-                raise RuntimeError('the fake Google server did not start') from None
+                raise RuntimeError('the fake Google server did not start') from None  # pragma: no cover
             time.sleep(0.05)
     try:
         yield f'http://{host}:{port}/mcp'
@@ -136,6 +137,7 @@ class FakeGoogle:
         unannotated_tools: ToolNames = (),
     ) -> str:
         """Route `service` to a stand-in with these tools and return its URL."""
+        assert service in _capability._MCP_URLS, f'{service!r} has no endpoint'  # pyright: ignore[reportPrivateUsage]
         url = self._servers.url_for(read_tools, write_tools, unannotated_tools)
         self._monkeypatch.setitem(_capability._MCP_URLS, service, url)  # pyright: ignore[reportPrivateUsage]
         return url
