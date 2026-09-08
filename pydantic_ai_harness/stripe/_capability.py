@@ -1,17 +1,4 @@
-"""Stripe hosted MCP capability.
-
-Wire contract, verified 2026-09-05:
-
-- `https://mcp.stripe.com` serves MCP over HTTP and accepts a restricted API key as a bearer token.
-- Restricted keys use `rk_test_` for sandboxes and `rk_live_` for live mode. Objects do not cross modes.
-- `Stripe-Account: acct_...` scopes every MCP call to one connected account; connected-account MCP does not support
-  OAuth.
-- `stripe_api_read` performs supported `GET` methods. `stripe_api_write` performs supported `POST`, `PATCH`, `PUT`,
-  and `DELETE` methods. Stripe recommends human confirmation for MCP tools.
-
-Sources: https://docs.stripe.com/mcp and https://docs.stripe.com/keys. Re-check the endpoint, authentication,
-connected-account section, tool table, and key prefixes before changing this boundary.
-"""
+"""Stripe hosted MCP capability."""
 
 from __future__ import annotations
 
