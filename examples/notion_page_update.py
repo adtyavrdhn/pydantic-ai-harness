@@ -31,7 +31,7 @@ def build_agent(
     *,
     client: MCPToolsetClient,
 ) -> Agent[None, str | DeferredToolRequests]:
-    """Build an agent whose only write tool is `notion-update-page`."""
+    """Build an agent whose Notion mutations run only after approval."""
     agent, _ = _build_agent_and_toolset(model, client=client)
     return agent
 
@@ -41,7 +41,7 @@ def _build_agent_and_toolset(
     *,
     client: MCPToolsetClient,
 ) -> tuple[Agent[None, str | DeferredToolRequests], NotionToolset[None]]:
-    notion = NotionToolset[None](client=client, mutations='notion-update-page')
+    notion = NotionToolset[None](client=client)
     notion_with_approval = notion.approval_required(
         lambda _ctx, tool_def, _args: (tool_def.metadata or {}).get('notion_mutation') is True
     )

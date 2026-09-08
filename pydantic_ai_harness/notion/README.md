@@ -1,6 +1,6 @@
 # Notion
 
-The Notion integration lets an agent search and read your workspace, then make explicitly selected changes.
+The Notion integration lets an agent search, read, and change your workspace through Notion's hosted MCP server.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/notion/)
 
@@ -24,7 +24,8 @@ No Notion environment variable is required. `Client(NOTION_MCP_URL, auth='oauth'
 opens a browser for user authorization on the first connection. Configure persistent token storage on that FastMCP
 client when your application needs authorization to survive restarts.
 
-For read-only access, add the capability directly to an agent:
+Add the capability to an agent. By default it exposes every tool Notion offers the connected user, including the
+ones that create and update pages:
 
 ```python
 from fastmcp import Client
@@ -35,6 +36,19 @@ from pydantic_ai_harness.notion import NOTION_MCP_URL
 
 client = Client(NOTION_MCP_URL, auth='oauth')
 agent = Agent('openai:gpt-5.6-sol', capabilities=[Notion(client=client)])
+```
+
+Pass `read_only=True` to keep only the search and read tools:
+
+```python
+from fastmcp import Client
+from pydantic_ai import Agent
+
+from pydantic_ai_harness import Notion
+from pydantic_ai_harness.notion import NOTION_MCP_URL
+
+client = Client(NOTION_MCP_URL, auth='oauth')
+agent = Agent('openai:gpt-5.6-sol', capabilities=[Notion(client=client, read_only=True)])
 ```
 
 ## Search and update a page
@@ -62,7 +76,7 @@ def approve(call: ToolCallPart, attribution: str) -> bool:
 
 async def main() -> None:
     client = Client(NOTION_MCP_URL, auth='oauth')
-    notion = NotionToolset[None](client=client, mutations='notion-update-page')
+    notion = NotionToolset[None](client=client)
     approved = notion.approval_required(
         lambda _ctx, tool, _args: (tool.metadata or {}).get('notion_mutation') is True
     )
@@ -96,13 +110,14 @@ uv run python examples/notion_page_update.py "Find the launch plan and replace i
 - Search Notion pages and, when Notion AI search is available, connected sources; then fetch and summarize a selected
   Notion page.
 - Read data sources, meeting notes, comments, users, teams, and Custom Agent sessions when the workspace exposes them.
-- Create or update pages, databases, views, comments, and attachments after adding each exact mutation tool name.
-- Start or continue a Custom Agent session after adding the relevant session mutation tool names.
+- Create or update pages, databases, views, comments, and attachments.
+- Start or continue a Custom Agent session.
 
 ## Operational constraints
 
-- The default `Notion` and `NotionToolset` surface is read-only. Add each write tool explicitly with `mutations`.
-- Selecting a mutation makes it callable but does not approve it. Compose `approval_required()` as shown above.
+- `Notion` and `NotionToolset` expose every tool Notion offers the connected user by default. Pass `read_only=True`
+  to keep only the search and read tools.
+- Exposing a mutation tool does not approve it. Compose `approval_required()` as shown above.
 - One toolset belongs to one authenticated workspace/user. If that identity changes, construct a new toolset.
 - Persist `notion.connection_identity` with a deferred approval and pass it as `expected_identity` when reconstructing
   the toolset. Authenticate approval endpoints and bind each server-side decision to the pending tool name, arguments,

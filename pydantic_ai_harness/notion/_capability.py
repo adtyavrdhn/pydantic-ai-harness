@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import KW_ONLY, dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -10,16 +9,16 @@ from pydantic_ai.tools import AgentDepsT
 
 from pydantic_ai_harness.notion._toolset import MCPToolsetClient, NotionToolset
 
-_DESCRIPTION = "Search and read the authenticated user's Notion workspace, with explicitly selected write tools."
+_DESCRIPTION = "Search, read, and change the authenticated user's Notion workspace."
 
 
 @dataclass
 class Notion(AbstractCapability[AgentDepsT]):
-    """Search and read Notion through its official hosted MCP server.
+    """Search, read, and change Notion through its official hosted MCP server.
 
-    The default toolset exposes a conservative discovery/read surface. Add mutation
-    tool names explicitly with `mutations`. Authentication and MCP session state stay
-    in Pydantic AI/FastMCP, including when a caller supplies a prebuilt client.
+    Every tool Notion offers the connected user is exposed by default; `read_only=True`
+    narrows the toolset to search and read tools. Authentication and MCP session state
+    stay in Pydantic AI/FastMCP, including when a caller supplies a prebuilt client.
     """
 
     _: KW_ONLY
@@ -27,8 +26,9 @@ class Notion(AbstractCapability[AgentDepsT]):
     client: MCPToolsetClient = field(repr=False)
     """Caller-owned OAuth client or in-process server for Notion's hosted MCP contract."""
 
-    mutations: str | Sequence[str] = ()
-    """Exact Notion MCP mutation tool names to expose, such as `notion-update-page`."""
+    read_only: bool = False
+    """Expose only Notion's search and read tools, dropping the ones that create, update, or move pages,
+    databases, views, comments, attachments, and Custom Agent sessions."""
 
     include_instructions: bool = True
     """Inject Notion identity, search-routing, and mutation guidance."""
@@ -48,14 +48,11 @@ class Notion(AbstractCapability[AgentDepsT]):
     description: str | None = _DESCRIPTION
     """Routing description used when the capability is loaded on demand."""
 
-    def __post_init__(self) -> None:
-        self.mutations = NotionToolset.normalize_mutations(self.mutations)
-
     def get_toolset(self) -> NotionToolset[AgentDepsT]:
         """Build the Notion MCP toolset."""
         return NotionToolset[AgentDepsT](
             client=self.client,
-            mutations=self.mutations,
+            read_only=self.read_only,
             include_instructions=self.include_instructions,
             expected_identity=self.expected_identity,
             id=self.id,

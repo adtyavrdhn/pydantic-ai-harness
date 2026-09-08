@@ -275,7 +275,7 @@ COMBINE_POLICY: dict[str, Policy] = {
         lambda cls: (cls(), cls()),
     ),
     'Notion': Collides(
-        'one per authenticated user; merging mutation selections would widen access',
+        'one per authenticated user; merging two instances would mix connection identities',
     ),
     'PyaiDocs': Collides('deprecated alias of `PydanticAIDocs`, and collides the same way'),
     'Macroscope': Collides(
