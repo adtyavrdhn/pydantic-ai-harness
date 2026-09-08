@@ -43,9 +43,6 @@ except ImportError as _import_error:  # pragma: no cover
         'MCP support is required for the AWS capability. Install `pydantic-ai-harness[aws]`.'
     ) from _import_error
 
-AWSAccess = Literal['read_only', 'approval_required', 'unrestricted']
-"""Which managed AWS MCP tools the agent may execute."""
-
 _ENDPOINTS = {
     'us-east-1': 'https://aws-mcp.us-east-1.api.aws/mcp',
     'eu-central-1': 'https://aws-mcp.eu-central-1.api.aws/mcp',
@@ -62,7 +59,7 @@ _INSTRUCTIONS = (
     'accounts or target Regions. '
     'Prefer AWS documentation '
     'and read operations before proposing changes. After a failed change with an unknown outcome, inspect current state '
-    'before retrying. This is real AWS, not the LocalStack emulator. Access mode is `{access}` and authentication mode '
+    'before retrying. This is real AWS, not the LocalStack emulator. {tool_policy} Authentication mode '
     'is `{authentication}`.'
 )
 
@@ -71,12 +68,11 @@ def _validate_configuration(
     account_id: object,
     region: object,
     endpoint_region: str,
-    access: str,
     authentication: str,
     managed_transport: ClientTransport | None,
     max_output_bytes: int,
     max_output_lines: int,
-) -> tuple[AWSAccess, Literal['unauthenticated', 'oauth', 'sigv4']]:
+) -> Literal['unauthenticated', 'oauth', 'sigv4']:
     if not isinstance(account_id, str) or _ACCOUNT_ID_PATTERN.fullmatch(account_id) is None:
         raise UserError('`account_id` must be a 12-digit AWS account ID.')
     if not isinstance(region, str) or _REGION_PATTERN.fullmatch(region) is None:
@@ -84,8 +80,6 @@ def _validate_configuration(
     if endpoint_region not in _ENDPOINTS:
         supported = ', '.join(f'`{value}`' for value in _ENDPOINTS)
         raise UserError(f'`endpoint_region` must be one of {supported}.')
-    if access not in ('read_only', 'approval_required', 'unrestricted'):
-        raise UserError('`access` must be `read_only`, `approval_required`, or `unrestricted`.')
     if authentication not in ('unauthenticated', 'oauth', 'sigv4'):
         raise UserError('`authentication` must be `unauthenticated`, `oauth`, or `sigv4`.')
     if authentication == 'unauthenticated' and managed_transport is not None:
@@ -99,7 +93,7 @@ def _validate_configuration(
             raise UserError(f'`{name}` must be a positive integer.')
     if max_output_bytes < len(_OUTPUT_TRUNCATED.encode()):
         raise UserError(f'`max_output_bytes` must be at least {len(_OUTPUT_TRUNCATED.encode())}.')
-    return access, authentication
+    return authentication
 
 
 def _is_explicitly_read_only(tool_def: ToolDefinition) -> bool:
@@ -224,10 +218,11 @@ class AWS(AbstractCapability[AgentDepsT]):
     Direct connections use unauthenticated public knowledge tools. Pass a
     trusted caller-owned MCP transport for AWS Sign-In OAuth or AWS's SigV4 MCP
     proxy so the transport retains its identity lifecycle.
-    The default exposes only tools whose MCP annotation explicitly marks them
-    read-only. `approval_required` uses Pydantic AI's tool approval wrapper for
-    every new non-read tool call, including a model-initiated retry, and `unrestricted`
-    requires an explicit opt-in.
+    By default every managed tool is exposed and each non-read tool call,
+    including a model-initiated retry, waits for approval through Pydantic AI's
+    deferred approval flow. Set `read_only=True` to expose only the tools AWS
+    marks read-only, or `require_approval=False` to run non-read tools without
+    an approval step; IAM still applies.
     """
 
     account_id: str
@@ -241,8 +236,11 @@ class AWS(AbstractCapability[AgentDepsT]):
     endpoint_region: Literal['us-east-1', 'eu-central-1'] = 'us-east-1'
     """Managed endpoint for direct unauthenticated connections."""
 
-    access: AWSAccess = 'read_only'
-    """Expose read-only tools, approval-gate other tools, or expose all tools."""
+    read_only: bool = False
+    """Expose only the tools AWS marks read-only, dropping the ones that create, change, or delete resources."""
+
+    require_approval: bool = True
+    """Wait for approval before each non-read tool call runs. Has no effect when `read_only` is True."""
 
     authentication: Literal['unauthenticated', 'oauth', 'sigv4'] = 'unauthenticated'
     """Use public knowledge tools, or identify the caller-owned OAuth or SigV4 transport."""
@@ -269,11 +267,10 @@ class AWS(AbstractCapability[AgentDepsT]):
     """
 
     def __post_init__(self) -> None:
-        self.access, self.authentication = _validate_configuration(
+        self.authentication = _validate_configuration(
             self.account_id,
             self.region,
             self.endpoint_region,
-            self.access,
             self.authentication,
             self.managed_transport,
             self.max_output_bytes,
@@ -285,10 +282,10 @@ class AWS(AbstractCapability[AgentDepsT]):
         return self.id if self.id is not None else f'aws-{self.account_id}-{self.region}-{self.endpoint_region}'
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
-        """Build the managed AWS MCP toolset and apply the selected access policy."""
+        """Build the managed AWS MCP toolset and apply the read-only filter or the approval gate."""
         toolset = _AWSToolset[AgentDepsT](
             endpoint_region=self.endpoint_region,
-            read_only=self.access == 'read_only',
+            read_only=self.read_only,
             client=self.managed_transport,
             id=self._derived_id(),
             account_id=self.account_id,
@@ -296,12 +293,12 @@ class AWS(AbstractCapability[AgentDepsT]):
             max_output_bytes=self.max_output_bytes,
             max_output_lines=self.max_output_lines,
         )
-        if self.access == 'approval_required':
-            return toolset.approval_required(_requires_approval)
-        return toolset
+        if self.read_only or not self.require_approval:
+            return toolset
+        return toolset.approval_required(_requires_approval)
 
     def get_instructions(self) -> str | None:
-        """Return the declared account, Region, identity, and access scope."""
+        """Return the declared account, Region, identity, and tool policy."""
         identity_authority = (
             'There is no authenticated IAM identity; use only public knowledge tools.'
             if self.authentication == 'unauthenticated'
@@ -311,7 +308,13 @@ class AWS(AbstractCapability[AgentDepsT]):
             account_id=self.account_id,
             region=self.region,
             identity_authority=identity_authority,
-            access=self.access,
+            tool_policy=(
+                'Only tools AWS marks read-only are available.'
+                if self.read_only
+                else 'Each non-read tool call waits for approval before it runs.'
+                if self.require_approval
+                else 'Non-read tool calls run without an approval step.'
+            ),
             authentication=self.authentication,
         )
 
@@ -322,7 +325,8 @@ class AWS(AbstractCapability[AgentDepsT]):
         region: str,
         *,
         endpoint_region: Literal['us-east-1', 'eu-central-1'] = 'us-east-1',
-        access: AWSAccess = 'read_only',
+        read_only: bool = False,
+        require_approval: bool = True,
         max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
         max_output_lines: int = _DEFAULT_MAX_OUTPUT_LINES,
         id: str | None = None,
@@ -334,7 +338,8 @@ class AWS(AbstractCapability[AgentDepsT]):
             account_id=account_id,
             region=region,
             endpoint_region=endpoint_region,
-            access=access,
+            read_only=read_only,
+            require_approval=require_approval,
             authentication='unauthenticated',
             max_output_bytes=max_output_bytes,
             max_output_lines=max_output_lines,

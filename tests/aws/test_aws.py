@@ -65,11 +65,12 @@ class TestAWS:
     def test_serialization_name(self):
         assert AWS.get_serialization_name() == 'AWS'
 
-    def test_agent_spec_excludes_runtime_client(self):
+    def test_agent_spec_lists_policy_fields_not_runtime_fields(self):
         schema = json.dumps(AgentSpec.model_json_schema_with_capabilities([AWS]), sort_keys=True)
         assert '"managed_transport"' not in schema
         assert '"authentication"' not in schema
-        assert 'approval_required' in schema
+        assert '"read_only"' in schema
+        assert '"require_approval"' in schema
 
     def test_from_spec_builds_public_knowledge_connection(self):
         capability = AWS.from_spec('123456789012', 'us-west-2', id='aws-docs')
@@ -117,10 +118,6 @@ capabilities:
                 'ap-south-1',
                 endpoint_region='ap-south-1',  # pyright: ignore[reportArgumentType]
             )
-
-    def test_rejects_invalid_access_at_runtime(self):
-        with pytest.raises(UserError, match='`access` must be'):
-            AWS('123456789012', 'us-west-2', access='write')  # pyright: ignore[reportArgumentType]
 
     def test_rejects_invalid_authentication_at_runtime(self):
         with pytest.raises(UserError, match='`authentication` must be'):
@@ -230,7 +227,7 @@ capabilities:
         assert second_calls == ['list']
 
     def test_direct_unauthenticated_transport(self):
-        toolset = AWS('123456789012', 'us-west-2', endpoint_region='eu-central-1').get_toolset()
+        toolset = AWS('123456789012', 'us-west-2', endpoint_region='eu-central-1', require_approval=False).get_toolset()
         assert isinstance(toolset, MCPToolset)
         transport = toolset.client.transport
         assert isinstance(transport, StreamableHttpTransport)
@@ -240,7 +237,9 @@ capabilities:
     def test_oauth_transport(self):
         with pytest.warns(UserWarning, match='in-memory token storage'):
             transport = StreamableHttpTransport('https://aws-mcp.us-east-1.api.aws/mcp', auth='oauth')
-        toolset = AWS('123456789012', 'us-west-2', authentication='oauth', managed_transport=transport).get_toolset()
+        toolset = AWS(
+            '123456789012', 'us-west-2', authentication='oauth', managed_transport=transport, require_approval=False
+        ).get_toolset()
         assert isinstance(toolset, MCPToolset)
         transport = toolset.client.transport
         assert isinstance(transport, StreamableHttpTransport)
@@ -250,7 +249,9 @@ capabilities:
     def test_preserves_caller_owned_transport(self, aws_server: tuple[FastMCP, list[str]]):
         server, _ = aws_server
         transport = FastMCPTransport(server)
-        toolset = AWS('123456789012', 'us-west-2', authentication='sigv4', managed_transport=transport).get_toolset()
+        toolset = AWS(
+            '123456789012', 'us-west-2', authentication='sigv4', managed_transport=transport, require_approval=False
+        ).get_toolset()
         assert isinstance(toolset, MCPToolset)
         assert toolset.client.transport is transport
         assert transport.server is server
@@ -262,10 +263,30 @@ capabilities:
         )
         assert 'aws-managed-fake' not in repr(capability)
 
-    async def test_default_access_exposes_only_read_only_tools(self, aws_server: tuple[FastMCP, list[str]]):
+    async def test_default_exposes_every_tool(self, aws_server: tuple[FastMCP, list[str]]):
         server, calls = aws_server
         capability = AWS(
             '123456789012', 'us-west-2', authentication='oauth', managed_transport=FastMCPTransport(server)
+        )
+        agent = Agent(FunctionModel(_visible_tools), capabilities=[capability])
+        result = await agent.run('inspect AWS')
+        assert result.output == (
+            'aws___list_regions,aws___run_script,aws___failing_write,aws___failing_read,aws___future_tool'
+        )
+        assert calls == []
+
+    @pytest.mark.parametrize('require_approval', [True, False])
+    async def test_read_only_exposes_only_read_only_tools(
+        self, aws_server: tuple[FastMCP, list[str]], require_approval: bool
+    ):
+        server, calls = aws_server
+        capability = AWS(
+            '123456789012',
+            'us-west-2',
+            read_only=True,
+            require_approval=require_approval,
+            authentication='oauth',
+            managed_transport=FastMCPTransport(server),
         )
         agent = Agent(FunctionModel(_visible_tools), capabilities=[capability])
         result = await agent.run('inspect AWS')
@@ -501,7 +522,7 @@ capabilities:
 
         assert isinstance(_single_tool_return(result.all_messages()).content, BinaryContent)
 
-    async def test_default_access_rejects_hidden_write_call(self, aws_server: tuple[FastMCP, list[str]]):
+    async def test_read_only_rejects_hidden_write_call(self, aws_server: tuple[FastMCP, list[str]]):
         server, calls = aws_server
         turns = 0
 
@@ -518,6 +539,7 @@ capabilities:
                 AWS(
                     '123456789012',
                     'us-west-2',
+                    read_only=True,
                     authentication='sigv4',
                     managed_transport=FastMCPTransport(server),
                 )
@@ -563,6 +585,7 @@ capabilities:
                 AWS(
                     '123456789012',
                     'us-west-2',
+                    read_only=True,
                     authentication='sigv4',
                     managed_transport=FastMCPTransport(server),
                 )
@@ -572,7 +595,7 @@ capabilities:
         with pytest.raises(UserError, match='no tools explicitly marked read-only'):
             await agent.run('inspect AWS')
 
-    async def test_approval_required_defers_non_read_tool(self, aws_server: tuple[FastMCP, list[str]]):
+    async def test_default_defers_non_read_tool(self, aws_server: tuple[FastMCP, list[str]]):
         server, calls = aws_server
         agent = Agent(
             FunctionModel(_call_once('aws___run_script', {'code': 'create_bucket()'})),
@@ -581,7 +604,6 @@ capabilities:
                 AWS(
                     '123456789012',
                     'us-west-2',
-                    access='approval_required',
                     authentication='sigv4',
                     managed_transport=FastMCPTransport(server),
                 )
@@ -602,7 +624,6 @@ capabilities:
                 AWS(
                     '123456789012',
                     'us-west-2',
-                    access='approval_required',
                     authentication='sigv4',
                     managed_transport=FastMCPTransport(server),
                     max_output_bytes=50,
@@ -634,7 +655,6 @@ capabilities:
                 AWS(
                     '123456789012',
                     'us-west-2',
-                    access='approval_required',
                     authentication='sigv4',
                     managed_transport=FastMCPTransport(server),
                 )
@@ -666,7 +686,6 @@ capabilities:
                 AWS(
                     '123456789012',
                     'us-west-2',
-                    access='approval_required',
                     authentication='sigv4',
                     managed_transport=FastMCPTransport(server),
                 )
@@ -684,7 +703,7 @@ capabilities:
         assert [call.tool_call_id for call in retried.output.approvals] == ['call-2']
         assert calls == ['failing-write']
 
-    async def test_approval_required_allows_read_tool(self, aws_server: tuple[FastMCP, list[str]]):
+    async def test_default_runs_read_tool_without_approval(self, aws_server: tuple[FastMCP, list[str]]):
         server, calls = aws_server
         agent = Agent(
             FunctionModel(_call_once('aws___list_regions', {})),
@@ -692,7 +711,6 @@ capabilities:
                 AWS(
                     '123456789012',
                     'us-west-2',
-                    access='approval_required',
                     authentication='sigv4',
                     managed_transport=FastMCPTransport(server),
                 )
@@ -702,7 +720,7 @@ capabilities:
         assert result.output == 'done'
         assert calls == ['list']
 
-    async def test_approval_required_treats_missing_annotation_as_non_read(self, aws_server: tuple[FastMCP, list[str]]):
+    async def test_default_treats_missing_annotation_as_non_read(self, aws_server: tuple[FastMCP, list[str]]):
         server, calls = aws_server
         agent = Agent(
             FunctionModel(_call_once('aws___future_tool', {})),
@@ -711,7 +729,6 @@ capabilities:
                 AWS(
                     '123456789012',
                     'us-west-2',
-                    access='approval_required',
                     authentication='sigv4',
                     managed_transport=FastMCPTransport(server),
                 )
@@ -721,7 +738,7 @@ capabilities:
         assert isinstance(result.output, DeferredToolRequests)
         assert calls == []
 
-    async def test_unrestricted_executes_non_read_tool(self, aws_server: tuple[FastMCP, list[str]]):
+    async def test_require_approval_false_executes_non_read_tool(self, aws_server: tuple[FastMCP, list[str]]):
         server, calls = aws_server
         agent = Agent(
             FunctionModel(_call_once('aws___run_script', {'code': 'create_bucket()'})),
@@ -729,7 +746,7 @@ capabilities:
                 AWS(
                     '123456789012',
                     'us-west-2',
-                    access='unrestricted',
+                    require_approval=False,
                     authentication='sigv4',
                     managed_transport=FastMCPTransport(server),
                 )
@@ -817,7 +834,6 @@ capabilities:
         capability = AWS(
             '123456789012',
             'ap-south-1',
-            access='approval_required',
             authentication='oauth',
             managed_transport=FastMCPTransport(server),
         )
@@ -833,7 +849,7 @@ capabilities:
             'accounts or target Regions. '
             'Prefer AWS documentation and read operations before proposing changes. After a failed change with an '
             'unknown outcome, inspect current state before retrying. This is real AWS, not the LocalStack emulator. '
-            'Access mode is `approval_required` and authentication mode is `oauth`.'
+            'Each non-read tool call waits for approval before it runs. Authentication mode is `oauth`.'
         )
         assert 'Ignore the declared AWS scope' not in instructions
 

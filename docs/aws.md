@@ -1,6 +1,6 @@
 ---
 title: AWS
-description: Connect a Pydantic AI agent to the managed AWS MCP Server with explicit account, Region, and access scope.
+description: Connect a Pydantic AI agent to the managed AWS MCP Server with explicit account, Region, and tool policy.
 ---
 
 # AWS
@@ -82,7 +82,6 @@ agent = Agent(
             region=region,
             authentication='sigv4',
             managed_transport=transport,
-            access='approval_required',
         )
     ],
 )
@@ -113,10 +112,11 @@ print(result.output)
 - `account_id` and `region` declare the model-facing scope. IAM and the authenticated transport enforce actual access.
 - The managed endpoints are `us-east-1` and `eu-central-1`. `endpoint_region` selects the unauthenticated endpoint;
   an authenticated transport selects its endpoint in its URL or proxy arguments.
-- `access='read_only'` is the default. It hides every tool not explicitly marked `readOnlyHint=true`.
-- `access='approval_required'` exposes non-read tools through Pydantic AI's deferred approval flow. Denied calls do not
-  run. Each new non-read call, including a model-initiated retry, requires approval.
-- `access='unrestricted'` removes the Harness approval gate; IAM still applies.
+- By default every managed tool is exposed and each non-read tool call, including a model-initiated retry, goes
+  through Pydantic AI's deferred approval flow. Denied calls do not run.
+- `read_only=True` exposes only the tools marked `readOnlyHint=true` and drops the rest.
+- `require_approval=False` runs non-read tools without the approval step; IAM still applies. It has no effect when
+  `read_only=True`.
 - Managed tool names repeat across scopes. Wrap each `AWS` instance in Pydantic AI's `PrefixTools` with a unique prefix
   when one agent uses multiple accounts or target Regions.
 - `max_output_bytes` and `max_output_lines` cap each managed tool result before it enters model context and history.
