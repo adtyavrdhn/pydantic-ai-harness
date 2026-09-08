@@ -44,6 +44,6 @@ refreshed. A spec file cannot carry the token, so an agent defined in YAML or JS
   the message history like any other tool result. Use short expiries and redact it from logs.
 
 To confirm every tool call before it runs, pass `AWS().get_toolset().approval_required()` to the agent's
-`toolsets=` and handle the requests the way [StackOne's approval recipe](../stackone/README.md#require-approval) shows.
+`toolsets=` and handle the requests as [tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval) describes.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/aws/)
