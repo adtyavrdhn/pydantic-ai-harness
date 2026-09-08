@@ -59,8 +59,7 @@ class TestSupabase:
         transport = leaf.client.transport
         assert isinstance(transport, StreamableHttpTransport)
         assert transport.url == (
-            'https://mcp.supabase.com/mcp?project_ref=abcdefghijklmnopqrst'
-            '&features=database%2Cdebugging%2Cdevelopment%2Cdocs&read_only=true'
+            'https://mcp.supabase.com/mcp?project_ref=abcdefghijklmnopqrst&features=database%2Cdebugging%2Cdevelopment%2Cdocs'
         )
         assert isinstance(transport.auth, OAuth)
         assert capability.id == 'supabase-abcdefghijklmnopqrst'
@@ -80,18 +79,22 @@ class TestSupabase:
         with pytest.raises(UserError, match='access_token'):
             Supabase(project_ref='abcdefghijklmnopqrst', access_token=access_token)
 
-    def test_writable_url_uses_the_server_default(self):
-        capability = Supabase(project_ref='abcdefghijklmnopqrst', access_token='token', read_only=False)
+    def test_read_only_url_sets_the_query_parameter(self):
+        capability = Supabase(project_ref='abcdefghijklmnopqrst', access_token='token', read_only=True)
         transport = _mcp_toolset(capability.get_toolset()).client.transport
         assert isinstance(transport, StreamableHttpTransport)
-        assert 'read_only' not in transport.url
+        assert parse_qs(urlsplit(transport.url).query)['read_only'] == ['true']
 
     def test_agent_spec_schema_excludes_runtime_client(self):
         schema = AgentSpec.model_json_schema_with_capabilities([Supabase])
         properties = schema['$defs']['spec_params_Supabase']['properties']
         assert 'client' not in properties
         assert 'access_token' not in properties
+        assert 'read_only' in properties
         assert Supabase.get_serialization_name() == 'Supabase'
+
+    def test_from_spec_defaults_to_write_access(self):
+        assert Supabase.from_spec('abcdefghijklmnopqrst').read_only is False
 
     def test_from_spec_preserves_safe_runtime_boundary(self):
         capability = Supabase.from_spec(
@@ -99,7 +102,7 @@ class TestSupabase:
             id='database',
             description='Development database',
             defer_loading=True,
-            read_only=False,
+            read_only=True,
             features=('docs',),
         )
 
@@ -107,7 +110,7 @@ class TestSupabase:
         assert capability.id == 'database'
         assert capability.description == 'Development database'
         assert capability.defer_loading is True
-        assert capability.read_only is False
+        assert capability.read_only is True
         assert capability.features == ('docs',)
         assert capability.access_token is None
 
@@ -131,7 +134,7 @@ class TestSupabase:
 
     async def test_read_only_agent_tools(self, supabase_server: FastMCP):
         model = TestModel()
-        agent = Agent(model, capabilities=[Supabase(project_ref='dev-project')])
+        agent = Agent(model, capabilities=[Supabase(project_ref='dev-project', read_only=True)])
 
         result = await agent.run('Inspect the project')
 
@@ -172,13 +175,14 @@ class TestSupabase:
         parameters = parse_qs(urlsplit(connections[-1][0]).query)
         assert parameters['features'] == ['docs']
 
-    async def test_optional_feature_groups_remain_read_only(self, supabase_server: FastMCP):
+    async def test_read_only_drops_optional_group_mutations(self, supabase_server: FastMCP):
         model = TestModel()
         agent = Agent(
             model,
             capabilities=[
                 Supabase(
                     project_ref='dev-project',
+                    read_only=True,
                     features=('functions', 'storage', 'branching'),
                 )
             ],
@@ -194,11 +198,11 @@ class TestSupabase:
             'list_storage_buckets',
         }
 
-    async def test_writable_branching_excludes_creation_without_cost_confirmation(self, supabase_server: FastMCP):
+    async def test_branching_excludes_creation_without_cost_confirmation(self, supabase_server: FastMCP):
         model = TestModel(call_tools=[])
         agent = Agent(
             model,
-            capabilities=[Supabase(project_ref='dev-project', read_only=False, features=('branching',))],
+            capabilities=[Supabase(project_ref='dev-project', features=('branching',))],
         )
 
         await agent.run('Inspect branches')
@@ -218,7 +222,6 @@ class TestSupabase:
             capabilities=[
                 Supabase(
                     project_ref='dev-project',
-                    read_only=False,
                     features=('database', 'debugging', 'development', 'docs', 'functions', 'storage', 'branching'),
                 )
             ],
@@ -250,6 +253,7 @@ class TestSupabase:
         result = await agent.run('Inspect both projects')
 
         assert _tool_names(model) == {
+            'apply_migration',
             'execute_sql',
             'list_extensions',
             'list_migrations',
@@ -268,7 +272,7 @@ class TestSupabase:
 
         agent = Agent(
             FunctionModel(call_sql),
-            capabilities=[Supabase(project_ref='dev-project', read_only=False)],
+            capabilities=[Supabase(project_ref='dev-project')],
             output_type=[str, DeferredToolRequests],
         )
         result = await agent.run('Delete the todos')
@@ -305,7 +309,6 @@ class TestSupabase:
             capabilities=[
                 Supabase(
                     project_ref='dev-project',
-                    read_only=False,
                     features=('database', 'functions', 'storage', 'branching'),
                 )
             ],
@@ -331,7 +334,7 @@ class TestSupabase:
         model = TestModel(call_tools=['execute_sql'])
         agent = Agent(
             model,
-            capabilities=[Supabase(project_ref='dev-project', read_only=False)],
+            capabilities=[Supabase(project_ref='dev-project')],
             output_type=[str, DeferredToolRequests],
         )
 
@@ -346,11 +349,25 @@ class TestSupabase:
 
         assert calls == []
 
-    async def test_writable_instructions_reach_the_model(self, supabase_server: FastMCP):
-        agent = Agent(TestModel(call_tools=[]), capabilities=[Supabase(project_ref='dev-project', read_only=False)])
+    async def test_default_agent_tools_permit_writes(self, supabase_server: FastMCP):
+        model = TestModel(call_tools=[])
+        agent = Agent(model, capabilities=[Supabase(project_ref='dev-project')])
 
         result = await agent.run('Inspect the project')
 
+        assert _tool_names(model) == {
+            'apply_migration',
+            'execute_sql',
+            'generate_typescript_types',
+            'get_advisors',
+            'get_project_url',
+            'get_publishable_keys',
+            'list_extensions',
+            'list_migrations',
+            'list_tables',
+            'query_logs',
+            'search_docs',
+        }
         instructions = _instructions(result.all_messages())
         assert 'permits writes' in instructions
         assert 'require approval' in instructions
@@ -369,7 +386,7 @@ class TestSupabase:
     async def test_write_approval_composes_with_stricter_caller_policy(
         self, supabase_server: FastMCP, calls: list[str]
     ):
-        capability = Supabase(project_ref='dev-project', read_only=False)
+        capability = Supabase(project_ref='dev-project')
         toolset = capability.get_toolset().approval_required(lambda _ctx, tool, _args: tool.name == 'list_tables')
         model = TestModel(call_tools=['list_tables'])
         agent = Agent(model, toolsets=[toolset], output_type=[str, DeferredToolRequests])

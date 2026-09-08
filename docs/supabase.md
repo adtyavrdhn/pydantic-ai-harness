@@ -1,11 +1,13 @@
 ---
 title: Supabase
-description: Inspect one non-production Supabase project through its official hosted MCP server.
+description: Inspect and change one non-production Supabase project through its official hosted MCP server.
 ---
 
 # Supabase
 
-`Supabase` lets an agent inspect one Supabase development or test project through Supabase's hosted MCP server.
+`Supabase` lets an agent inspect and change one Supabase development or test project through Supabase's hosted
+MCP server. Write tools are exposed by default and each write pauses the run for approval; `read_only=True` drops
+them and runs SQL as a read-only Postgres user.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
@@ -19,7 +21,7 @@ uv add "pydantic-ai-harness[supabase]" "pydantic-ai-slim[openai]"
 
 Create or choose a non-production project, then copy its project reference from the Supabase Dashboard project
 settings. Create a scoped personal access token in Supabase Account Settings > Access Tokens. Limit it to this project
-and the read permissions the selected feature groups need. Then set:
+and the permissions the selected feature groups need. Then set:
 
 ```bash
 export SUPABASE_PROJECT_REF="your-project-ref"
@@ -40,7 +42,7 @@ open a browser for sign-in and consent; headless environments will still need a 
 ```python
 import os
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai_harness.supabase import Supabase
 
 agent = Agent(
@@ -51,15 +53,21 @@ agent = Agent(
             access_token=os.environ['SUPABASE_ACCESS_TOKEN'],
         )
     ],
+    output_type=[str, DeferredToolRequests],
 )
 result = agent.run_sync('List the public tables and report any security advisor findings')
 print(result.output)
 ```
 
+Every tool that changes the project, including `execute_sql`, pauses the run for approval, which is why
+`DeferredToolRequests` is among the output types. See
+[tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval) for approving or denying
+each request and resuming the run.
+
 You can ask the agent to:
 
 - list tables, extensions, and migrations;
-- run read-only SQL queries;
+- run SQL and apply migrations, approving each write;
 - inspect security and performance advisors or query project logs;
 - get the project URL and publishable keys;
 - generate TypeScript database types; or
@@ -73,14 +81,13 @@ You can ask the agent to:
 - One capability session is one authenticated identity. Create a separate capability and agent session for each user.
 - Multiple projects can share an agent only when their selected feature groups expose disjoint tool names. Overlapping
   groups, including two default configurations, fail before the model runs.
-- The defaults are `read_only=True` and the `database`, `debugging`, `development`, and `docs` feature groups.
+- The default feature groups are `database`, `debugging`, `development`, and `docs`.
 - You can explicitly select any non-empty combination of those groups plus `functions`, `storage`, and `branching`.
   The Storage MCP group is disabled by default. Storage configuration updates and Branching require a paid plan;
   Branching is experimental. Branch creation is not exposed because the project-scoped server cannot complete its
   required cost confirmation without account access or an interactive form handler.
-- `read_only=False` enables mutation tools, but every SQL, schema, data, Edge Function, Storage, or Branching mutation
-  still requires Pydantic AI tool approval. Include `DeferredToolRequests` in the agent output types and approve or
-  deny each request before resuming the run.
+- Every SQL, schema, data, Edge Function, Storage, or Branching mutation requires Pydantic AI tool approval. Include
+  `DeferredToolRequests` in the agent output types and approve or deny each request before resuming the run.
 - Treat rows and logs as untrusted content. Review each tool call and keep credential permissions narrow.
 - SQL, log, and advisor results can be large. Add
   [`ToolOutputLimits`](tool-output-limits.md) to the agent capabilities when result size can exceed the model context.

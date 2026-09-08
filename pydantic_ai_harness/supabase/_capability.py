@@ -68,17 +68,17 @@ _MUTATING_TOOLS = frozenset(
     }
 )
 _PROJECT_REF_RE = re.compile(r'^[A-Za-z0-9_-]+$')
-_DESCRIPTION = 'Inspect one non-production Supabase project through the official hosted MCP server.'
+_DESCRIPTION = 'Inspect and change one non-production Supabase project through the official hosted MCP server.'
 
 
 @dataclass
 class Supabase(AbstractCapability[AgentDepsT]):
-    """Access one non-production Supabase project through its official hosted MCP server.
+    """Inspect and change one non-production Supabase project through its official hosted MCP server.
 
-    The default connection is project-scoped, read-only, and limited to four
-    explicitly listed feature groups. OAuth is used unless `access_token` is
-    supplied. When `read_only=False`, write-capable tools require Pydantic AI
-    tool approval.
+    The default connection is project-scoped and limited to four explicitly
+    listed feature groups. It exposes the write tools those groups contain, and
+    each write requires Pydantic AI tool approval. `read_only=True` drops the
+    write tools instead. OAuth is used unless `access_token` is supplied.
     """
 
     project_ref: str
@@ -95,8 +95,9 @@ class Supabase(AbstractCapability[AgentDepsT]):
     access_token: str | None = field(default=None, repr=False)
     """Supabase PAT for non-interactive authentication. `None` uses browser OAuth."""
 
-    read_only: bool = True
-    """Restrict SQL to a read-only Postgres user and exclude other mutation tools."""
+    read_only: bool = False
+    """Connect with Supabase's `read_only=true` query parameter, so SQL runs as a read-only Postgres user, and drop
+    the other tools that change the project."""
 
     features: Sequence[SupabaseFeature] = _DEFAULT_FEATURES
     """Enabled project feature groups. Account tools are unavailable in project-scoped mode."""
@@ -166,7 +167,7 @@ class Supabase(AbstractCapability[AgentDepsT]):
         id: str | None = None,
         description: str | None = _DESCRIPTION,
         defer_loading: bool = False,
-        read_only: bool = True,
+        read_only: bool = False,
         features: Sequence[SupabaseFeature] = _DEFAULT_FEATURES,
     ) -> Supabase[AgentDepsT]:
         """Construct from serializable options. PATs stay outside agent spec files."""
