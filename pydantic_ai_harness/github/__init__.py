@@ -1,5 +1,5 @@
-"""Read and change GitHub through its official remote MCP server; `read_only=True` narrows it to read tools."""
+"""GitHub MCP integration."""
 
-from pydantic_ai_harness.github._capability import GitHub
+from pydantic_ai_harness.github._capability import GITHUB_MCP_URL, GitHub
 
-__all__ = ['GitHub']
+__all__ = ['GITHUB_MCP_URL', 'GitHub']
