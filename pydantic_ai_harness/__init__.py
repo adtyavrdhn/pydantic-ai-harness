@@ -41,7 +41,6 @@ if TYPE_CHECKING:
     from .macroscope import Macroscope
     from .memory import Memory
     from .modal_sandbox import ModalSandbox
-    from .notion import Notion
     from .planning import Planning
     from .prompt_injection_defender import PromptInjectionDefender
     from .pydantic_ai_docs import PydanticAIDocs
@@ -87,7 +86,6 @@ __all__ = [
     'ManagedPrompt',
     'Memory',
     'ModalSandbox',
-    'Notion',
     'OutputBlocked',
     'OutputGuardrail',
     'OutputGuardrailFunc',
@@ -137,7 +135,6 @@ _CAPABILITY_EXPORTS = {
     'ManagedPrompt': 'logfire',
     'Memory': 'memory',
     'ModalSandbox': 'modal_sandbox',
-    'Notion': 'notion',
     'Planning': 'planning',
     'PromptInjectionDefender': 'prompt_injection_defender',
     'PydanticAIDocs': 'pydantic_ai_docs',
