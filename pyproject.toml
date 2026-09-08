@@ -108,6 +108,8 @@ prompt-injection-defender = [
 prompt-injection-defender-ml = [
     "stackone-defender[onnx]>=0.7.3,<0.8 ; python_full_version >= '3.11'",
 ]
+# The `mcp` marker is what this extra adds; the floor matches the base `pydantic-ai-slim`
+# requirement, already above the 2.0.0 that put MCP tool annotations on `ToolDefinition.metadata`.
 aws = [
     "pydantic-ai-slim[mcp]>=2.38.0",
 ]
