@@ -1,6 +1,5 @@
-"""Notion's official hosted MCP server as a Harness capability."""
+"""Notion MCP integration."""
 
-from ._capability import Notion
-from ._toolset import NOTION_MCP_URL, NotionToolset
+from pydantic_ai_harness.notion._capability import Notion
 
-__all__ = ('NOTION_MCP_URL', 'Notion', 'NotionToolset')
+__all__ = ['Notion']

@@ -1,64 +1,54 @@
-"""Notion capability."""
+"""Notion hosted MCP capability."""
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import dataclass, field
+from os import environ
 
+from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness.notion._toolset import MCPToolsetClient, NotionToolset
+from pydantic_ai_harness._mcp import is_read_only
 
-_DESCRIPTION = "Search, read, and change the authenticated user's Notion workspace."
+try:
+    from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
+except ImportError as exc:  # pragma: no cover
+    raise ImportError('Install Notion support with: uv add "pydantic-ai-harness[notion]"') from exc
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Notion(AbstractCapability[AgentDepsT]):
-    """Search, read, and change Notion through its official hosted MCP server.
+    """Use Notion's hosted tools with the permissions of the connected user."""
 
-    Every tool Notion offers the connected user is exposed by default; `read_only=True`
-    narrows the toolset to search and read tools. Authentication and MCP session state
-    stay in Pydantic AI/FastMCP, including when a caller supplies a prebuilt client.
-    """
-
-    _: KW_ONLY
-
-    client: MCPToolsetClient = field(repr=False)
-    """Caller-owned OAuth client or in-process server for Notion's hosted MCP contract."""
-
+    description: str | None = 'Search and change Notion workspace content.'
+    auth: Auth | str | None = field(default=None, repr=False)
+    """OAuth access token, `'oauth'`, or HTTP authentication. Defaults to `NOTION_ACCESS_TOKEN`, then OAuth."""
     read_only: bool = False
-    """Expose only Notion's search and read tools, dropping the ones that create, update, or move pages,
-    databases, views, comments, attachments, and Custom Agent sessions."""
-
+    """Expose only tools the server marks read-only; unmarked tools are omitted."""
     include_instructions: bool = True
-    """Inject Notion identity, search-routing, and mutation guidance."""
+    """Forward the server's instructions to the agent."""
+    client: MCPToolsetClient | None = field(default=None, repr=False)
+    """Override the connection with a caller-configured MCP client or transport.
 
-    expected_identity: tuple[str, str] | None = None
-    """Expected `(workspace_id, user_id)` for a restored connection or deferred mutation."""
-
-    id: str | None = None
-    """Optional stable capability and toolset ID.
-
-    Notion tools have fixed names and one MCP client is one authenticated identity, so
-    anonymous instances collide instead of merging their access policies. Set an ID for
-    deferred loading or durable execution. Build a separate agent or dynamic toolset for
-    each connected user rather than sharing an instance across users.
+    The supplied client owns its URL, authentication, and server configuration.
     """
 
-    description: str | None = _DESCRIPTION
-    """Routing description used when the capability is loaded on demand."""
-
-    def get_toolset(self) -> NotionToolset[AgentDepsT]:
-        """Build the Notion MCP toolset."""
-        return NotionToolset[AgentDepsT](
-            client=self.client,
-            read_only=self.read_only,
-            include_instructions=self.include_instructions,
-            expected_identity=self.expected_identity,
-            id=self.id,
-        )
-
-    @classmethod
-    def get_serialization_name(cls) -> str | None:
-        """Not spec-serializable: the capability holds a live authenticated MCP client."""
-        return None
+    def get_toolset(self) -> AbstractToolset[AgentDepsT]:
+        """Build the Notion connection and optional read-only selection."""
+        if self.client is not None:
+            toolset: AbstractToolset[AgentDepsT] = MCPToolset(
+                self.client, id=self.id or 'notion', include_instructions=self.include_instructions
+            )
+        else:
+            toolset = MCPToolset(
+                'https://mcp.notion.com/mcp',
+                id=self.id or 'notion',
+                auth=self.auth if self.auth is not None else environ.get('NOTION_ACCESS_TOKEN', 'oauth'),
+                headers=None,
+                include_instructions=self.include_instructions,
+            )
+        if self.read_only:
+            return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
+        return toolset
