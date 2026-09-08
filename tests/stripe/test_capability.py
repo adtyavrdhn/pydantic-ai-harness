@@ -1,4 +1,4 @@
-"""Test Stripe's connection settings and tool selection through an agent."""
+"""Test Stripe's connection settings and tools through an agent."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import httpx
 import pytest
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
@@ -29,17 +28,9 @@ def anyio_backend() -> str:
 def server() -> FastMCP:
     server = FastMCP('provider', instructions='Provider instructions.')
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @server.tool()
     def read_resource() -> str:
         return 'read'
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
-    def write_resource() -> str:
-        return 'written'
-
-    @server.tool()
-    def unmarked_resource() -> str:
-        return 'unmarked'
 
     return server
 
@@ -53,17 +44,10 @@ def transport(capability: Stripe[None]) -> StreamableHttpTransport:
 
 
 class TestStripe:
-    @pytest.mark.parametrize(
-        ('read_only', 'expected'),
-        [
-            (False, '{"read_resource":"read","write_resource":"written","unmarked_resource":"unmarked"}'),
-            (True, '{"read_resource":"read"}'),
-        ],
-    )
-    async def test_agent_executes_selected_tools(self, server: FastMCP, read_only: bool, expected: str) -> None:
-        agent = Agent(TestModel(), capabilities=[Stripe(client=server, read_only=read_only)])
+    async def test_agent_executes_tools(self, server: FastMCP) -> None:
+        agent = Agent(TestModel(), capabilities=[Stripe(client=server)])
         result = await agent.run('Use the tools')
-        assert result.output == expected
+        assert result.output == '{"read_resource":"read"}'
 
     @pytest.mark.parametrize('include', [True, False])
     async def test_server_instructions(self, server: FastMCP, include: bool) -> None:
