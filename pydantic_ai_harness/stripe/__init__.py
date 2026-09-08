@@ -1,8 +1,5 @@
-"""Stripe capability for account-scoped API access over Stripe's hosted MCP server.
+"""Connect Pydantic AI agents to Stripe's hosted MCP server."""
 
-Install it with `uv add "pydantic-ai-harness[stripe]"`.
-"""
+from ._capability import Stripe
 
-from pydantic_ai_harness.stripe._capability import Stripe
-
-__all__ = ['Stripe']
+__all__ = ('Stripe',)

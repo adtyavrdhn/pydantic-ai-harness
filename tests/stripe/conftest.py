@@ -1,16 +1,29 @@
-"""Test configuration for the Stripe capability."""
+"""Fixtures for the Stripe capability tests.
+
+Stripe's endpoint is stood in for by a FastMCP server running in a child process and served over
+real HTTP, so what `read_only` hides is observed the way an agent sees it: over `tools/list` on the
+wire. The stand-in serves one tool Stripe documents as a read, its write tool, and one tool this
+package has never heard of.
+"""
 
 from __future__ import annotations
 
-import json
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+import multiprocessing
+import socket
+import time
+from collections.abc import Callable, Iterator
 
-import httpx
 import pytest
-from pydantic import JsonValue
 
-pytest.importorskip('fastmcp')
+# `fastmcp-slim` imports but raises ImportError for server support, so widen the skip.
+pytest.importorskip('fastmcp.server', exc_type=ImportError)
+
+from fastmcp import FastMCP
+
+from pydantic_ai_harness.stripe import _capability
+
+_HOST = '127.0.0.1'
+_TOOL_NAMES = ('stripe_api_read', 'stripe_api_write', 'stripe_unlisted_tool')
 
 
 @pytest.fixture
@@ -18,90 +31,54 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
-@dataclass
-class StripeServer:
-    """Protocol-level Stripe MCP fake and the requests it received."""
+# `_tool` and `run_fake_server` execute only in the spawned child, which coverage does not measure.
+def _tool(name: str) -> Callable[[], str]:  # pragma: no cover
+    def tool() -> str:
+        """A Stripe tool that reports its own name."""
+        return name
 
-    headers: list[dict[str, str]] = field(default_factory=lambda: [])
-    urls: list[str] = field(default_factory=lambda: [])
-    follow_redirects: list[bool] = field(default_factory=lambda: [])
-    status_code: int | None = None
-    redirect_to: str | None = None
-
-    async def handle(self, request: httpx.Request) -> httpx.Response:
-        self.headers.append(dict(request.headers))
-        self.urls.append(str(request.url))
-        if self.redirect_to is not None:
-            return httpx.Response(307, headers={'Location': self.redirect_to})
-        if self.status_code is not None:
-            return httpx.Response(self.status_code)
-        message: JsonValue = json.loads(request.content)
-        if not isinstance(message, dict):  # pragma: no cover
-            return httpx.Response(400)
-
-        method = message.get('method')
-        request_id = message.get('id')
-        if method == 'notifications/initialized':
-            return httpx.Response(202)
-        if method == 'initialize':
-            result: JsonValue = {
-                'protocolVersion': '2025-06-18',
-                'capabilities': {'tools': {}},
-                'serverInfo': {'name': 'stripe-fake', 'version': '1'},
-            }
-        elif method == 'tools/list':
-            result = {'tools': [_tool(name) for name in _TOOL_NAMES]}
-        elif method == 'tools/call':
-            params = message.get('params')
-            name = params.get('name') if isinstance(params, dict) else None
-            mode = 'write' if name == 'stripe_api_write' else 'read'
-            result = {'content': [{'type': 'text', 'text': f'{{"mode":"{mode}"}}'}]}
-        else:  # pragma: no cover
-            return httpx.Response(400)
-        return httpx.Response(200, json={'jsonrpc': '2.0', 'id': request_id, 'result': result})
+    tool.__name__ = name
+    return tool
 
 
-_TOOL_NAMES = (
-    'get_stripe_account_info',
-    'stripe_api_search',
-    'stripe_api_details',
-    'stripe_api_read',
-    'stripe_api_write',
-    'search_stripe_documentation',
-    'fetch_stripe_documentation',
-    'send_stripe_feedback',
-)
+def run_fake_server(*, port: int) -> None:  # pragma: no cover
+    """Serve the stand-in Stripe MCP server; runs in the child process."""
+    server = FastMCP('stripe-fake')
+    for name in _TOOL_NAMES:
+        server.tool(_tool(name))
+    # Stripe's server is stateless; matching that keeps the fake honest.
+    server.run(transport='http', host=_HOST, port=port, path='/mcp', stateless_http=True, log_level='error')
 
 
-def _tool(name: str) -> dict[str, JsonValue]:
-    return {
-        'name': name,
-        'description': f'Fake {name}',
-        'inputSchema': {'type': 'object', 'additionalProperties': True},
-    }
+@pytest.fixture(scope='session')
+def stripe_server_url() -> Iterator[str]:
+    """Run the stand-in in a spawned process and yield its URL once it accepts connections.
+
+    Spawn rather than fork: on Linux a forked child inherits the test's running event loop and
+    cannot start the server's own.
+    """
+    with socket.socket() as probe:
+        probe.bind((_HOST, 0))
+        port = probe.getsockname()[1]
+    process = multiprocessing.get_context('spawn').Process(target=run_fake_server, kwargs={'port': port}, daemon=True)
+    process.start()
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            with socket.create_connection((_HOST, port), timeout=0.2):
+                break
+        except OSError:
+            if not process.is_alive() or time.monotonic() > deadline:  # pragma: no cover
+                raise RuntimeError('the fake Stripe server did not start') from None
+            time.sleep(0.05)
+    try:
+        yield f'http://{_HOST}:{port}/mcp'
+    finally:
+        process.terminate()
+        process.join(timeout=5)
 
 
 @pytest.fixture
-async def stripe_server(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[StripeServer]:
-    """Route the canonical Stripe URL to a protocol-level MCP fake."""
-    server = StripeServer()
-    real_async_client = httpx.AsyncClient
-
-    def make_client(
-        headers: dict[str, str] | None = None,
-        timeout: httpx.Timeout | None = None,
-        auth: httpx.Auth | None = None,
-        follow_redirects: bool = False,
-    ) -> httpx.AsyncClient:
-        server.follow_redirects.append(follow_redirects)
-        return real_async_client(
-            transport=httpx.MockTransport(server.handle),
-            base_url='https://mcp.stripe.com',
-            headers=headers,
-            timeout=timeout,
-            auth=auth,
-            follow_redirects=follow_redirects,
-        )
-
-    monkeypatch.setattr(httpx, 'AsyncClient', make_client)
-    yield server
+def stripe_server(stripe_server_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the capability's endpoint at the stand-in server."""
+    monkeypatch.setattr(_capability, '_STRIPE_MCP_URL', stripe_server_url)
