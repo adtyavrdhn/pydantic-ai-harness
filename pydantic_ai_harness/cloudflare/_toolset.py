@@ -1,23 +1,4 @@
-"""Cloudflare managed MCP transport and policy.
-
-External contract, verified 2026-09-04:
-
-- Cloudflare recommends `https://mcp.cloudflare.com/mcp` for broad API access. It exposes
-  `docs`, `search`, and `execute`; `execute` can read or mutate and is marked destructive.
-- Focused `*.mcp.cloudflare.com/mcp` servers expose typed product tools. Their
-  `readOnlyHint` annotations mark the calls that run without approval and that
-  `read_only=True` keeps.
-- Managed servers support browser OAuth and bearer API tokens. Focused authenticated
-  servers expose account selection through explicit tool arguments when the credential
-  can access multiple accounts. Code Mode accepts `account_id` on `execute` instead.
-- Cloudflare exposes no managed-server zone header. Focused tool schemas use `zone_id`,
-  `zoneId`, or `zone`; this toolset restricts and fills those arguments when `zone_id` is set.
-
-Sources: https://github.com/cloudflare/mcp,
-https://github.com/cloudflare/mcp-server-cloudflare, and
-https://github.com/cloudflare/agents. Re-check their server registrations and the
-Code Mode `src/tools` implementations when the catalog or policy changes.
-"""
+"""Cloudflare managed MCP transport and policy."""
 
 from __future__ import annotations
 
