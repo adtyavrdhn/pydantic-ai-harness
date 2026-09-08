@@ -1,7 +1,4 @@
-"""Linear hosted MCP: `https://mcp.linear.app/mcp`, and `/mcp/readonly` for read tools only.
-
-Both endpoints verified 2026-09-07 against https://linear.app/docs/mcp.
-"""
+"""Linear hosted MCP capability."""
 
 from __future__ import annotations
 
