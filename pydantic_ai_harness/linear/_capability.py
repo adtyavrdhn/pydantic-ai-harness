@@ -4,70 +4,51 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from os import environ
-from typing import Literal
 
 from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.toolsets import AbstractToolset
+
+from pydantic_ai_harness._mcp import is_read_only
 
 try:
-    from pydantic_ai.mcp import MCPToolset
-except ImportError as _import_error:  # pragma: no cover
-    raise ImportError(
-        'MCP support is required for the Linear capability. Install it with: uv add "pydantic-ai-harness[linear]"'
-    ) from _import_error
-
-_LINEAR_MCP_URL = 'https://mcp.linear.app/mcp'
-_LINEAR_READ_ONLY_MCP_URL = 'https://mcp.linear.app/mcp/readonly'
-_DEFAULT_DESCRIPTION = 'Use Linear issues, projects, and teams.'
+    from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
+except ImportError as exc:  # pragma: no cover
+    raise ImportError('Install Linear support with: uv add "pydantic-ai-harness[linear]"') from exc
 
 
 @dataclass(kw_only=True)
 class Linear(AbstractCapability[AgentDepsT]):
-    """Connect an agent to Linear's hosted MCP server.
+    """Use Linear's hosted tools with the permissions of the connected user."""
 
-    The default endpoint serves Linear's write tools; the token's scopes decide what the agent can
-    read or change.
-    """
-
-    description: str | None = _DEFAULT_DESCRIPTION
-    """Routing description used when the capability is loaded on demand."""
-
-    auth: Auth | Literal['oauth'] | str | None = field(default=None, repr=False)
-    """`'oauth'` for browser login, a Linear API key or OAuth token, or a custom `httpx.Auth`.
-
-    Defaults to `$LINEAR_ACCESS_TOKEN`.
-    """
-
+    description: str | None = 'Use Linear issues, projects, and teams.'
+    auth: Auth | str | None = field(default=None, repr=False)
+    """API key, OAuth token, `'oauth'`, or HTTP authentication. Defaults to `LINEAR_ACCESS_TOKEN`, then OAuth."""
     read_only: bool = False
-    """Connect to Linear's read-only endpoint, which only ever exposes read tools."""
+    """Use Linear's read-only endpoint. A custom client is filtered by `readOnlyHint` instead."""
+    include_instructions: bool = True
+    """Forward the server's instructions to the agent."""
+    client: MCPToolsetClient | None = field(default=None, repr=False)
+    """Override the connection with a caller-configured MCP client or transport.
 
-    def get_toolset(self) -> MCPToolset[AgentDepsT]:
-        """Build the Linear MCP connection."""
-        auth = self.auth or environ.get('LINEAR_ACCESS_TOKEN')
-        if not auth:
-            raise UserError('Linear needs a token: pass auth= or set LINEAR_ACCESS_TOKEN.')
-        url = _LINEAR_READ_ONLY_MCP_URL if self.read_only else _LINEAR_MCP_URL
-        return MCPToolset(url, id=self.id or 'linear', auth=auth, include_instructions=True)
+    The supplied client owns its URL, authentication, and server configuration.
+    """
 
-    @classmethod
-    def from_spec(
-        cls,
-        *,
-        id: str | None = None,
-        description: str | None = _DEFAULT_DESCRIPTION,
-        defer_loading: bool = False,
-        read_only: bool = False,
-    ) -> Linear[AgentDepsT]:
-        """Construct a Linear capability from serializable options.
-
-        `auth` is absent by design, so a spec file cannot carry a Linear token: the credential comes
-        from `$LINEAR_ACCESS_TOKEN`.
-        """
-        return cls(id=id, description=description, defer_loading=defer_loading, read_only=read_only)
-
-    @classmethod
-    def get_serialization_name(cls) -> str:
-        """Return the agent-spec capability name."""
-        return 'Linear'
+    def get_toolset(self) -> AbstractToolset[AgentDepsT]:
+        """Build the Linear connection and optional read-only selection."""
+        if self.client is not None:
+            toolset: AbstractToolset[AgentDepsT] = MCPToolset(
+                self.client, id=self.id or 'linear', include_instructions=self.include_instructions
+            )
+        else:
+            toolset = MCPToolset(
+                'https://mcp.linear.app/mcp/readonly' if self.read_only else 'https://mcp.linear.app/mcp',
+                id=self.id or 'linear',
+                auth=self.auth if self.auth is not None else environ.get('LINEAR_ACCESS_TOKEN', 'oauth'),
+                headers=None,
+                include_instructions=self.include_instructions,
+            )
+        if self.read_only and self.client is not None:
+            return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
+        return toolset

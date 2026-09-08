@@ -1,5 +1,5 @@
-"""Connect Pydantic AI agents to Linear's hosted MCP server."""
+"""Linear MCP integration."""
 
-from ._capability import Linear
+from pydantic_ai_harness.linear._capability import Linear
 
-__all__ = ('Linear',)
+__all__ = ['Linear']

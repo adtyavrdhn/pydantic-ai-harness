@@ -1,44 +1,53 @@
 # Linear
 
-Use `Linear` when an agent needs to work with Linear issues, projects, and teams through Linear's
-hosted MCP server. The default endpoint serves Linear's write tools as well as its read tools, so the
-token's scopes are the real boundary on what an agent can change.
+Read and change Linear issues, projects, teams, and comments. `Linear` connects an agent to the provider's hosted MCP server. By default it exposes the tools the server offers, including write tools. Provider credentials and server settings determine what those tools may access.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
-## Install
+## Install and connect
 
 ```bash
 uv add "pydantic-ai-harness[linear]" "pydantic-ai-slim[openai]"
 ```
 
-The second package installs the OpenAI provider used by the example. For another model, install its
-matching provider extra instead.
-
-## Connect
-
-Linear authenticates with an API key or an OAuth token; see
-[Linear's MCP documentation](https://linear.app/docs/mcp). Set the key alongside your model
-provider's credential:
-
-```bash
-export LINEAR_ACCESS_TOKEN="your-linear-api-key"
-export OPENAI_API_KEY="your-openai-api-key"
-```
+Set `LINEAR_ACCESS_TOKEN` to a Linear API key or OAuth access token, or pass `auth=...`. When neither is supplied, the connection starts browser OAuth. `auth` accepts an `httpx.Auth` for caller-managed authentication. See the [provider setup](https://linear.app/docs/mcp).
 
 ```python
 from pydantic_ai import Agent
 from pydantic_ai_harness.linear import Linear
 
 agent = Agent('openai:gpt-5.6-sol', capabilities=[Linear()])
-result = agent.run_sync('Summarize my assigned issues that were updated this week')
+result = agent.run_sync('Summarize the resources I can access')
 print(result.output)
 ```
 
-- `read_only=True` connects to Linear's read-only endpoint, which only ever exposes read tools.
-- `auth=` overrides `LINEAR_ACCESS_TOKEN`, and `auth='oauth'` uses Linear's browser login instead of
-  a token. An agent spec cannot carry the token; set the environment variable.
-- To have a person confirm each write, wrap the toolset with Pydantic AI's
-  [tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval).
+## Provider settings
+
+`read_only=True` selects Linear's native `/mcp/readonly` endpoint. The normal `/mcp` endpoint includes write tools. OAuth token scopes can further restrict access.
+
+## Tool selection and approval
+
+For application-level filtering or approval, compose the existing [toolset wrappers](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/). For example, this requires approval before every tool call:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.messages import DeferredToolRequests
+from pydantic_ai_harness.linear import Linear
+
+capability = Linear()
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    toolsets=[capability.get_toolset().approval_required()],
+    output_type=[str, DeferredToolRequests],
+)
+```
+
+Handle the resulting requests using the [deferred tools workflow](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/). Output limits can be composed with [Tool Output Limits](https://pydantic.dev/docs/ai/harness/tool-output-limits/).
+
+## Connection customization
+
+Pass `client` to use a configured FastMCP client or transport, including custom OAuth token storage and MCP handlers. That client owns its URL, authentication, and server configuration; configure those on it instead of the capability. With a custom client, `read_only=True` filters annotations rather than configuring the remote server.
+
+`include_instructions` controls whether server instructions reach the model. Keep authenticated connections separate for different users. To combine connections with overlapping tool names, give them distinct IDs and compose [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/linear/)
