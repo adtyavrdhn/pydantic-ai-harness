@@ -1,57 +1,55 @@
 # Atlassian
 
-Use `Atlassian` when an agent needs to work with Jira, Confluence, Bitbucket and the other Atlassian
-apps through Atlassian's hosted Rovo MCP server. The default serves Atlassian's write tools as well
-as its read ones, so the credential's scopes and the permission groups your organization admin has
-enabled are the real boundary on what an agent can change.
+Use Jira, Confluence, and other Atlassian tools across your accessible sites. `Atlassian` connects an agent to the provider's hosted MCP server. By default it exposes the tools the server offers, including write tools. Provider credentials and server settings determine what those tools may access.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
-## Install
+## Install and connect
 
 ```bash
 uv add "pydantic-ai-harness[atlassian]" "pydantic-ai-slim[openai]"
 ```
 
-The second package installs the OpenAI provider used by the example. For another model, install its
-matching provider extra instead.
-
-## Connect
-
-Atlassian takes three credentials, and your organization admin decides which are open to you: OAuth
-2.1 is the primary method, while a personal API token and a service account API key work only where
-authentication by API token has been turned on. Separately, the `delete_jira` and `manage_jira`
-permission groups are off until an admin enables them. See
-[Atlassian's authentication guide](https://developer.atlassian.com/cloud/rovo-mcp/guides/authentication-and-authorization/).
-
-Left unset, `auth` reads `$ATLASSIAN_API_KEY` and sends it as a bearer token, which is how Atlassian
-takes a service account API key, falling back to `'oauth'`, which opens a browser for Atlassian
-sign-in and consent to one site. A *personal* API token is a different credential, which Atlassian
-takes over Basic auth: pass `auth=httpx.BasicAuth('you@example.com', 'your-personal-api-token')`
-rather than setting the environment variable. Some tool sets are reachable over only one method --
-Jira Service Management needs an API token, while code search and Teams need OAuth -- so pick the one
-your work needs. A credential cannot be written into an agent spec file, where a spec naming `auth:`
-is rejected; set it in the environment instead. Set your model provider's credential as well:
-
-```bash
-export ATLASSIAN_API_KEY="your-service-account-api-key"
-export OPENAI_API_KEY="your-openai-api-key"
-```
+Set `ATLASSIAN_API_KEY` to an Atlassian service-account API key, or pass `auth=...`. When neither is supplied, the connection starts browser OAuth. `auth` accepts an `httpx.Auth` for caller-managed authentication. See the [provider setup](https://support.atlassian.com/atlassian-ai-gateway/docs/get-started-with-the-atlassian-remote-mcp-server/).
 
 ```python
 from pydantic_ai import Agent
 from pydantic_ai_harness.atlassian import Atlassian
 
 agent = Agent('openai:gpt-5.6-sol', capabilities=[Atlassian()])
-result = agent.run_sync('Summarize my unresolved Jira work and find the oldest item')
+result = agent.run_sync('Summarize the resources I can access')
 print(result.output)
 ```
 
-- `read_only=True` keeps only the tools Atlassian marks read-only, and drops any tool it leaves
-  unmarked.
-- An API token is not bound to one Atlassian site, so tools that act on one take a `cloudId`
-  argument; OAuth consent instead covers only the site you approve.
-- To have a person confirm each write, wrap the toolset with the
-  [approval recipe](../stackone/README.md#require-approval).
+## Provider settings
+
+The connection uses `https://mcp.atlassian.com/v2/mcp?tools=all`, Atlassian's flat tool catalog. Existing user permissions and organization settings determine access to sites and products. A personal API token uses `auth=httpx.BasicAuth(email, token)`; the environment variable is for a service-account bearer key. V2 OAuth requires a new sign-in when migrating from V1. See [token authentication](https://support.atlassian.com/atlassian-ai-gateway/docs/configure-authentication-via-api-token/).
+
+## Tool selection and approval
+
+`read_only=True` keeps only tools explicitly marked `readOnlyHint: true`; unmarked tools are omitted. This can leave no tools when a server does not annotate its read operations. Credentials remain the access-control boundary.
+
+For application-level filtering or approval, compose the existing [toolset wrappers](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/). For example, this requires approval before every tool call:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.messages import DeferredToolRequests
+from pydantic_ai_harness.atlassian import Atlassian
+
+capability = Atlassian()
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    toolsets=[capability.get_toolset().approval_required()],
+    output_type=[str, DeferredToolRequests],
+)
+```
+
+Handle the resulting requests using the [deferred tools workflow](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/). Output limits can be composed with [Tool Output Limits](https://pydantic.dev/docs/ai/harness/tool-output-limits/).
+
+## Connection customization
+
+Pass `client` to use a configured FastMCP client or transport, including custom OAuth token storage and MCP handlers. That client owns its URL, authentication, and server configuration; configure those on it instead of the capability. `read_only=True` applies the same annotation filter to custom clients.
+
+`include_instructions` controls whether server instructions reach the model. Keep authenticated connections separate for different users. To combine connections with overlapping tool names, give them distinct IDs and compose [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/atlassian/)
