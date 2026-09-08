@@ -1,126 +1,57 @@
 # AWS
 
-`AWS` lets an agent use AWS documentation and, with authentication, operate one real AWS account through the managed AWS MCP Server.
-
-[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/aws/)
+Use AWS knowledge and account tools through its managed MCP server. `AWS` connects an agent to the provider's hosted MCP server. By default it exposes the tools the server offers, including write tools. Provider credentials and server settings determine what those tools may access.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
-## Install
+## Install and connect
 
 ```bash
 uv add "pydantic-ai-harness[aws]" "pydantic-ai-slim[openai]"
 ```
 
-## Provider setup
-
-Public AWS knowledge needs no credentials, environment variables, or browser sign-in.
-
-For the interactive OAuth flow shown here, attach the `AWSMCPSignInOAuthAccessPolicy` managed policy, or a custom
-policy that grants `signin:AuthorizeOAuth2Access` and `signin:CreateOAuth2Token`, to the IAM user or role that will sign
-in. Configure a FastMCP
-`StreamableHttpTransport('https://aws-mcp.us-east-1.api.aws/mcp', auth='oauth')`, then pass it as `managed_transport` with
-`authentication='oauth'`. FastMCP handles OAuth and opens a browser on the first request. Configure encrypted token
-storage for persistent or multi-user applications. This interactive flow does not use AWS access-key environment
-variables. Other caller-owned OAuth transports retain their own credential, token, and browser lifecycle.
-
-For SigV4, install AWS CLI 2.32.0 or later. Before using `aws login`, attach the
-`SignInLocalDevelopmentAccess` managed policy to the IAM user, role, or group. Do not use root credentials for agent
-operations; use a least-privilege IAM role or user instead.
-The command opens the default browser. On a headless host, use `aws login --remote` and finish sign-in on a
-browser-enabled device. Then authenticate and verify the selected identity:
-
-```bash
-aws login
-export AWS_PROFILE=default
-export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-export AWS_REGION=us-west-2
-export OPENAI_API_KEY='<your OpenAI API key>'
-```
-
-The MCP Proxy for AWS handles the AWS credential chain, refresh, and SigV4 request signing. Pass its
-`StdioTransport` as `managed_transport` with `authentication='sigv4'`. The example passes the selected profile and
-operation Region to the proxy. Replace the `OPENAI_API_KEY` value before running it.
-
-## Example
-
-This example asks for an account inventory and requires approval before any non-read tool runs:
+`auth` accepts an `httpx.Auth` for caller-managed authentication. See the [provider setup](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/getting-started-aws-mcp-server.html).
 
 ```python
-import json
-import os
-
-from fastmcp.client.transports import StdioTransport
-from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults, ToolDenied
+from pydantic_ai import Agent
 from pydantic_ai_harness.aws import AWS
 
-account_id = os.environ['AWS_ACCOUNT_ID']
-region = os.environ['AWS_REGION']
-transport = StdioTransport(
-    command='uvx',
-    args=[
-        'mcp-proxy-for-aws-cli==1.6.5',
-        'https://aws-mcp.us-east-1.api.aws/mcp',
-        '--profile',
-        os.environ['AWS_PROFILE'],
-        '--metadata',
-        f'AWS_REGION={region}',
-    ],
-    keep_alive=False,
-)
-agent = Agent(
-    'openai:gpt-5.6-sol',
-    output_type=[str, DeferredToolRequests],
-    capabilities=[
-        AWS(
-            account_id=account_id,
-            region=region,
-            authentication='sigv4',
-            managed_transport=transport,
-        )
-    ],
-)
-
-result = agent.run_sync('List the S3 buckets in this account and report each bucket Region.')
-if isinstance(result.output, DeferredToolRequests):
-    approvals = {}
-    for call in result.output.approvals:
-        details = json.dumps(call.args, indent=2, sort_keys=True)
-        prompt = f'Approve {call.tool_name} for AWS account {account_id} in {region}?\n{details}\n[y/N] '
-        approvals[call.tool_call_id] = True if input(prompt) == 'y' else ToolDenied('denied')
-    result = agent.run_sync(
-        message_history=result.all_messages(),
-        deferred_tool_results=DeferredToolResults(approvals=approvals),
-    )
+agent = Agent('openai:gpt-5.6-sol', capabilities=[AWS()])
+result = agent.run_sync('Summarize the resources I can access')
 print(result.output)
 ```
 
-## What the agent can do
+## Provider settings
 
-- Search and read current AWS documentation.
-- List AWS Regions and check regional service or feature availability.
-- With OAuth or SigV4, inspect resources and run AWS API workflows allowed by IAM.
-- With authenticated access, generate Amazon S3 presigned upload or download URLs and poll long-running tasks.
+`AWS()` uses browser OAuth with the Virginia endpoint. `region='eu-central-1'` selects the Frankfurt MCP endpoint; it does not constrain the regions used by tool calls. Existing IAM permissions determine access. OAuth requires the AWS sign-in permissions described in the [OAuth guide](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/oauth-authentication.html).
 
-## Operational constraints
+For SigV4 or a named AWS profile, configure the [official AWS MCP proxy](https://github.com/aws/mcp-proxy-for-aws) and pass its MCP transport through `client`. The proxy owns credential discovery and signing.
 
-- `account_id` and `region` declare the model-facing scope. IAM and the authenticated transport enforce actual access.
-- The managed endpoints are `us-east-1` and `eu-central-1`. `endpoint_region` selects the unauthenticated endpoint;
-  an authenticated transport selects its endpoint in its URL or proxy arguments.
-- By default every managed tool is exposed and each non-read tool call, including a model-initiated retry, goes
-  through Pydantic AI's deferred approval flow. Denied calls do not run.
-- `read_only=True` exposes only the tools marked `readOnlyHint=true` and drops the rest.
-- `require_approval=False` runs non-read tools without the approval step; IAM still applies. It has no effect when
-  `read_only=True`.
-- Managed tool names repeat across scopes. Wrap each `AWS` instance in Pydantic AI's `PrefixTools` with a unique prefix
-  when one agent uses multiple accounts or target Regions.
-- `max_output_bytes` and `max_output_lines` cap each managed tool result before it enters model context and history.
-  FastMCP still receives the full response. Ask for a narrower or paginated result when the response is truncated.
-- Presigned URLs are temporary bearer credentials that enter model context and message history. Use short expiries,
-  redact them from logs and traces, and avoid generating them in conversations whose history is retained.
-- The caller owns transport timeout, retry, cancellation, and cleanup behavior. Cancellation does not roll back an AWS
-  side effect. The single-run example uses `keep_alive=False` so the proxy exits after the toolset disconnects.
-- A supplied transport must point to the managed AWS MCP Server. Use [LocalStack](../localstack/) for emulated AWS.
-- Without SigV4 `AWS_REGION` metadata, AWS operations default to `us-east-1`.
-- The server is GA with no additional service fee. Normal AWS resource and data-transfer charges still apply.
-- Agent specs support only the unauthenticated knowledge path because authenticated transports carry runtime identity.
+## Tool selection and approval
+
+`read_only=True` keeps only tools explicitly marked `readOnlyHint: true`; unmarked tools are omitted. This can leave no tools when a server does not annotate its read operations. Credentials remain the access-control boundary.
+
+For application-level filtering or approval, compose the existing [toolset wrappers](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/). For example, this requires approval before every tool call:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.messages import DeferredToolRequests
+from pydantic_ai_harness.aws import AWS
+
+capability = AWS()
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    toolsets=[capability.get_toolset().approval_required()],
+    output_type=[str, DeferredToolRequests],
+)
+```
+
+Handle the resulting requests using the [deferred tools workflow](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/). Output limits can be composed with [Tool Output Limits](https://pydantic.dev/docs/ai/harness/tool-output-limits/).
+
+## Connection customization
+
+Pass `client` to use a configured FastMCP client or transport, including custom OAuth token storage and MCP handlers. That client owns its URL, authentication, and server configuration; configure those on it instead of the capability. `read_only=True` applies the same annotation filter to custom clients.
+
+`include_instructions` controls whether server instructions reach the model. Keep authenticated connections separate for different users. To combine connections with overlapping tool names, give them distinct IDs and compose [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
+
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/aws/)
