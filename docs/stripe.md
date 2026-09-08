@@ -47,7 +47,7 @@ print(result.output)
 - `connected_account='acct_...'` sends `Stripe-Account`, so a Connect platform acts on one connected
   account. Stripe has no OAuth for that path, so pass a platform key with `auth=`.
 - To have a person confirm each write, pass `Stripe().get_toolset().approval_required()` as a
-  toolset and handle the requests as the [approval recipe](stackone.md#require-approval).
+  toolset and handle the requests as the [tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/stripe/)
 
