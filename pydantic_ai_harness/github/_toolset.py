@@ -1,38 +1,4 @@
-"""GitHub remote MCP policy and transport.
-
-External contract, verified 2026-09-04:
-
-- GitHub's official hosted server uses streamable HTTP at
-  `https://api.githubcopilot.com/mcp/`.
-- `X-MCP-Toolsets` selects comma-separated toolsets. The default server
-  toolsets are `context`, `repos`, `issues`, `pull_requests`, and `users`.
-- `X-MCP-Readonly: true` removes write tools and takes precedence over tool
-  selection. Every tool registration in the official server must explicitly
-  declare its MCP `readOnlyHint` annotation.
-- `X-MCP-Tools`, `X-MCP-Features`, and `X-MCP-Insiders` can expand the exposed
-  tool surface, so caller-supplied values are not accepted.
-- URL selectors such as `/x/all` and `/insiders` can also expand that surface.
-  Built-in connections therefore accept only the public GitHub MCP host or a
-  GitHub Enterprise Cloud data-residency host at the plain `/mcp` path.
-- The consolidated and granular sub-issue mutation tools accept an opaque
-  `sub_issue_id` that does not identify its repository, so repository scope
-  cannot be enforced for those tools and they are not exposed.
-- Generic MCP hosts can authenticate with a PAT bearer token. OAuth requires
-  the host to configure a GitHub App or OAuth App.
-
-Sources:
-https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md
-https://github.com/github/github-mcp-server/blob/main/docs/server-configuration.md
-https://github.com/github/github-mcp-server/blob/main/docs/feature-flags.md
-https://github.com/github/github-mcp-server/blob/main/README.md
-https://github.com/github/github-mcp-server/blob/main/pkg/toolvalidation/readonlyhint.go
-https://github.github.com/gh-aw/troubleshooting/debug-ghe/
-
-Re-check the endpoint and headers in the remote server, server configuration,
-and feature flag docs. Confirm the sub-issue tool names and schemas in the tool
-catalog and that the annotation check still covers all registrations before
-changing safety classification.
-"""
+"""GitHub remote MCP policy and transport."""
 
 from __future__ import annotations
 
