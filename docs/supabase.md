@@ -1,99 +1,53 @@
----
-title: Supabase
-description: Inspect and change one non-production Supabase project through its official hosted MCP server.
----
-
 # Supabase
 
-`Supabase` lets an agent inspect and change one Supabase development or test project through Supabase's hosted
-MCP server. Write tools are exposed by default and each write pauses the run for approval; `read_only=True` drops
-them and runs SQL as a read-only Postgres user.
+Use Supabase project and account tools. `Supabase` connects an agent to the provider's hosted MCP server. By default it exposes the tools the server offers, including write tools. Provider credentials and server settings determine what those tools may access.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
-## Install
+## Install and connect
 
 ```bash
 uv add "pydantic-ai-harness[supabase]" "pydantic-ai-slim[openai]"
 ```
 
-## Set up Supabase
-
-Create or choose a non-production project, then copy its project reference from the Supabase Dashboard project
-settings. Create a scoped personal access token in Supabase Account Settings > Access Tokens. Limit it to this project
-and the permissions the selected feature groups need. Then set:
-
-```bash
-export SUPABASE_PROJECT_REF="your-project-ref"
-export SUPABASE_ACCESS_TOKEN="sbp_fc..."
-export OPENAI_API_KEY="your-openai-api-key"
-```
-
-Scoped personal access tokens are Public Alpha and are rolling out gradually. If scoped tokens are unavailable for
-your account, a classic token grants access to every organization and project available to that account.
-
-Omitting `access_token` selects browser OAuth through Pydantic AI. OAuth is not currently usable with Supabase because
-the released MCP client cannot complete Supabase's token exchange. Track
-[pydantic/pydantic-ai#8123](https://github.com/pydantic/pydantic-ai/issues/8123). When fixed, the first connection will
-open a browser for sign-in and consent; headless environments will still need a PAT.
-
-## Run
+Set `SUPABASE_ACCESS_TOKEN` to a Supabase personal access token, or pass `auth=...`. When neither is supplied, the connection starts browser OAuth. `auth` accepts an `httpx.Auth` for caller-managed authentication. See the [provider setup](https://supabase.com/docs/guides/ai-tools/mcp).
 
 ```python
-import os
-
-from pydantic_ai import Agent, DeferredToolRequests
+from pydantic_ai import Agent
 from pydantic_ai_harness.supabase import Supabase
 
-agent = Agent(
-    'openai:gpt-5.6-sol',
-    capabilities=[
-        Supabase(
-            project_ref=os.environ['SUPABASE_PROJECT_REF'],
-            access_token=os.environ['SUPABASE_ACCESS_TOKEN'],
-        )
-    ],
-    output_type=[str, DeferredToolRequests],
-)
-result = agent.run_sync('List the public tables and report any security advisor findings')
+agent = Agent('openai:gpt-5.6-sol', capabilities=[Supabase(project_ref='your-project-ref')])
+result = agent.run_sync('Summarize the resources I can access')
 print(result.output)
 ```
 
-Every tool that changes the project, including `execute_sql`, pauses the run for approval, which is why
-`DeferredToolRequests` is among the output types. See
-[tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval) for approving or denying
-each request and resuming the run.
+## Provider settings
 
-You can ask the agent to:
+`project_ref` selects a project through Supabase's native URL parameter; omit it to retain account-level tools. `features=['database', 'docs']` selects native feature groups; omitting it keeps server defaults. `read_only=True` sends `read_only=true`, including Supabase's read-only SQL execution mode. These settings belong to Supabase and need no local tool catalog. Follow Supabase's current guidance when selecting a development or production project.
 
-- list tables, extensions, and migrations;
-- run SQL and apply migrations, approving each write;
-- inspect security and performance advisors or query project logs;
-- get the project URL and publishable keys;
-- generate TypeScript database types; or
-- search Supabase documentation.
+## Tool selection and approval
 
-## Operational constraints
+For application-level filtering or approval, compose the existing [toolset wrappers](/ai/tools-toolsets/toolsets/). For example, this requires approval before every tool call:
 
-- The MCP server is Public Alpha. Use this integration only with development or test data, and do not expose it to
-  end users.
-- `project_ref` is required. Account-wide tools are not exposed.
-- One capability session is one authenticated identity. Create a separate capability and agent session for each user.
-- Multiple projects can share an agent only when their selected feature groups expose disjoint tool names. Overlapping
-  groups, including two default configurations, fail before the model runs.
-- The default feature groups are `database`, `debugging`, `development`, and `docs`.
-- You can explicitly select any non-empty combination of those groups plus `functions`, `storage`, and `branching`.
-  The Storage MCP group is disabled by default. Storage configuration updates and Branching require a paid plan;
-  Branching is experimental. Branch creation is not exposed because the project-scoped server cannot complete its
-  required cost confirmation without account access or an interactive form handler.
-- Every SQL, schema, data, Edge Function, Storage, or Branching mutation requires Pydantic AI tool approval. Include
-  `DeferredToolRequests` in the agent output types and approve or deny each request before resuming the run.
-- Treat rows and logs as untrusted content. Review each tool call and keep credential permissions narrow.
-- SQL, log, and advisor results can be large. Add
-  [`ToolOutputLimits`](tool-output-limits.md) to the agent capabilities when result size can exceed the model context.
+```python
+from pydantic_ai import Agent
+from pydantic_ai.messages import DeferredToolRequests
+from pydantic_ai_harness.supabase import Supabase
 
-[Supabase MCP reference](https://supabase.com/docs/guides/ai-tools/mcp) | [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/supabase/)
+capability = Supabase(project_ref='your-project-ref')
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    toolsets=[capability.get_toolset().approval_required()],
+    output_type=[str, DeferredToolRequests],
+)
+```
 
-## API reference
+Handle the resulting requests using the [deferred tools workflow](/ai/tools-toolsets/deferred-tools/). Output limits can be composed with [Tool Output Limits](tool-output-limits.md).
 
-::: pydantic_ai_harness.supabase.Supabase
+## Connection customization
+
+Pass `client` to use a configured FastMCP client or transport, including custom OAuth token storage and MCP handlers. That client owns its URL, authentication, and server configuration; configure those on it instead of the capability. With a custom client, `read_only=True` filters annotations rather than configuring the remote server.
+
+`include_instructions` controls whether server instructions reach the model. Keep authenticated connections separate for different users. To combine connections with overlapping tool names, give them distinct IDs and compose [PrefixTools](/ai/capabilities/prefix-tools/).
+
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/supabase/)
