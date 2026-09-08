@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from .advisor import Advisor
     from .browser_use import BrowserUse
     from .capability_creation import CapabilityCreation
+    from .cloudflare import Cloudflare
     from .code_mode import CodeMode
     from .coder import DEFAULT_ALLOWED_COMMANDS, Coder
     from .compaction import (
@@ -63,6 +64,7 @@ __all__ = [
     'CapabilityCreation',
     'ClampOversizedMessages',
     'ClearToolResults',
+    'Cloudflare',
     'CodeMode',
     'Coder',
     'ConversationSearch',
@@ -121,6 +123,7 @@ _CAPABILITY_EXPORTS = {
     'CapabilityCreation': 'capability_creation',
     'ClampOversizedMessages': 'compaction',
     'ClearToolResults': 'compaction',
+    'Cloudflare': 'cloudflare',
     'CodeMode': 'code_mode',
     'Coder': 'coder',
     'ConversationSearch': 'conversation_search',

@@ -1,11 +1,14 @@
 ---
 title: Cloudflare
-description: Use official Cloudflare managed MCP servers from a Pydantic AI agent.
+description: Connect a Pydantic AI agent to Cloudflare's managed MCP servers.
 ---
 
 # Cloudflare
 
-Cloudflare lets an agent read Cloudflare documentation and account data, then run approved platform changes through Cloudflare's official managed MCP servers.
+Use `Cloudflare` when an agent needs Cloudflare's developer documentation, or the tools that read
+and change a Cloudflare account. It connects to one of Cloudflare's managed MCP servers, picked by
+`url`, and exposes every tool that server publishes — including the ones that create, update, and
+delete resources. The API token's scopes are the real boundary.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
@@ -15,90 +18,44 @@ Cloudflare lets an agent read Cloudflare documentation and account data, then ru
 uv add "pydantic-ai-harness[cloudflare]" "pydantic-ai-slim[openai]"
 ```
 
-## Set up Cloudflare
+The second package installs the OpenAI provider used by the example. For another model, install its
+matching provider extra instead.
 
-The public Cloudflare documentation, Agents SDK documentation, Developer Stack, blog, and demo servers need no Cloudflare credentials.
-Authenticated servers use OAuth when `api_token` is omitted. Pydantic AI's MCP client handles OAuth, and the first
-authorization requires browser interaction. For CI or another non-interactive process, create a least-privilege
-Cloudflare API token and pass it as `api_token`, usually from `CLOUDFLARE_API_TOKEN`.
-The default OAuth token store is process memory, so restarting the process starts authorization again. Pass a prebuilt
-MCP client with persistent OAuth storage when the application must retain authorization across restarts.
+## Connect
 
-The example below uses OAuth with a multi-account user grant. Set the model credential and the Cloudflare account and
-zone to query:
+The default server, `https://docs.mcp.cloudflare.com/mcp`, searches the Cloudflare developer
+documentation and needs no Cloudflare credential:
 
 ```bash
-export OPENAI_API_KEY="your OpenAI API key"
-export CLOUDFLARE_ACCOUNT_ID="your Cloudflare account ID"
-export CLOUDFLARE_ZONE_ID="your Cloudflare zone ID"
+export OPENAI_API_KEY="your-openai-api-key"
 ```
 
-## Example
-
 ```python
-import os
-
 from pydantic_ai import Agent
-from pydantic_ai_harness.cloudflare import Cloudflare, CloudflareServer
+from pydantic_ai_harness.cloudflare import Cloudflare
 
-agent = Agent(
-    'openai:gpt-5.6-sol',
-    capabilities=[
-        Cloudflare(
-            server=CloudflareServer.DNS_ANALYTICS,
-            account_id=os.environ['CLOUDFLARE_ACCOUNT_ID'],
-            zone_id=os.environ['CLOUDFLARE_ZONE_ID'],
-        )
-    ],
-)
-result = agent.run_sync('Show details for the configured zone')
+agent = Agent('openai:gpt-5.6-sol', capabilities=[Cloudflare()])
+result = agent.run_sync('How do I bind a D1 database to a Worker?')
 print(result.output)
 ```
 
-## What an agent can do
+Cloudflare runs one server per product area and lists them all under
+[servers for Cloudflare](https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/);
+set `url` to the one you need. Those act on your account, so create an
+[API token](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/) and set
+`CLOUDFLARE_API_TOKEN`, or pass `auth='oauth'` for browser login. Once set, the credential is sent
+to whatever `url` names, the documentation server included. An agent spec cannot carry the token; set
+the environment variable.
 
-- Search Cloudflare developer and Agents SDK documentation.
-- Inspect the Cloudflare API schema with `CloudflareServer.API`.
-- Read data from focused servers for DNS analytics, Workers, observability, containers, Logpush, AI Gateway,
-  audit logs, DEX, CASB, Developer Stack, browser tasks, the Cloudflare blog, and Demo Day.
-- Run create, update, or delete operations once the application approves each call. Set `read_only=True` to hide
-  these tools.
+- `read_only=True` keeps only the tools the server marks `readOnlyHint` and hides everything else,
+  including tools Cloudflare left unannotated. Cloudflare annotates one server at a time, so check
+  a server's `tools/list` before relying on the flag: where it annotates nothing, the agent gets no
+  tools at all.
+- Writes run without confirmation. To review each one first, follow the
+  [approval recipe](https://github.com/pydantic/pydantic-ai-harness/blob/main/pydantic_ai_harness/stackone/README.md#require-approval).
 
-## Operational constraints
-
-- One `Cloudflare` instance selects one `CloudflareServer`. The default is the public documentation server.
-- Every tool of the selected server is exposed by default. `read_only=True` keeps only the tools Cloudflare marks
-  read-only; on the official API server those are `docs` and its network-isolated OpenAPI `search` tool. MCP safety
-  annotations state server intent, so credentials should still have only the permissions required for the selected
-  server.
-- Mutation-capable tools raise Pydantic AI's standard deferred approval request before the MCP request runs. Configured
-  account and zone IDs are required in the mutation tool call so the approval shows the exact target; these IDs enter
-  model context, but credentials do not. Resume with `DeferredToolResults` after the application or user approves.
-- On focused servers, `account_id` keeps only tools with an explicit account argument and supplies that value to read
-  calls. Use it with a multi-account user credential. If the token already pins one account, omit `account_id`; the
-  token is the account boundary. `zone_id` applies the same policy to explicit zone arguments. Scoped instances do not
-  forward remote server instructions because those instructions can include other accessible account IDs.
-- Code Mode `execute` accepts arbitrary JavaScript, so `CloudflareServer.API` accepts `account_id` or `zone_id` only
-  with `read_only=True`. Use a focused server when either boundary is required together with changes.
-- `max_results` bounds recognized top-level pagination fields and nested fields when their parent object is supplied.
-  `max_output_bytes` and `max_output_lines` bound each model-facing result. Oversized structured or binary results are
-  replaced rather than returned partially.
-- A prebuilt `client` owns authentication and account selection, so it cannot be combined with `api_token` or
-  `account_id`. Custom clients treat every tool as mutation-capable unless `trust_server_annotations=True`; even then,
-  contradictory safety annotations remain mutation-capable. Remote instructions from custom clients are not
-  forwarded. Prebuilt clients do not receive the official managed-server safe-name exceptions, even when their URL
-  matches an official endpoint.
-- Run tools through an `Agent`. `CloudflareToolset.direct_call_tool()` is disabled because direct MCP calls have no
-  agent approval or resource-boundary context.
-
-[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/cloudflare/) |
-[Cloudflare managed MCP servers](https://github.com/cloudflare/mcp-server-cloudflare) |
-[Cloudflare Code Mode](https://github.com/cloudflare/mcp)
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/cloudflare/)
 
 ## API reference
 
 ::: pydantic_ai_harness.cloudflare.Cloudflare
-
-::: pydantic_ai_harness.cloudflare.CloudflareServer
-
-::: pydantic_ai_harness.cloudflare.CloudflareToolset

@@ -156,7 +156,7 @@ Connections to systems outside the agent's workspace, and abilities the provider
 |---|---|---|
 | [MCP](/ai/capabilities/mcp/) | Core | Connect any MCP server's tools; local by default, provider-native connectors opt-in |
 | [Image Generation](/ai/capabilities/image-generation/) | Core | Generate and edit images; provider-native where supported, sub-agent fallback elsewhere |
-| [Cloudflare](cloudflare.md) | Harness | Use one official managed MCP server with approval for changes, account and zone boundaries, result limits, and an opt-in read-only mode |
+| [Cloudflare](cloudflare.md) | Harness | Search Cloudflare's developer documentation and work with a Cloudflare account through its [managed MCP servers](https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/) |
 | [StackOne](stackone.md) | Harness | Act on linked SaaS accounts (HRIS, ATS, CRM, …) via [StackOne](https://www.stackone.com) |
 | [LocalStack](localstack.md) | Harness | An emulated AWS environment with AWS CLI tools |
 | [Macroscope](macroscope.md) | Harness | Run a local [Macroscope](https://docs.macroscope.com/cli) code review and hand the findings to the agent |

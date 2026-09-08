@@ -1,19 +1,47 @@
-"""Fixtures for the Cloudflare MCP capability tests."""
+"""A stand-in Cloudflare managed MCP server, served over real HTTP.
+
+The fake runs in a child process behind a URL, so the capability reaches it the same way it
+reaches Cloudflare: `url` picks the server, the credential travels as a request header, and the
+`readOnlyHint` annotations arrive over the wire rather than being handed to a filter directly.
+"""
 
 from __future__ import annotations
 
-from typing import Annotated
+import multiprocessing
+import socket
+import time
+from collections.abc import Iterator
 
 import pytest
-from mcp.server.fastmcp.server import FastMCP, Settings
-from mcp.types import ToolAnnotations
-from pydantic import Field
-from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import RunContext
-from pydantic_ai.usage import RunUsage
 
-SmallLimit = Annotated[int, Field(ge=1, le=3)]
-LargeLimit = Annotated[int, Field(ge=10, le=20)]
+# `fastmcp-slim` imports but raises ImportError for server support, so widen the skip.
+pytest.importorskip('fastmcp.server', exc_type=ImportError)
+
+from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_http_request
+from mcp.types import ToolAnnotations
+
+
+def run_fake_server(*, host: str, port: int) -> None:  # pragma: no cover - runs in the child process
+    """Serve one read, one write, and one unannotated tool, each reporting its credential."""
+    server = FastMCP('cloudflare-fake')
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def read_item() -> str | None:
+        """Read a resource."""
+        return get_http_request().headers.get('authorization')
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def write_item() -> str | None:
+        """Change a resource."""
+        return get_http_request().headers.get('authorization')
+
+    @server.tool
+    def unannotated_item() -> str | None:
+        """Do something Cloudflare left unannotated."""
+        return get_http_request().headers.get('authorization')
+
+    server.run(transport='http', host=host, port=port, path='/mcp', stateless_http=True, log_level='error')
 
 
 @pytest.fixture
@@ -21,153 +49,30 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
-@pytest.fixture
-def run_context() -> RunContext[None]:
-    return RunContext(
-        deps=None,
-        model=TestModel(),
-        usage=RunUsage(),
-        prompt=None,
-        messages=[],
-        run_step=0,
+@pytest.fixture(scope='session')
+def cloudflare_server() -> Iterator[str]:
+    """The stand-in server's URL, once it accepts connections."""
+    host = '127.0.0.1'
+    with socket.socket() as probe:
+        probe.bind((host, 0))
+        port: int = probe.getsockname()[1]
+    # Spawn rather than fork: a forked child inherits the test's running event loop
+    # and cannot start the server's own.
+    process = multiprocessing.get_context('spawn').Process(
+        target=run_fake_server, kwargs={'host': host, 'port': port}, daemon=True
     )
-
-
-def _server(name: str) -> FastMCP:
-    Settings.model_rebuild()
-    return FastMCP(name, instructions='Use the fake Cloudflare server.')
-
-
-@pytest.fixture
-def focused_server() -> FastMCP:
-    server = _server('cloudflare-focused')
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def list_records(account_id: str, zoneId: str, limit: Annotated[int, Field(ge=1, le=100)] = 50) -> str:
-        """List DNS records."""
-        return '\n'.join(f'{account_id}:{zoneId}:{index}' for index in range(limit))
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def zone_details(account_id: str, zoneId: str) -> str:
-        """Show zone details."""
-        return f'zone:{account_id}:{zoneId}'
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-    def delete_record(account_id: str, zoneId: str, record_id: str) -> str:
-        """Delete a DNS record."""
-        return f'deleted:{account_id}:{zoneId}:{record_id}'
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-    def failing_delete(record_id: str) -> str:
-        """Fail after accepting a delete request."""
-        raise ValueError('x' * 100 + 'SECRET')
-
-    @server.tool()
-    def ambiguous_tool() -> str:
-        """Tool without safety annotations."""
-        return 'ambiguous'  # pragma: no cover - never called by a test
-
-    return server
-
-
-@pytest.fixture
-def api_server() -> FastMCP:
-    server = _server('cloudflare-api')
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def docs(query: str) -> str:
-        """Search Cloudflare docs."""
-        return query
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def search(code: str) -> str:
-        """Search the API schema."""
-        return code  # pragma: no cover - catalog-only fake
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-    def execute(code: str, account_id: str | None = None) -> str:
-        """Execute Cloudflare API code."""
-        return f'{account_id}:{code}'  # pragma: no cover - approval metadata fake
-
-    return server
-
-
-@pytest.fixture
-def alternate_schema_server() -> FastMCP:
-    server = _server('cloudflare-alternate-schema')
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def camel_scope(accountId: str, zone: str) -> str:
-        """Read data using alternate resource-key spellings."""
-        return f'{accountId}:{zone}'  # pragma: no cover - network call is intercepted
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def limited_records(limit: Annotated[int | None, Field(ge=1, le=3)] = None) -> str:
-        """Return a server-limited result page."""
-        return ','.join(str(index) for index in range(limit or 3))
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def simple_limited(limit: Annotated[int, Field(ge=1, le=3)] = 3) -> str:
-        """Return a page with top-level numeric constraints."""
-        return str(limit)
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def minimum_too_large(limit: Annotated[int | None, Field(ge=5)] = None) -> str:
-        """Require more results than a restrictive client permits."""
-        return str(limit or 5)  # pragma: no cover - hidden by the result policy
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def structured_read() -> dict[str, int]:
-        """Return structured data."""
-        return {'count': 200}
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def emoji_read() -> str:
-        """Return multi-byte text."""
-        return '😀' * 20
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def exact_text() -> str:
-        """Return text with significant line endings."""
-        return 'a\r\nb\n'
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def ambiguous_limit(limit: SmallLimit | LargeLimit = 1) -> str:
-        """Use disjoint numeric ranges."""
-        return str(limit)  # pragma: no cover - hidden by the result policy
-
-    return server
-
-
-@pytest.fixture
-def untrusted_api_server() -> FastMCP:
-    server = _server('cloudflare-untrusted-api')
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-    def search(code: str) -> str:
-        """Use a familiar name without a read-only contract."""
-        return code  # pragma: no cover - hidden by the untrusted-client policy
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def claimed_read() -> str:
-        """Claim a read-only contract from an untrusted server."""
-        return 'read'  # pragma: no cover - catalog-only fake
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=True))
-    def contradictory() -> str:
-        """Publish contradictory safety annotations."""
-        return 'conflict'  # pragma: no cover - hidden by the safety policy
-
-    return server
-
-
-@pytest.fixture
-def error_server() -> FastMCP:
-    server = _server('cloudflare-error')
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def failing_read() -> str:
-        """Return a long provider error."""
-        raise ValueError('provider failure: ' + 'sensitive detail ' * 30)
-
-    return server
+    process.start()
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                break
+        except OSError:  # pragma: no cover - timing-dependent retry
+            if not process.is_alive() or time.monotonic() > deadline:
+                raise RuntimeError('the stand-in Cloudflare server did not start') from None
+            time.sleep(0.05)
+    try:
+        yield f'http://{host}:{port}/mcp'
+    finally:
+        process.terminate()
+        process.join(timeout=5)
