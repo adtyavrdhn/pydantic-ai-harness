@@ -22,8 +22,8 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
     """Cloudflare API and product tools through official managed MCP servers.
 
     Each instance selects one server and constructs a `CloudflareToolset` with
-    read-safe defaults, optional account and zone boundaries, result limits,
-    and approval-composable mutation access.
+    optional account and zone boundaries, result limits, approval for every
+    tool that changes resources, and an opt-in read-only tool set.
     """
 
     server: CloudflareServer = CloudflareServer.DOCS
@@ -38,8 +38,11 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
     """Zone boundary. Only tools with an explicit zone argument remain visible."""
     api_token: str | None = field(default=None, repr=False)
     """Bearer API token. When omitted, the managed server starts browser OAuth."""
-    allow_mutations: bool = False
-    """Expose non-read-only tools. Every such call still enters core's approval flow."""
+    read_only: bool = False
+    """Expose only the tools Cloudflare marks read-only, dropping the ones that create, update, or delete resources.
+
+    By default every tool is exposed and calls that change resources still require approval.
+    """
     max_results: int = 20
     """Maximum accepted value for common pagination arguments."""
     max_output_bytes: int = 50 * 1024
@@ -65,7 +68,7 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
             account_id=self.account_id,
             zone_id=self.zone_id,
             api_token=self.api_token,
-            allow_mutations=self.allow_mutations,
+            read_only=self.read_only,
             max_results=self.max_results,
             max_output_bytes=self.max_output_bytes,
             max_output_lines=self.max_output_lines,
@@ -88,8 +91,8 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
             ' Before changing anything, use read-only tools to verify canonical resource IDs and current state.'
             ' Mutation-capable tools require approval before execution. Do not repeat a mutation after an uncertain'
             ' transport failure until a read confirms whether it applied.'
-            if self.allow_mutations
-            else " Only tools selected by this capability's read-safe policy are available."
+            if not self.read_only
+            else ' Only read-only tools are available.'
         )
         return (
             f'Use the selected Cloudflare `{self.server.value}` MCP server.{boundary}{mutations} '
@@ -108,7 +111,7 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
         account_id: str | None = None,
         zone_id: str | None = None,
         api_token: str | None = None,
-        allow_mutations: bool = False,
+        read_only: bool = False,
         max_results: int = 20,
         max_output_bytes: int = 50 * 1024,
         max_output_lines: int = 500,
@@ -122,7 +125,7 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
             account_id=account_id,
             zone_id=zone_id,
             api_token=api_token,
-            allow_mutations=allow_mutations,
+            read_only=read_only,
             max_results=max_results,
             max_output_bytes=max_output_bytes,
             max_output_lines=max_output_lines,

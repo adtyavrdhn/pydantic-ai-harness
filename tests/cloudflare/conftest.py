@@ -65,7 +65,7 @@ def focused_server() -> FastMCP:
     @server.tool()
     def ambiguous_tool() -> str:
         """Tool without safety annotations."""
-        return 'ambiguous'  # pragma: no cover - hidden by the read-safe policy
+        return 'ambiguous'  # pragma: no cover - never called by a test
 
     return server
 

@@ -5,7 +5,8 @@ External contract, verified 2026-09-04:
 - Cloudflare recommends `https://mcp.cloudflare.com/mcp` for broad API access. It exposes
   `docs`, `search`, and `execute`; `execute` can read or mutate and is marked destructive.
 - Focused `*.mcp.cloudflare.com/mcp` servers expose typed product tools. Their
-  `readOnlyHint` annotations distinguish calls safe to expose without mutation opt-in.
+  `readOnlyHint` annotations mark the calls that run without approval and that
+  `read_only=True` keeps.
 - Managed servers support browser OAuth and bearer API tokens. Focused authenticated
   servers expose account selection through explicit tool arguments when the credential
   can access multiple accounts. Code Mode accepts `account_id` on `execute` instead.
@@ -528,10 +529,10 @@ def _bounded_error_text(text: str, *, max_bytes: int, max_lines: int) -> str:
 class CloudflareToolset(MCPToolset[AgentDepsT]):
     """One official Cloudflare managed MCP server with client-side policy.
 
-    The toolset selects one server, filters its tools to the read-safe set by
-    default, injects configured resource boundaries, bounds result sizes, and
-    sends mutation-capable tools through Pydantic AI's approval flow. It keeps
-    the rest of the public `MCPToolset` surface for toolset composition.
+    The toolset selects one server, injects configured resource boundaries,
+    bounds result sizes, and sends mutation-capable tools through Pydantic AI's
+    approval flow. `read_only=True` drops those tools instead. It keeps the
+    rest of the public `MCPToolset` surface for toolset composition.
 
     Use `Cloudflare` for capability instructions and agent-spec support. Use
     this class directly with toolset combinators.
@@ -544,7 +545,7 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
         account_id: str | None = None,
         zone_id: str | None = None,
         api_token: str | None = None,
-        allow_mutations: bool = False,
+        read_only: bool = False,
         max_results: int = 20,
         max_output_bytes: int = 50 * 1024,
         max_output_lines: int = 500,
@@ -561,15 +562,17 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
                 arguments. Not supported by public servers.
             zone_id: Zone enforced through explicit tool arguments.
             api_token: Bearer token. Authenticated servers use OAuth when omitted.
-            allow_mutations: Expose tools outside the read-safe set. Their calls
-                still require Pydantic AI approval.
+            read_only: Expose only the tools Cloudflare marks read-only, dropping
+                the ones that create, update, or delete resources. By default
+                those tools are exposed and require Pydantic AI approval.
             max_results: Maximum value for recognized pagination arguments.
             max_output_bytes: Maximum serialized UTF-8 bytes returned per call.
             max_output_lines: Maximum serialized lines returned per call.
             client: Prebuilt MCP client or transport. It owns authentication and
                 account selection; zone and execution policies still apply.
             trust_server_annotations: Treat a custom client's `readOnlyHint` as
-                authorization to run without mutation opt-in or approval.
+                authorization to run without approval and to stay visible
+                under `read_only=True`.
             id: Toolset identifier.
             include_instructions: Include remote MCP server instructions when
                 no account or zone scope is configured. `Cloudflare` uses the
@@ -594,7 +597,7 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
         if (
             resolved_server is CloudflareServer.API
             and (account_id is not None or zone_id is not None)
-            and allow_mutations
+            and not read_only
         ):
             raise UserError(
                 "Cloudflare's Code Mode `execute` tool accepts arbitrary JavaScript, so this client cannot enforce "
@@ -636,7 +639,7 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
         self.server = resolved_server
         self.account_id = account_id
         self.zone_id = zone_id
-        self.allow_mutations = allow_mutations
+        self.read_only = read_only
         self.max_results = max_results
         self.max_output_bytes = max_output_bytes
         self.max_output_lines = max_output_lines
@@ -659,7 +662,7 @@ class CloudflareToolset(MCPToolset[AgentDepsT]):
             official_client=self._official_client,
             trust_server_annotations=self._trust_server_annotations,
         )
-        if not read_only and not self.allow_mutations:
+        if not read_only and self.read_only:
             return False
         api_safe = _is_api_safe_tool(self.server, tool, official_client=self._official_client)
         if self.account_id is not None and not api_safe and not _scope_keys(tool, _ACCOUNT_KEYS):

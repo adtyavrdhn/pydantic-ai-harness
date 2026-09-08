@@ -56,15 +56,16 @@ print(result.output)
 - Inspect the Cloudflare API schema with `CloudflareServer.API`.
 - Read data from focused servers for DNS analytics, Workers, observability, containers, Logpush, AI Gateway,
   audit logs, DEX, CASB, Developer Stack, browser tasks, the Cloudflare blog, and Demo Day.
-- Run create, update, or delete operations after `allow_mutations=True` exposes them and the application approves each
-  call.
+- Run create, update, or delete operations once the application approves each call. Set `read_only=True` to hide
+  these tools.
 
 ## Operational constraints
 
 - One `Cloudflare` instance selects one `CloudflareServer`. The default is the public documentation server.
-- Focused servers expose only tools marked read-only by Cloudflare unless `allow_mutations=True`. The official API
-  server exposes only `docs` and its network-isolated OpenAPI `search` tool by default. MCP safety annotations state
-  server intent, so credentials should still have only the permissions required for the selected server.
+- Every tool of the selected server is exposed by default. `read_only=True` keeps only the tools Cloudflare marks
+  read-only; on the official API server those are `docs` and its network-isolated OpenAPI `search` tool. MCP safety
+  annotations state server intent, so credentials should still have only the permissions required for the selected
+  server.
 - Mutation-capable tools raise Pydantic AI's standard deferred approval request before the MCP request runs. Configured
   account and zone IDs are required in the mutation tool call so the approval shows the exact target; these IDs enter
   model context, but credentials do not. Resume with `DeferredToolResults` after the application or user approves.
@@ -72,8 +73,8 @@ print(result.output)
   calls. Use it with a multi-account user credential. If the token already pins one account, omit `account_id`; the
   token is the account boundary. `zone_id` applies the same policy to explicit zone arguments. Scoped instances do not
   forward remote server instructions because those instructions can include other accessible account IDs.
-- Code Mode `execute` accepts arbitrary JavaScript, so `CloudflareServer.API` cannot combine mutation access with an
-  enforced `account_id` or `zone_id`. Use a focused server when either boundary is required.
+- Code Mode `execute` accepts arbitrary JavaScript, so `CloudflareServer.API` accepts `account_id` or `zone_id` only
+  with `read_only=True`. Use a focused server when either boundary is required together with changes.
 - `max_results` bounds recognized top-level pagination fields and nested fields when their parent object is supplied.
   `max_output_bytes` and `max_output_lines` bound each model-facing result. Oversized structured or binary results are
   replaced rather than returned partially.
