@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -69,7 +68,7 @@ class TestGitHub:
         module = _load_example()
         agent = module.build_agent(
             FunctionModel(model_fn),
-            github=GitHub(repository='pydantic/pydantic-ai', client=github_server),
+            github=GitHub(repository='pydantic/pydantic-ai', client=github_server, read_only=True),
         )
         result = await agent.run('Review pull request #123')
         assert result.output == 'reviewed'
@@ -80,9 +79,9 @@ class TestGitHub:
             )
         ]
 
-    def test_defaults_are_repository_scoped_and_read_only(self, github_server: FastMCP):
+    def test_defaults_are_repository_scoped_with_approval_gated_writes(self, github_server: FastMCP):
         capability = GitHub(repository='pydantic/pydantic-ai', client=github_server)
-        assert capability.access == 'read'
+        assert capability.read_only is False
         assert capability.require_approval is True
         assert capability.id == 'github-repository-8-pydantic-pydantic-ai'
 
@@ -120,17 +119,12 @@ class TestGitHub:
         with pytest.raises(UserError, match='organization login'):
             GitHub(organization=organization)
 
-    def test_rejects_invalid_access_mode(self):
-        arguments = json.loads('{"repository": "pydantic/pydantic-ai", "access": "admin"}')
-        with pytest.raises(UserError, match='`access` must be'):
-            GitHub(**arguments)
-
     def test_instructions_can_be_disabled(self, github_server: FastMCP):
-        capability = GitHub(organization='pydantic', access='write', include_instructions=False, client=github_server)
+        capability = GitHub(organization='pydantic', include_instructions=False, client=github_server)
         assert capability.get_instructions() is None
 
     def test_write_instructions_describe_approval(self, github_server: FastMCP):
-        capability = GitHub(organization='pydantic', access='write', client=github_server)
+        capability = GitHub(organization='pydantic', client=github_server)
         instructions = capability.get_instructions()
         assert instructions is not None
         assert 'organization `pydantic`' in instructions
@@ -144,13 +138,15 @@ class TestGitHub:
         assert 'include its GitHub URL when the tool returns one' in instructions
         assert 'report that without changing scope' in instructions
 
-    def test_read_instructions_do_not_suggest_mutations(self, github_server: FastMCP):
-        instructions = GitHub(repository='pydantic/pydantic-ai', client=github_server).get_instructions()
+    def test_read_only_instructions_do_not_suggest_mutations(self, github_server: FastMCP):
+        instructions = GitHub(
+            repository='pydantic/pydantic-ai', read_only=True, client=github_server
+        ).get_instructions()
         assert instructions is not None
         assert 'Before updating an existing resource' not in instructions
         assert 'caller approval' not in instructions
 
-    async def test_agent_exposes_only_scoped_read_tools(self, github_server: FastMCP):
+    async def test_read_only_agent_exposes_only_scoped_read_tools(self, github_server: FastMCP):
         seen_tools: list[set[str]] = []
 
         def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -158,7 +154,8 @@ class TestGitHub:
             return ModelResponse(parts=[TextPart('done')])
 
         agent = Agent(
-            FunctionModel(model_fn), capabilities=[GitHub(repository='pydantic/pydantic-ai', client=github_server)]
+            FunctionModel(model_fn),
+            capabilities=[GitHub(repository='pydantic/pydantic-ai', read_only=True, client=github_server)],
         )
         await agent.run('Read pyproject.toml')
         assert seen_tools == [
@@ -173,7 +170,7 @@ class TestGitHub:
             }
         ]
 
-    async def test_agent_instructions_name_repository_and_access(self, github_server: FastMCP):
+    async def test_read_only_agent_instructions_name_repository_and_access(self, github_server: FastMCP):
         seen: list[str] = []
 
         def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -182,7 +179,7 @@ class TestGitHub:
 
         agent = Agent(
             FunctionModel(model_fn),
-            capabilities=[GitHub(repository='pydantic/pydantic-ai', client=github_server)],
+            capabilities=[GitHub(repository='pydantic/pydantic-ai', read_only=True, client=github_server)],
         )
         await agent.run('Inspect the repository')
         assert 'pydantic/pydantic-ai' in seen[0]
@@ -207,7 +204,7 @@ class TestGitHub:
         agent = Agent(
             FunctionModel(model_fn),
             output_type=[str, DeferredToolRequests],
-            capabilities=[GitHub(repository='pydantic/pydantic-ai', access='write', client=github_server)],
+            capabilities=[GitHub(repository='pydantic/pydantic-ai', client=github_server)],
         )
         result = await agent.run('Create an issue')
         assert isinstance(result.output, DeferredToolRequests)
@@ -253,7 +250,7 @@ class TestGitHub:
         agent = Agent(
             FunctionModel(model_fn),
             output_type=[str, DeferredToolRequests],
-            capabilities=[GitHub(repository='pydantic/pydantic-ai', access='write', client=github_server)],
+            capabilities=[GitHub(repository='pydantic/pydantic-ai', client=github_server)],
         )
         result = await agent.run('Create an issue')
         resumed = await agent.run(
@@ -287,7 +284,7 @@ class TestGitHub:
         agent = Agent(
             FunctionModel(model_fn),
             output_type=[str, DeferredToolRequests],
-            capabilities=[GitHub(repository='pydantic/pydantic-ai', access='write', client=github_server)],
+            capabilities=[GitHub(repository='pydantic/pydantic-ai', client=github_server)],
         )
         pending = await agent.run('Create two issues')
         assert isinstance(pending.output, DeferredToolRequests)
@@ -316,8 +313,8 @@ class TestGitHub:
         agent = Agent(
             FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart('done')])),
             capabilities=[
-                GitHub(repository='pydantic/pydantic-ai', client=github_server),
-                GitHub(repository='pydantic/pydantic-core', access='write', client=github_server),
+                GitHub(repository='pydantic/pydantic-ai', client=github_server, read_only=True),
+                GitHub(repository='pydantic/pydantic-core', client=github_server),
             ],
         )
         with pytest.raises(UserError, match='conflicts with existing tool'):
@@ -341,7 +338,7 @@ class TestGitHub:
         agent = Agent(
             FunctionModel(model_fn),
             output_type=[str, DeferredToolRequests],
-            capabilities=[GitHub(repository='pydantic/pydantic-ai', access='write', client=github_server)],
+            capabilities=[GitHub(repository='pydantic/pydantic-ai', client=github_server)],
         )
         result = await agent.run('Create an issue')
         assert result.output == 'scope rejected'
@@ -366,13 +363,13 @@ class TestGitHubToolset:
         assert transport.url == 'https://api.githubcopilot.com/mcp/'
         assert transport.auth is not None
         assert transport.headers['X-MCP-Toolsets'] == 'repos,issues,pull_requests'
-        assert transport.headers['X-MCP-Readonly'] == 'true'
+        assert transport.headers['X-MCP-Readonly'] == 'false'
 
-    def test_write_access_disables_remote_read_only_header(self):
-        toolset = GitHub[None](repository='pydantic/pydantic-ai', access='write', auth='token').get_toolset()
+    def test_read_only_enables_remote_read_only_header(self):
+        toolset = GitHub[None](repository='pydantic/pydantic-ai', read_only=True, auth='token').get_toolset()
         transport = toolset.client.transport
         assert isinstance(transport, StreamableHttpTransport)
-        assert transport.headers['X-MCP-Readonly'] == 'false'
+        assert transport.headers['X-MCP-Readonly'] == 'true'
 
     @pytest.mark.parametrize(
         ('auth', 'headers'),
@@ -396,7 +393,7 @@ class TestGitHubToolset:
         assert transport.headers['X-Caller'] in {'one', 'two'}
         assert transport.headers.get('Authorization') == headers.get('Authorization')
         assert transport.headers['X-MCP-Toolsets'] == 'issues'
-        assert transport.headers['X-MCP-Readonly'] == 'true'
+        assert transport.headers['X-MCP-Readonly'] == 'false'
 
     def test_custom_client_owns_transport_and_auth(self, github_server: FastMCP):
         toolset = GitHub[None](repository='pydantic/pydantic-ai', client=github_server).get_toolset()
@@ -645,7 +642,7 @@ class TestGitHubToolset:
     async def test_organization_scope_allows_org_tools_and_rejects_other_org(
         self, github_server: FastMCP, run_context: RunContext[None]
     ):
-        toolset = GitHub[None](organization='pydantic', client=github_server).get_toolset()
+        toolset = GitHub[None](organization='pydantic', read_only=True, client=github_server).get_toolset()
         async with toolset:
             tools = await toolset.get_tools(run_context)
             assert set(tools) == {
@@ -715,7 +712,6 @@ class TestGitHubToolset:
         toolset = GitHub[None](
             repository=repository,
             organization=organization,
-            access='write',
             client=github_server,
         ).get_toolset()
         async with toolset:
@@ -771,7 +767,7 @@ class TestGitHubToolset:
         run_context: RunContext[None],
     ):
         toolset = GitHub[None](
-            repository='pydantic/pydantic-ai', access='write', require_approval=False, client=github_server
+            repository='pydantic/pydantic-ai', require_approval=False, client=github_server
         ).get_toolset()
         async with toolset:
             tools = await toolset.get_tools(run_context)
@@ -782,7 +778,7 @@ class TestGitHubToolset:
         self, github_server: FastMCP, run_context: RunContext[None]
     ):
         toolset = GitHub[None](
-            repository='pydantic/pydantic-ai', access='write', require_approval=False, client=github_server
+            repository='pydantic/pydantic-ai', require_approval=False, client=github_server
         ).get_toolset()
         async with toolset:
             tools = await toolset.get_tools(run_context)
@@ -809,7 +805,7 @@ class TestGitHubToolset:
         run_context: RunContext[None],
     ):
         toolset = GitHub[None](
-            repository='pydantic/pydantic-ai', access='write', require_approval=False, client=github_server
+            repository='pydantic/pydantic-ai', require_approval=False, client=github_server
         ).get_toolset()
         async with toolset:
             tools = await toolset.get_tools(run_context)
@@ -844,7 +840,7 @@ class TestGitHubToolset:
 
     async def test_parent_target_fields_must_be_paired(self, github_server: FastMCP, run_context: RunContext[None]):
         toolset = GitHub[None](
-            repository='pydantic/pydantic-ai', access='write', require_approval=False, client=github_server
+            repository='pydantic/pydantic-ai', require_approval=False, client=github_server
         ).get_toolset()
         async with toolset:
             tools = await toolset.get_tools(run_context)
@@ -878,7 +874,7 @@ class TestGitHubToolset:
         assert 'org:pydantic' in str(result)
 
     async def test_write_mode_does_not_defer_read_tool(self, github_server: FastMCP, run_context: RunContext[None]):
-        toolset = GitHub[None](repository='pydantic/pydantic-ai', access='write', client=github_server).get_toolset()
+        toolset = GitHub[None](repository='pydantic/pydantic-ai', client=github_server).get_toolset()
         async with toolset:
             tools = await toolset.get_tools(run_context)
             result = await toolset.call_tool(
@@ -892,13 +888,11 @@ class TestGitHubToolset:
     async def test_missing_read_only_annotation_is_treated_as_mutating(
         self, github_server: FastMCP, run_context: RunContext[None]
     ):
-        read_tools = GitHub[None](repository='pydantic/pydantic-ai', client=github_server).get_toolset()
+        read_tools = GitHub[None](repository='pydantic/pydantic-ai', read_only=True, client=github_server).get_toolset()
         async with read_tools:
             assert 'unclassified_tool' not in await read_tools.get_tools(run_context)
 
-        write_tools = GitHub[None](
-            repository='pydantic/pydantic-ai', access='write', client=github_server
-        ).get_toolset()
+        write_tools = GitHub[None](repository='pydantic/pydantic-ai', client=github_server).get_toolset()
         async with write_tools:
             tools = await write_tools.get_tools(run_context)
             with pytest.raises(ApprovalRequired):
@@ -912,7 +906,6 @@ class TestGitHubToolset:
     async def test_approval_can_be_disabled_explicitly(self, github_server: FastMCP, run_context: RunContext[None]):
         toolset = GitHub[None](
             repository='pydantic/pydantic-ai',
-            access='write',
             require_approval=False,
             client=github_server,
         ).get_toolset()

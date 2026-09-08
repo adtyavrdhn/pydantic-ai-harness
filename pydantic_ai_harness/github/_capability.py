@@ -11,10 +11,8 @@ from pydantic_ai.tools import AgentDepsT
 
 from pydantic_ai_harness.github._toolset import (
     GITHUB_MCP_URL,
-    AccessMode,
     GitHubToolset,
     MCPToolsetClient,
-    validate_access,
     validate_scope,
 )
 
@@ -23,7 +21,10 @@ _DEFAULT_DESCRIPTION = "Read or change GitHub repositories through GitHub's offi
 
 @dataclass
 class GitHub(AbstractCapability[AgentDepsT]):
-    """Scoped access to GitHub through GitHub's official hosted MCP server."""
+    """Read and change one GitHub repository or organization through GitHub's official hosted MCP server.
+
+    Tools that change GitHub require approval by default; `read_only=True` hides them.
+    """
 
     repository: str | None = None
     """One repository in `owner/repo` form. Mutually exclusive with `organization`."""
@@ -33,11 +34,13 @@ class GitHub(AbstractCapability[AgentDepsT]):
 
     _: KW_ONLY
 
-    access: AccessMode = 'read'
-    """`read` exposes only GitHub tools marked read-only; `write` also exposes mutations."""
+    read_only: bool = False
+    """Expose only the tools GitHub marks read-only, dropping the ones that create or change branches, files,
+    issues, and pull requests. The built-in transport also sends GitHub's `X-MCP-Readonly: true` header.
+    """
 
     require_approval: bool = True
-    """In write mode, require Pydantic AI approval for every tool not marked read-only."""
+    """Require Pydantic AI approval for every tool GitHub does not mark read-only."""
 
     toolsets: Sequence[str] = ('repos', 'issues', 'pull_requests')
     """GitHub MCP toolsets to request from the hosted server."""
@@ -55,7 +58,7 @@ class GitHub(AbstractCapability[AgentDepsT]):
     """Prebuilt MCP client or in-process server that owns its transport and authentication."""
 
     include_instructions: bool = True
-    """Tell the model which repository or organization and access mode it may use."""
+    """Tell the model which repository or organization it may use and whether it may change it."""
 
     id: str | None = None
     """Stable capability ID. By default it is derived from the configured scope."""
@@ -65,7 +68,6 @@ class GitHub(AbstractCapability[AgentDepsT]):
 
     def __post_init__(self) -> None:
         owner, repo = validate_scope(self.repository, self.organization)
-        validate_access(self.access)
         if self.id is None:
             owner = owner.casefold()
             repo = repo.casefold() if repo is not None else None
@@ -78,7 +80,7 @@ class GitHub(AbstractCapability[AgentDepsT]):
         return GitHubToolset[AgentDepsT](
             repository=self.repository,
             organization=self.organization,
-            access=self.access,
+            read_only=self.read_only,
             require_approval=self.require_approval,
             toolsets=self.toolsets,
             url=self.url,
@@ -94,16 +96,16 @@ class GitHub(AbstractCapability[AgentDepsT]):
             return None
         target_kind = 'repository' if self.repository is not None else 'organization'
         target = self.repository or self.organization
-        access = 'read-only' if self.access == 'read' else 'read and write'
+        access = 'read-only' if self.read_only else 'read and write'
         approval = (
             'GitHub mutations require caller approval before execution.'
-            if self.access == 'write' and self.require_approval
+            if not self.read_only and self.require_approval
             else ''
         )
         mutation_guidance = (
             'Before updating an existing resource, read its current state and use exact IDs or SHAs when required. '
             'If a mutation may have succeeded despite an error, check GitHub for the intended result before retrying. '
-            if self.access == 'write'
+            if not self.read_only
             else ''
         )
         return (

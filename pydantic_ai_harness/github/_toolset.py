@@ -54,13 +54,10 @@ except ImportError as _import_error:  # pragma: no cover
         'MCP support is required for the GitHub capability. Install it with: uv add "pydantic-ai-slim[mcp]"'
     ) from _import_error
 
-__all__ = ['GITHUB_MCP_URL', 'AccessMode', 'GitHubToolset', 'MCPToolsetClient']
+__all__ = ['GITHUB_MCP_URL', 'GitHubToolset', 'MCPToolsetClient']
 
 GITHUB_MCP_URL = 'https://api.githubcopilot.com/mcp/'
 """GitHub's official remote MCP endpoint."""
-
-AccessMode = Literal['read', 'write']
-"""Whether GitHub exposes read tools only or also exposes mutation tools."""
 
 _DEFAULT_TOOLSETS = ('repos', 'issues', 'pull_requests')
 _SUPPORTED_TOOLSETS = frozenset(_DEFAULT_TOOLSETS)
@@ -91,12 +88,6 @@ def validate_scope(repository: str | None, organization: str | None) -> tuple[st
     if not _SCOPE_COMPONENT_RE.fullmatch(organization):
         raise UserError('`organization` must be one GitHub organization login.')
     return organization, None
-
-
-def validate_access(access: str) -> AccessMode:
-    if access not in ('read', 'write'):
-        raise UserError('`access` must be `read` or `write`.')
-    return access
 
 
 def _validate_url(url: str) -> None:
@@ -139,14 +130,14 @@ def _is_read_only(tool: ToolsetTool[AgentDepsT]) -> bool:
 
 
 class GitHubToolset(MCPToolset[AgentDepsT]):
-    """GitHub's hosted MCP tools with access, approval, and target-scope policy."""
+    """GitHub's hosted MCP tools with read-only, approval, and target-scope policy."""
 
     def __init__(
         self,
         *,
         repository: str | None = None,
         organization: str | None = None,
-        access: AccessMode = 'read',
+        read_only: bool = False,
         require_approval: bool = True,
         toolsets: Sequence[str] = _DEFAULT_TOOLSETS,
         url: str = GITHUB_MCP_URL,
@@ -156,17 +147,16 @@ class GitHubToolset(MCPToolset[AgentDepsT]):
         id: str | None = None,
     ) -> None:
         owner, repo = validate_scope(repository, organization)
-        access = validate_access(access)
         resolved_toolsets = _validate_toolsets(toolsets)
         supplied_headers = dict(headers or {})
         reserved = sorted(name for name in supplied_headers if name.lower() in _RESERVED_HEADERS)
         if reserved:
-            raise UserError(f'GitHub manages the {reserved[0]!r} header from its access and toolset policy.')
+            raise UserError(f'GitHub manages the {reserved[0]!r} header from its read-only and toolset policy.')
         if auth is not None and any(name.lower() == 'authorization' for name in supplied_headers):
             raise UserError('Pass GitHub authentication through either `auth` or an `Authorization` header, not both.')
         self.repository = repository
         self.organization = organization
-        self.access = access
+        self.read_only = read_only
         self.require_approval = require_approval
         self._owner = owner
         self._repo = repo
@@ -187,7 +177,7 @@ class GitHubToolset(MCPToolset[AgentDepsT]):
                     'GitHub remote MCP authentication is required through `auth` or an `Authorization` header.'
                 )
             supplied_headers['X-MCP-Toolsets'] = ','.join(resolved_toolsets)
-            supplied_headers['X-MCP-Readonly'] = 'true' if access == 'read' else 'false'
+            supplied_headers['X-MCP-Readonly'] = 'true' if read_only else 'false'
             super().__init__(url, id=id, auth=auth, headers=supplied_headers)
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
@@ -195,7 +185,7 @@ class GitHubToolset(MCPToolset[AgentDepsT]):
         return {
             name: tool
             for name, tool in tools.items()
-            if self._tool_matches_scope(tool) and (self.access == 'write' or _is_read_only(tool))
+            if self._tool_matches_scope(tool) and (not self.read_only or _is_read_only(tool))
         }
 
     def _tool_matches_scope(self, tool: ToolsetTool[AgentDepsT]) -> bool:
@@ -223,7 +213,7 @@ class GitHubToolset(MCPToolset[AgentDepsT]):
         tool: ToolsetTool[AgentDepsT],
     ) -> object:
         scoped_args = self._scope_args(name, tool_args)
-        if self.access == 'write' and self.require_approval and not _is_read_only(tool) and not ctx.tool_call_approved:
+        if not self.read_only and self.require_approval and not _is_read_only(tool) and not ctx.tool_call_approved:
             raise ApprovalRequired
         return await super().call_tool(name, scoped_args, ctx, tool)
 

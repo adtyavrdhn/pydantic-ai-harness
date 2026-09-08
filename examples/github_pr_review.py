@@ -22,6 +22,7 @@ def build_agent(model: Model | str = DEFAULT_MODEL, *, github: GitHub[None] | No
         github = GitHub[None](
             repository=os.environ['GITHUB_REPOSITORY'],
             auth=os.environ['GITHUB_TOKEN'],
+            read_only=True,
             toolsets=('repos', 'pull_requests'),
         )
     return Agent(

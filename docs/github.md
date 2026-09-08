@@ -1,6 +1,6 @@
 ---
 title: GitHub
-description: Give an agent scoped access to GitHub's hosted MCP tools with read-only defaults and approval-gated writes.
+description: Give an agent scoped access to GitHub's hosted MCP tools with approval-gated writes and an opt-in read-only mode.
 ---
 
 # GitHub
@@ -49,6 +49,7 @@ agent = Agent(
         GitHub(
             repository=os.environ['GITHUB_REPOSITORY'],
             auth=os.environ['GITHUB_TOKEN'],
+            read_only=True,
             toolsets=('repos', 'pull_requests'),
         )
     ],
@@ -65,18 +66,19 @@ The repository also includes this as [`examples/github_pr_review.py`](../example
 - Read files, commits, branches, releases, issues, and pull requests.
 - Search code, commits, issues, and pull requests within the configured scope.
 - Review a pull request and cite relevant files.
-- With write access, create branches; create or update issues, files, and pull requests.
+- Create branches; create or update issues, files, and pull requests. Each change waits for approval.
 
 ## Operational constraints
 
 - Pass exactly one of `repository='owner/repo'` or `organization='owner'`. Organization scope permits repository tools
   only when the repository owner matches that organization.
-- `access='read'` is the default. The built-in remote transport sends GitHub's `X-MCP-Readonly: true` header, and the
-  integration also hides tools without an explicit true MCP `readOnlyHint`.
-- Set `access='write'` to expose mutations and configure the agent with
-  `output_type=[str, DeferredToolRequests]`. Mutations then return `DeferredToolRequests` until the caller approves or
+- Tools that change GitHub are exposed by default and require approval. Configure the agent with
+  `output_type=[str, DeferredToolRequests]`; mutations then return `DeferredToolRequests` until the caller approves or
   denies each tool-call ID and resumes with `DeferredToolResults`. Set `require_approval=False` only if the application
   enforces an equivalent approval policy.
+- Set `read_only=True` to expose only the tools GitHub marks read-only. The built-in remote transport then sends
+  GitHub's `X-MCP-Readonly: true` header, and the integration also hides tools without an explicit true MCP
+  `readOnlyHint`.
 - Supported `toolsets` are `repos`, `issues`, and `pull_requests`. Searches containing the uppercase token `OR`,
   including quoted literal uses, are rejected. `repo:`, `org:`, or `user:` qualifiers that do not exactly match the
   configured scope are also rejected, even when they appear as literal text. Tools with an opaque secondary target are
