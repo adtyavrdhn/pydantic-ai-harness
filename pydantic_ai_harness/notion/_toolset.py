@@ -1,20 +1,4 @@
-"""Notion hosted MCP tool policy.
-
-Wire contract, verified 2026-09-05:
-
-- `https://mcp.notion.com/mcp` is Notion's actively maintained Streamable HTTP
-  endpoint. It requires interactive user OAuth and does not accept bearer tokens.
-- `notion-fetch` with `id="self"` returns the authenticated workspace and user,
-  including `current_tool_access` used to choose the available search tool.
-- Notion advertises both read and mutation tools. This module exposes every tool the
-  connection can use by default; `read_only=True` narrows it to the read tools
-  listed here.
-
-Sources: https://developers.notion.com/guides/mcp/get-started-with-mcp and
-https://developers.notion.com/guides/mcp/mcp-supported-tools. Re-check the endpoint,
-OAuth FAQ, `notion-fetch(self)` response, and supported tool list before changing this
-policy.
-"""
+"""Notion hosted MCP tool policy."""
 
 from __future__ import annotations
 
