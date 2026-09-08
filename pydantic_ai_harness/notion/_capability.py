@@ -13,6 +13,7 @@ from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai_harness._mcp import is_read_only
 
 try:
+    from fastmcp.client.auth import OAuth
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
 except ImportError as exc:  # pragma: no cover
     raise ImportError('Install Notion support with: uv add "pydantic-ai-harness[notion]"') from exc
@@ -42,10 +43,13 @@ class Notion(AbstractCapability[AgentDepsT]):
                 self.client, id=self.id or 'notion', include_instructions=self.include_instructions
             )
         else:
+            auth = self.auth if self.auth is not None else environ.get('NOTION_ACCESS_TOKEN', 'oauth')
+            if auth == 'oauth':
+                auth = OAuth(additional_client_metadata={'token_endpoint_auth_method': 'none'})
             toolset = MCPToolset(
                 'https://mcp.notion.com/mcp',
                 id=self.id or 'notion',
-                auth=self.auth if self.auth is not None else environ.get('NOTION_ACCESS_TOKEN', 'oauth'),
+                auth=auth,
                 headers=None,
                 include_instructions=self.include_instructions,
             )

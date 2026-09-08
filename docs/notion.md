@@ -10,7 +10,7 @@ Search and change Notion workspace content. `Notion` connects an agent to the pr
 uv add "pydantic-ai-harness[notion]" "pydantic-ai-slim[openai]"
 ```
 
-Set `NOTION_ACCESS_TOKEN` to a Notion OAuth access token, or pass `auth=...`. When neither is supplied, the connection starts browser OAuth. `auth` accepts an `httpx.Auth` for caller-managed authentication. See the [provider setup](https://developers.notion.com/guides/mcp/build-mcp-client).
+Set `NOTION_ACCESS_TOKEN` to a Notion OAuth access token, or pass `auth=...`. When neither is supplied, the connection starts browser OAuth with PKCE as a public client. `auth` accepts an `httpx.Auth` for caller-managed authentication. See the [provider setup](https://developers.notion.com/guides/mcp/build-mcp-client).
 
 ```python
 from pydantic_ai import Agent

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 from fastmcp.client.transports import StreamableHttpTransport
@@ -94,7 +96,32 @@ class TestNotion:
     def test_hosted_endpoint(self) -> None:
         assert transport(Notion(auth='token')).url == 'https://mcp.notion.com/mcp'
 
-    def test_oauth_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize('configured_auth', [None, 'oauth'])
+    async def test_oauth_registers_public_client(
+        self, monkeypatch: pytest.MonkeyPatch, configured_auth: str | None
+    ) -> None:
         monkeypatch.delenv('NOTION_ACCESS_TOKEN', raising=False)
         with pytest.warns(UserWarning, match='in-memory token storage'):
-            assert transport(Notion()).auth is not None
+            auth = transport(Notion(auth=configured_auth)).auth
+        assert isinstance(auth, httpx.Auth)
+        flow = auth.async_auth_flow(httpx.Request('POST', 'https://mcp.notion.com/mcp'))
+        try:
+            request = await anext(flow)
+            for status, metadata in [
+                (401, {}),
+                (200, {'resource': 'https://mcp.notion.com/mcp', 'authorization_servers': ['https://mcp.notion.com']}),
+                (
+                    200,
+                    {
+                        'issuer': 'https://mcp.notion.com',
+                        'authorization_endpoint': 'https://mcp.notion.com/authorize',
+                        'token_endpoint': 'https://mcp.notion.com/token',
+                        'registration_endpoint': 'https://mcp.notion.com/register',
+                        'response_types_supported': ['code'],
+                    },
+                ),
+            ]:
+                request = await flow.asend(httpx.Response(status, json=metadata, request=request))  # codespell:ignore
+            assert json.loads(request.content)['token_endpoint_auth_method'] == 'none'
+        finally:
+            await flow.aclose()
