@@ -1,45 +1,53 @@
 # Google Workspace
 
-Google Workspace lets an agent read and change a user's Gmail, Calendar, Drive, Docs, Sheets, Slides, Chat, and People data through Google's official remote MCP servers. The default exposes every tool Google publishes for the products you select, including the ones that send, change, and delete.
+Use Gmail, Calendar, Drive, and other Google Workspace tools. `GoogleWorkspace` connects an agent to the provider's hosted MCP server. By default it exposes the tools the server offers, including write tools. Provider credentials and server settings determine what those tools may access.
 
-[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/google_workspace/)
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
-> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](../../docs/index.md#version-policy).
-
-## Install
+## Install and connect
 
 ```bash
 uv add "pydantic-ai-harness[google-workspace]" "pydantic-ai-slim[openai]"
 ```
 
-## Credentials
-
-Google's servers authenticate with a Google OAuth bearer token. They do not support dynamic client registration, so your application runs the OAuth flow and owns the token. [Google's Workspace MCP guide](https://developers.google.com/workspace/guides/configure-mcp-servers) covers enabling each product and lists the scopes each tool accepts.
-
-Set `GOOGLE_ACCESS_TOKEN` to the token, or pass it as `auth=`. A spec file cannot carry the token: an agent defined in YAML reads it from `GOOGLE_ACCESS_TOKEN`. Set `OPENAI_API_KEY` for the example model.
-
-## Example
+Set `GOOGLE_ACCESS_TOKEN` to a Google OAuth access token, or pass `auth=...`. `auth` accepts an `httpx.Auth` for caller-managed authentication. See the [provider setup](https://developers.google.com/workspace/guides/configure-mcp-servers).
 
 ```python
-import asyncio
-
 from pydantic_ai import Agent
 from pydantic_ai_harness.google_workspace import GoogleWorkspace
 
 agent = Agent('openai:gpt-5.6-sol', capabilities=[GoogleWorkspace(services=['gmail', 'calendar'])])
-
-
-async def main() -> None:
-    result = await agent.run('Summarize unread project mail and list my meetings today.')
-    print(result.output)
-
-
-asyncio.run(main())
+result = agent.run_sync('Summarize the resources I can access')
+print(result.output)
 ```
 
-Tool names are prefixed by product, so the agent sees `gmail_search_threads` and `calendar_list_events`.
+## Provider settings
 
-## Operational constraints
+`services` selects one product or a list: `gmail`, `drive`, `docs`, `sheets`, `slides`, `calendar`, `chat`, or `people`. Each product gets its own MCP connection and tool prefix, such as `gmail_search_threads`. Register a Google OAuth client and request the scopes needed for the selected products; Google does not support automatic client registration. `auth` can supply a refresh-capable `httpx.Auth`.
 
-- The token's scopes are the real boundary: issue a read-scoped token for an agent that should only read. `read_only=True` narrows further, to the tools Google marks read-only.
-- Nothing pauses before a write. To require confirmation, wrap the toolset with the [approval recipe](../stackone/README.md#require-approval).
+## Tool selection and approval
+
+`read_only=True` keeps only tools explicitly marked `readOnlyHint: true`; unmarked tools are omitted. This can leave no tools when a server does not annotate its read operations. Credentials remain the access-control boundary.
+
+For application-level filtering or approval, compose the existing [toolset wrappers](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/). For example, this requires approval before every tool call:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.messages import DeferredToolRequests
+from pydantic_ai_harness.google_workspace import GoogleWorkspace
+
+capability = GoogleWorkspace(services=['gmail', 'calendar'])
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    toolsets=[capability.get_toolset().approval_required()],
+    output_type=[str, DeferredToolRequests],
+)
+```
+
+Handle the resulting requests using the [deferred tools workflow](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/). Output limits can be composed with [Tool Output Limits](https://pydantic.dev/docs/ai/harness/tool-output-limits/).
+
+## Connection customization
+
+`include_instructions` controls whether server instructions reach the model. Keep authenticated connections separate for different users. To combine connections with overlapping tool names, give them distinct IDs and compose [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
+
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/google_workspace/)

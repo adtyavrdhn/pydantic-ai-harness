@@ -34,7 +34,7 @@ _MCP_URLS: dict[str, str] = {
     'slides': 'https://slidesmcp.googleapis.com/mcp/v1',
     'calendar': 'https://calendarmcp.googleapis.com/mcp/v1',
     'chat': 'https://chatmcp.googleapis.com/mcp/v1',
-    'people': 'https://people.googleapis.com/mcp/v1',  # no `peoplemcp` host; verified, not a typo
+    'people': 'https://people.googleapis.com/mcp/v1',
 }
 
 _DEFAULT_DESCRIPTION = 'Use Gmail, Calendar, Drive, and the other Google Workspace products.'
@@ -51,7 +51,6 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
     services: GoogleWorkspaceService | Sequence[GoogleWorkspaceService]
     """Workspace products to expose, such as `'gmail'` or `['gmail', 'calendar']`."""
 
-    # Stays positional: the short agent-spec form, `GoogleWorkspace: gmail`, is passed positionally.
     _: KW_ONLY
 
     description: str | None = _DEFAULT_DESCRIPTION
@@ -62,6 +61,9 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
 
     read_only: bool = False
     """Expose only the tools Google marks read-only."""
+
+    include_instructions: bool = True
+    """Forward the server instructions to the agent."""
 
     def __post_init__(self) -> None:
         """Normalize `services` to a tuple of products that have an endpoint."""
@@ -74,34 +76,19 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build one product-prefixed MCP connection per selected service."""
-        auth = self.auth or environ.get('GOOGLE_ACCESS_TOKEN')
+        auth = self.auth if self.auth is not None else environ.get('GOOGLE_ACCESS_TOKEN')
         if not auth:
             raise UserError('Google Workspace needs a token: pass auth= or set GOOGLE_ACCESS_TOKEN.')
         prefix = self.id or 'google-workspace'
         toolset: AbstractToolset[AgentDepsT] = CombinedToolset(
             [
                 MCPToolset[AgentDepsT](
-                    _MCP_URLS[service], id=f'{prefix}-{service}', auth=auth, include_instructions=True
+                    _MCP_URLS[service],
+                    id=f'{prefix}-{service}',
+                    auth=auth,
+                    include_instructions=self.include_instructions,
                 ).prefixed(service)
                 for service in self.services
             ]
         )
         return toolset.filtered(lambda _ctx, tool_def: is_read_only(tool_def)) if self.read_only else toolset
-
-    @classmethod
-    def from_spec(
-        cls,
-        services: GoogleWorkspaceService | Sequence[GoogleWorkspaceService],
-        *,
-        id: str | None = None,
-        description: str | None = _DEFAULT_DESCRIPTION,
-        defer_loading: bool = False,
-        read_only: bool = False,
-    ) -> GoogleWorkspace[AgentDepsT]:
-        """Construct from serializable options; the token stays out of the spec schema."""
-        return cls(services, id=id, description=description, defer_loading=defer_loading, read_only=read_only)
-
-    @classmethod
-    def get_serialization_name(cls) -> str:
-        """Return the agent-spec capability name."""
-        return 'GoogleWorkspace'

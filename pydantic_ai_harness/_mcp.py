@@ -1,18 +1,12 @@
-"""Helpers shared by capabilities that wrap hosted MCP servers."""
-
-from __future__ import annotations
-
-from collections.abc import Mapping
-from typing import Any
+"""Shared MCP annotation selection."""
 
 from pydantic_ai.tools import ToolDefinition
 
 
-def is_read_only(tool_def: ToolDefinition) -> bool:
-    """Whether the server marked the tool `readOnlyHint`; an unannotated tool counts as a write.
-
-    `MCPToolset` copies each tool's MCP annotations into `tool_def.metadata['annotations']`.
-    """
-    metadata: dict[str, Any] = tool_def.metadata or {}
-    annotations = metadata.get('annotations')
-    return isinstance(annotations, Mapping) and annotations.get('readOnlyHint') is True  # pyright: ignore[reportUnknownMemberType]
+def is_read_only(tool: ToolDefinition) -> bool:
+    """Whether the server explicitly marks a tool read-only."""
+    match (tool.metadata or {}).get('annotations'):
+        case {'readOnlyHint': True}:
+            return True
+        case _:
+            return False
