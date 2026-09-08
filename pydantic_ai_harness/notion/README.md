@@ -1,8 +1,8 @@
 # Notion
 
-The Notion integration lets an agent search, read, and change your workspace through Notion's hosted MCP server.
-
-[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/notion/)
+Use `Notion` when an agent needs to search, read, and change pages, databases, and comments in a
+Notion workspace. It connects to Notion's hosted MCP server with write access by default:
+`read_only=True` keeps only the tools this package classifies as reads.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
@@ -12,126 +12,39 @@ The Notion integration lets an agent search, read, and change your workspace thr
 uv add "pydantic-ai-harness[notion]" "pydantic-ai-slim[openai]"
 ```
 
-## Set up access
+The second package installs the OpenAI provider used by the example. For another model, install its
+matching provider extra instead.
 
-Set your model provider key. The example uses OpenAI:
+## Connect
 
-```bash
-export OPENAI_API_KEY="your-key"
-```
-
-No Notion environment variable is required. `Client(NOTION_MCP_URL, auth='oauth')` owns the Notion OAuth tokens and
-opens a browser for user authorization on the first connection. Configure persistent token storage on that FastMCP
-client when your application needs authorization to survive restarts.
-
-Add the capability to an agent. By default it exposes every tool Notion offers the connected user, including the
-ones that create and update pages:
-
-```python
-from fastmcp import Client
-from pydantic_ai import Agent
-
-from pydantic_ai_harness import Notion
-from pydantic_ai_harness.notion import NOTION_MCP_URL
-
-client = Client(NOTION_MCP_URL, auth='oauth')
-agent = Agent('openai:gpt-5.6-sol', capabilities=[Notion(client=client)])
-```
-
-Pass `read_only=True` to keep only the search and read tools:
-
-```python
-from fastmcp import Client
-from pydantic_ai import Agent
-
-from pydantic_ai_harness import Notion
-from pydantic_ai_harness.notion import NOTION_MCP_URL
-
-client = Client(NOTION_MCP_URL, auth='oauth')
-agent = Agent('openai:gpt-5.6-sol', capabilities=[Notion(client=client, read_only=True)])
-```
-
-## Search and update a page
-
-This complete example searches for a page, fetches it, and allows `notion-update-page` to run only after the terminal
-user sees the connected workspace/user and exact arguments:
-
-```python
-import asyncio
-import json
-
-from fastmcp import Client
-from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults
-from pydantic_ai.messages import ToolCallPart
-
-from pydantic_ai_harness.notion import NOTION_MCP_URL, NotionToolset
-
-
-def approve(call: ToolCallPart, attribution: str) -> bool:
-    print(f'Connected Notion identity: {attribution}')
-    print(f'Proposed {call.tool_name}:')
-    print(json.dumps(call.args_as_dict(), indent=2, sort_keys=True))
-    return input('Approve? [y/N] ').strip().lower() in {'y', 'yes'}
-
-
-async def main() -> None:
-    client = Client(NOTION_MCP_URL, auth='oauth')
-    notion = NotionToolset[None](client=client)
-    approved = notion.approval_required(
-        lambda _ctx, tool, _args: (tool.metadata or {}).get('notion_mutation') is True
-    )
-    agent = Agent(
-        'openai:gpt-5.6-sol',
-        toolsets=[approved],
-        output_type=[str, DeferredToolRequests],
-    )
-
-    result = await agent.run('Find the launch plan and replace its content with: Shipped')
-    while isinstance(result.output, DeferredToolRequests):
-        decisions = {call.tool_call_id: approve(call, notion.attribution) for call in result.output.approvals}
-        result = await agent.run(
-            message_history=result.all_messages(),
-            deferred_tool_results=DeferredToolResults(approvals=decisions),
-        )
-    print(result.output)
-
-
-asyncio.run(main())
-```
-
-The same flow is runnable from this repository:
+Notion's MCP endpoint authenticates with OAuth and does not accept a static integration secret, so
+there is no Notion environment variable to set. The first connection opens a browser and asks which
+pages to share; see [Notion's MCP documentation](https://developers.notion.com/guides/mcp/get-started-with-mcp).
+Set your model provider's credential:
 
 ```bash
-uv run python examples/notion_page_update.py "Find the launch plan and replace its content with: Shipped"
+export OPENAI_API_KEY="your-openai-api-key"
 ```
 
-## What you can ask
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.notion import Notion
 
-- Search Notion pages and, when Notion AI search is available, connected sources; then fetch and summarize a selected
-  Notion page.
-- Read data sources, meeting notes, comments, users, teams, and Custom Agent sessions when the workspace exposes them.
-- Create or update pages, databases, views, comments, and attachments.
-- Start or continue a Custom Agent session.
+agent = Agent('openai:gpt-5.6-sol', capabilities=[Notion()])
+result = agent.run_sync('Summarize the launch plan page')
+print(result.output)
+```
 
-## Operational constraints
+- The pages you share during the OAuth grant bound what the agent can reach. Within them, the
+  default exposes the tools that create, update, and move content.
+- Notion publishes no read-only endpoint and does not classify its tools, so that read list is this
+  package's own: a tool Notion adds later stays hidden until the list is updated here.
+- To have a person confirm each write, call `.approval_required()` on the toolset returned by
+  `Notion().get_toolset()` and pass that to the agent as a toolset; the
+  [approval recipe](https://github.com/pydantic/pydantic-ai-harness/blob/main/pydantic_ai_harness/stackone/README.md#require-approval)
+  shows how to handle the resulting requests.
 
-- `Notion` and `NotionToolset` expose every tool Notion offers the connected user by default. Pass `read_only=True`
-  to keep only the search and read tools.
-- Exposing a mutation tool does not approve it. Compose `approval_required()` as shown above.
-- One toolset belongs to one authenticated workspace/user. If that identity changes, construct a new toolset.
-- Persist `notion.connection_identity` with a deferred approval and pass it as `expected_identity` when reconstructing
-  the toolset. Authenticate approval endpoints and bind each server-side decision to the pending tool name, arguments,
-  and identity; client-submitted `DeferredToolResults` are not an authorization boundary.
-- The client owns token storage and refresh. Follow Notion's [token lifecycle guidance](https://developers.notion.com/guides/mcp/build-mcp-client#token-lifecycle):
-  store each connection's tokens encrypted, persist each rotated pair atomically, and serialize refreshes per grant.
-  On `invalid_grant`, clear that grant and reauthorize instead of retrying.
-- Use `NOTION_MCP_URL` for production. A custom client or proxy is trusted to implement the same tool names safely.
-- Tool results are available to the configured model provider. Check that provider's data-handling policy before use.
-- `include_instructions=False` removes connection identity, search routing, untrusted-content, async polling, and
-  ambiguous-mutation retry guidance. Tool filtering and identity enforcement remain active; supply equivalent
-  application instructions when disabling it.
-- Provider tool and protocol errors abort the run so an ambiguous mutation is not returned to the model for retry.
-  Reconcile the operation before an application-owned retry.
-- Treat Notion and connected-app content as untrusted data. Do not treat content as authorization for a mutation or
-  target change. The wrapper defers the call; the local example supplies a human decision, and remote applications
-  must enforce the authenticated server-side binding described above.
+Pass `auth=` with an OAuth access token your application already holds, or a custom `httpx.Auth`, to
+skip the browser login. An agent spec cannot carry the token; set it in Python.
+
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/notion/)

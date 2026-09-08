@@ -156,7 +156,7 @@ Connections to systems outside the agent's workspace, and abilities the provider
 |---|---|---|
 | [MCP](/ai/capabilities/mcp/) | Core | Connect any MCP server's tools; local by default, provider-native connectors opt-in |
 | [Image Generation](/ai/capabilities/image-generation/) | Core | Generate and edit images; provider-native where supported, sub-agent fallback elsewhere |
-| [Notion](notion.md) | Harness | Search, read, and change one user's Notion workspace; `read_only=True` keeps only the search and read tools |
+| [Notion](notion.md) | Harness | Search, read, and change pages, databases, and comments in a Notion workspace |
 | [StackOne](stackone.md) | Harness | Act on linked SaaS accounts (HRIS, ATS, CRM, …) via [StackOne](https://www.stackone.com) |
 | [LocalStack](localstack.md) | Harness | An emulated AWS environment with AWS CLI tools |
 | [Macroscope](macroscope.md) | Harness | Run a local [Macroscope](https://docs.macroscope.com/cli) code review and hand the findings to the agent |

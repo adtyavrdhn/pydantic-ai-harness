@@ -1,570 +1,85 @@
-"""Behavioral tests for the Notion capability and toolset."""
+"""Tests for Notion through its public capability surface."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import pytest
-from fastmcp import Client
-from fastmcp.exceptions import ToolError
-from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults
-from pydantic_ai.exceptions import UserError
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
-from pydantic_ai.tools import RunContext
+from fastmcp.client.auth import BearerAuth
+from fastmcp.client.transports import StreamableHttpTransport
+from pydantic_ai import Agent
+from pydantic_ai.agent.spec import AgentSpec
+from pydantic_ai.mcp import MCPToolset
+from pydantic_ai.messages import ModelMessage, ToolReturnPart
+from pydantic_ai.models.test import TestModel
 
-from pydantic_ai_harness.notion import NOTION_MCP_URL, Notion, NotionToolset
-
-from ._support import NotionState
-
-if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
-
-pytestmark = pytest.mark.anyio
+from pydantic_ai_harness.notion import Notion
 
 
-class TestNotionToolset:
-    def test_official_endpoint_keeps_path_scoped_oauth_resource(self) -> None:
-        assert NOTION_MCP_URL == 'https://mcp.notion.com/mcp'
-
-    async def test_tool_discovery_manages_its_own_client_lifecycle(
-        self, notion_server: FastMCP, run_context: RunContext[None]
-    ) -> None:
-        client = Client(notion_server)
-        toolset = NotionToolset[None](client=client)
-
-        tools = await toolset.get_tools(run_context)
-
-        assert 'notion-fetch' in tools
-        assert 'workspace-1' in toolset.attribution
-        assert client.is_connected() is False
-
-    async def test_failed_direct_discovery_closes_client(
-        self, attribution_error_server: FastMCP, run_context: RunContext[None]
-    ) -> None:
-        client = Client(attribution_error_server)
-        toolset = NotionToolset[None](client=client)
-
-        with pytest.raises(UserError, match='attribution failed; no workspace tools were exposed'):
-            await toolset.get_tools(run_context)
-
-        assert client.is_connected() is False
-
-    async def test_default_surface_exposes_every_tool_the_connection_can_use(
-        self, notion_server: FastMCP, run_context: RunContext[None]
-    ) -> None:
-        toolset = NotionToolset[None](client=notion_server)
-        async with toolset:
-            tools = await toolset.get_tools(run_context)
-
-        assert set(tools) == {
-            'notion-ai-search',
-            'notion-create-database',
-            'notion-fetch',
-            'notion-get-users',
-            'notion-query-meeting-notes',
-            'notion-search',
-            'notion-update-page',
-        }
-        assert all((tool.tool_def.metadata or {})['notion'] is True for tool in tools.values())
-        assert all('workspace-1' in (tool.tool_def.metadata or {})['notion_attribution'] for tool in tools.values())
-        assert toolset.attribution == (tools['notion-fetch'].tool_def.metadata or {})['notion_attribution']
-
-    async def test_read_only_keeps_only_search_and_read_tools(
-        self, notion_server: FastMCP, run_context: RunContext[None]
-    ) -> None:
-        toolset = NotionToolset[None](client=notion_server, read_only=True)
-        async with toolset:
-            tools = await toolset.get_tools(run_context)
-
-        assert set(tools) == {
-            'notion-ai-search',
-            'notion-fetch',
-            'notion-get-users',
-            'notion-query-meeting-notes',
-            'notion-search',
-        }
-
-    async def test_mutations_are_flagged_in_metadata(
-        self, notion_server: FastMCP, run_context: RunContext[None]
-    ) -> None:
-        toolset = NotionToolset[None](client=notion_server)
-        async with toolset:
-            tools = await toolset.get_tools(run_context)
-
-        assert {name: (tool.tool_def.metadata or {})['notion_mutation'] for name, tool in tools.items()} == {
-            'notion-ai-search': False,
-            'notion-create-database': True,
-            'notion-fetch': False,
-            'notion-get-users': False,
-            'notion-query-meeting-notes': False,
-            'notion-search': False,
-            'notion-update-page': True,
-        }
-
-    def test_attribution_is_unavailable_before_tool_discovery(self, notion_server: FastMCP) -> None:
-        toolset = NotionToolset(client=notion_server)
-        with pytest.raises(UserError, match='has not been established'):
-            _ = toolset.attribution
-        with pytest.raises(UserError, match='identity has not been established'):
-            _ = toolset.connection_identity
-
-    def test_expected_identity_is_validated(self, notion_server: FastMCP) -> None:
-        with pytest.raises(UserError, match='must be a .* tuple'):
-            NotionToolset(client=notion_server, expected_identity=('workspace-1',))  # pyright: ignore[reportArgumentType]
-        with pytest.raises(UserError, match='workspace and user IDs are invalid'):
-            NotionToolset(client=notion_server, expected_identity=('workspace 1', 'user-1'))
-
-    async def test_caller_owned_prebuilt_client_is_used(
-        self, notion_server: FastMCP, run_context: RunContext[None]
-    ) -> None:
-        client = Client(notion_server)
-        toolset = NotionToolset[None](client=client)
-        assert toolset.client is client
-        async with toolset:
-            async with toolset:
-                tools = await toolset.get_tools(run_context)
-        assert 'notion-fetch' in tools
-
-    async def test_identity_is_rechecked_when_toolset_reenters(
-        self, notion_server: FastMCP, notion_state: NotionState, run_context: RunContext[None]
-    ) -> None:
-        toolset = NotionToolset[None](client=notion_server)
-        async with toolset:
-            await toolset.get_tools(run_context)
-        async with toolset:
-            await toolset.get_tools(run_context)
-
-        notion_state['user_id'] = 'user-2'
-        async with toolset:
-            with pytest.raises(UserError, match='connection identity changed; no workspace tools were exposed'):
-                await toolset.get_tools(run_context)
-
-    async def test_tools_are_not_exposed_when_attribution_fails(
-        self, attribution_error_server: FastMCP, run_context: RunContext[None]
-    ) -> None:
-        toolset = NotionToolset[None](client=attribution_error_server)
-        async with toolset:
-            with pytest.raises(UserError, match='attribution failed; no workspace tools were exposed'):
-                await toolset.get_tools(run_context)
-
-    async def test_oversized_attribution_is_rejected(
-        self, oversized_attribution_server: FastMCP, run_context: RunContext[None]
-    ) -> None:
-        toolset = NotionToolset[None](client=oversized_attribution_server)
-        async with toolset:
-            with pytest.raises(UserError, match='exceeded the 16384-character safety limit'):
-                await toolset.get_tools(run_context)
-
-    async def test_success_without_identity_is_rejected(
-        self, malformed_attribution_server: FastMCP, run_context: RunContext[None]
-    ) -> None:
-        toolset = NotionToolset[None](client=malformed_attribution_server)
-        async with toolset:
-            with pytest.raises(UserError, match='attribution was malformed; no workspace tools were exposed'):
-                await toolset.get_tools(run_context)
-
-    async def test_non_text_attribution_is_rejected(
-        self, non_text_attribution_server: FastMCP, run_context: RunContext[None]
-    ) -> None:
-        toolset = NotionToolset[None](client=non_text_attribution_server)
-
-        with pytest.raises(UserError, match='attribution was malformed; no workspace tools were exposed'):
-            await toolset.get_tools(run_context)
-
-    async def test_oversized_identity_field_is_rejected(
-        self, oversized_identity_field_server: FastMCP, run_context: RunContext[None]
-    ) -> None:
-        toolset = NotionToolset[None](client=oversized_identity_field_server)
-        async with toolset:
-            with pytest.raises(UserError, match='attribution was malformed; no workspace tools were exposed'):
-                await toolset.get_tools(run_context)
-
-    async def test_untrusted_metadata_is_excluded_from_attribution_and_instructions(
-        self, attributed_server_with_meta: FastMCP, run_context: RunContext[None]
-    ) -> None:
-        toolset = NotionToolset[None](client=attributed_server_with_meta)
-        async with toolset:
-            instructions = await toolset.get_instructions(run_context)
-            tools = await toolset.get_tools(run_context)
-
-        assert instructions is not None
-        assert 'secret' not in instructions.content
-        assert 'Acme' not in instructions.content
-        assert 'Ada' not in instructions.content
-        assert 'secret' not in toolset.attribution
-        assert toolset.attribution == (tools['notion-fetch'].tool_def.metadata or {})['notion_attribution']
+def _tools_called(messages: list[ModelMessage]) -> set[str]:
+    """Every tool the model reached, which is every tool the capability exposed to it."""
+    return {part.tool_name for message in messages for part in message.parts if isinstance(part, ToolReturnPart)}
 
 
-class TestNotion:
-    def test_live_client_opts_out_of_agent_spec(self) -> None:
-        assert Notion.get_serialization_name() is None
+def test_notion_endpoint_and_token_reach_the_transport() -> None:
+    toolset = Notion(auth='notion-access-token').get_toolset()
+    assert isinstance(toolset, MCPToolset)
+    transport = toolset.client.transport
+    assert isinstance(transport, StreamableHttpTransport)
 
-    def test_client_is_hidden_from_repr(self, notion_server: FastMCP) -> None:
-        assert 'notion-fake' not in repr(Notion(client=notion_server))
+    assert transport.url == 'https://mcp.notion.com/mcp'
+    assert isinstance(transport.auth, BearerAuth)
+    assert transport.auth.token.get_secret_value() == 'notion-access-token'
 
-    async def test_identity_is_fetched_before_search_and_returned_unchanged(
-        self, notion_server: FastMCP, notion_state: NotionState
-    ) -> None:
-        step = 0
 
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            nonlocal step
-            assert info.instructions is not None
-            assert 'connection identity' in info.instructions
-            assert 'workspace-1' in info.instructions
-            assert 'user-1' in info.instructions
-            assert 'unknown_block_ids' in info.instructions
-            if step == 0:
-                step += 1
-                return ModelResponse(parts=[ToolCallPart('notion-ai-search', {'query': 'launch plan'}, 'search')])
-            return ModelResponse(parts=[TextPart('Found the launch plan in Acme for Ada.')])
+def test_token_stays_out_of_the_repr() -> None:
+    assert 'notion-access-token' not in repr(Notion(auth='notion-access-token'))
 
-        agent = Agent(FunctionModel(model), capabilities=[Notion(client=notion_server)])
-        result = await agent.run('Find the launch plan')
 
-        assert result.output == 'Found the launch plan in Acme for Ada.'
-        assert notion_state['calls'] == [
-            ('notion-fetch', {'id': 'self'}),
-            ('notion-fetch', {'id': 'self'}),
-            ('notion-ai-search', {'query': 'launch plan'}),
-        ]
+def test_toolset_id_defaults_to_notion_and_follows_the_capability_id() -> None:
+    assert Notion(auth='token').get_toolset().id == 'notion'
+    assert Notion(auth='token', id='team-notion').get_toolset().id == 'team-notion'
 
-    async def test_capability_exposes_mutations_with_guidance(self, notion_server: FastMCP) -> None:
-        seen_tools: set[str] = set()
 
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            seen_tools.update(tool.name for tool in info.function_tools)
-            assert info.instructions is not None
-            assert 'The Notion mutation tools change the connected workspace' in info.instructions
-            assert 'IDs returned by search or fetch' in info.instructions
-            assert '`notion-get-async-task`' in info.instructions
-            assert '`poll_after_seconds` delay' in info.instructions
-            assert 'stop on `succeeded` or `failed`' in info.instructions
-            assert "caller's deadline or cancellation" in info.instructions
-            assert 'do not automatically\nretry a non-idempotent mutation' in info.instructions
-            assert 'request fresh approval' in info.instructions
-            return ModelResponse(parts=[TextPart('done')])
+async def test_default_exposes_every_tool(fake_notion: None) -> None:
+    agent = Agent(TestModel(), capabilities=[Notion(auth='token')])
 
-        result = await Agent(FunctionModel(model), capabilities=[Notion(client=notion_server)]).run('hello')
-        assert result.output == 'done'
-        assert 'notion-update-page' in seen_tools
+    result = await agent.run('Search the workspace and update the launch plan')
 
-    async def test_read_only_capability_omits_mutation_guidance(self, notion_server: FastMCP) -> None:
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            assert info.instructions is not None
-            assert 'connection identity' in info.instructions
-            assert 'The Notion mutation tools change the connected workspace' not in info.instructions
-            return ModelResponse(parts=[TextPart('done')])
+    assert _tools_called(result.all_messages()) == {'notion-search', 'notion-update-page', 'notion-summarize-page'}
 
-        result = await Agent(
-            FunctionModel(model),
-            capabilities=[Notion(client=notion_server, read_only=True)],
-        ).run('hello')
-        assert result.output == 'done'
 
-    async def test_search_guidance_falls_back_when_ai_search_is_unavailable(
-        self, notion_server: FastMCP, notion_state: NotionState
-    ) -> None:
-        notion_state['ai_search_status'] = 'not_enabled'
-        step = 0
+async def test_read_only_keeps_only_the_read_tools(fake_notion: None) -> None:
+    """A name Notion has not published is hidden too, so an unrecognized tool fails closed."""
+    agent = Agent(TestModel(), capabilities=[Notion(auth='token', read_only=True)])
 
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            nonlocal step
-            assert info.instructions is not None
-            assert 'ai_search_available=False' in info.instructions
-            assert 'notion-ai-search' not in {tool.name for tool in info.function_tools}
-            if step == 0:
-                step += 1
-                return ModelResponse(parts=[ToolCallPart('notion-search', {'query': 'launch plan'}, 'search')])
-            return ModelResponse(parts=[TextPart('Found with keyword search.')])
+    result = await agent.run('Search the workspace and update the launch plan')
 
-        result = await Agent(FunctionModel(model), capabilities=[Notion(client=notion_server)]).run('Find launch plan')
+    assert _tools_called(result.all_messages()) == {'notion-search'}
 
-        assert result.output == 'Found with keyword search.'
-        assert ('notion-search', {'query': 'launch plan'}) in notion_state['calls']
 
-    async def test_limited_ai_search_follows_provider_fallback_guidance(
-        self, notion_server: FastMCP, notion_state: NotionState
-    ) -> None:
-        notion_state['ai_search_status'] = 'available_with_limit'
+def test_spec_schema_leaves_the_token_out() -> None:
+    params = AgentSpec.model_json_schema_with_capabilities([Notion])['$defs']['spec_params_Notion']
 
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            assert info.instructions is not None
-            assert 'ai_search_available=False' in info.instructions
-            tool_names = {tool.name for tool in info.function_tools}
-            assert 'notion-ai-search' not in tool_names
-            assert 'notion-search' in tool_names
-            return ModelResponse(parts=[TextPart('Keyword search is the supported fallback.')])
+    assert set(params['properties']) == {'id', 'description', 'defer_loading', 'read_only'}
 
-        result = await Agent(FunctionModel(model), capabilities=[Notion(client=notion_server)]).run('Find launch plan')
 
-        assert result.output == 'Keyword search is the supported fallback.'
-
-    async def test_read_tools_with_unavailable_access_status_are_hidden(
-        self, notion_server: FastMCP, notion_state: NotionState
-    ) -> None:
-        notion_state['unavailable_tools'].add('query_meeting_notes')
-
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            tool_names = {tool.name for tool in info.function_tools}
-            assert 'notion-query-meeting-notes' not in tool_names
-            assert 'notion-search' in tool_names
-            return ModelResponse(parts=[TextPart('done')])
-
-        result = await Agent(FunctionModel(model), capabilities=[Notion(client=notion_server)]).run(
-            'List meeting notes'
-        )
-        assert result.output == 'done'
-
-    async def test_mutation_with_unavailable_access_status_is_hidden(
-        self, notion_server: FastMCP, notion_state: NotionState
-    ) -> None:
-        notion_state['unavailable_tools'].add('update_page')
-
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            assert 'notion-update-page' not in {tool.name for tool in info.function_tools}
-            return ModelResponse(parts=[TextPart('Unavailable.')])
-
-        result = await Agent(
-            FunctionModel(model),
-            capabilities=[Notion(client=notion_server)],
-        ).run('Update a page')
-        assert result.output == 'Unavailable.'
-
-    async def test_mutation_missing_from_access_map_is_hidden(
-        self, notion_server: FastMCP, notion_state: NotionState
-    ) -> None:
-        notion_state['missing_access_tools'].add('update_page')
-
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            assert 'notion-update-page' not in {tool.name for tool in info.function_tools}
-            return ModelResponse(parts=[TextPart('Missing.')])
-
-        result = await Agent(
-            FunctionModel(model),
-            capabilities=[Notion(client=notion_server)],
-        ).run('Update a page')
-        assert result.output == 'Missing.'
-
-    async def test_mutation_composes_with_tool_approval(
-        self, notion_server: FastMCP, notion_state: NotionState
-    ) -> None:
-        model_calls = 0
-
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            nonlocal model_calls
-            assert info.instructions is not None
-            assert 'connection identity' in info.instructions
-            model_calls += 1
-            if model_calls == 1:
-                return ModelResponse(
-                    parts=[
-                        ToolCallPart(
-                            'notion-update-page',
-                            {'page_id': 'page-1', 'command': 'replace_content', 'new_str': 'New launch plan'},
-                            'update-1',
-                        )
-                    ]
-                )
-            return ModelResponse(parts=[TextPart('Updated.')])
-
-        notion = NotionToolset[None](client=notion_server)
-        approved = notion.approval_required(
-            lambda _ctx, tool_def, _args: (tool_def.metadata or {}).get('notion_mutation') is True
-        )
-        agent = Agent(
-            FunctionModel(model),
-            deps_type=type(None),
-            toolsets=[approved],
-            output_type=[str, DeferredToolRequests],
+def test_spec_carrying_a_token_is_rejected() -> None:
+    # A checked-in spec file must not be able to hold a Notion access token.
+    with pytest.raises(ValueError, match='auth'):
+        Agent.from_spec(
+            {'model': 'test', 'capabilities': [{'Notion': {'auth': 'ntn_access_token'}}]},
+            custom_capability_types=[Notion],
         )
 
-        deferred = await agent.run('Replace the launch plan')
-        assert isinstance(deferred.output, DeferredToolRequests)
-        assert [call.tool_name for call in deferred.output.approvals] == ['notion-update-page']
-        assert notion_state['page_content'] == 'Old launch plan'
 
-        resumed = await agent.run(
-            message_history=deferred.all_messages(),
-            deferred_tool_results=DeferredToolResults(approvals={'update-1': True}),
-        )
-        assert resumed.output == 'Updated.'
-        assert notion_state['page_content'] == 'New launch plan'
+@pytest.mark.filterwarnings('ignore::UserWarning')
+def test_spec_round_trip_rebuilds_the_capability() -> None:
+    # A spec cannot name the token, so the rebuilt capability connects with `auth='oauth'`, and
+    # fastmcp's OAuth client warns about its in-memory token store as it is built.
+    agent = Agent.from_spec(
+        {'model': 'test', 'capabilities': [{'Notion': {'id': 'team-notion', 'read_only': True}}]},
+        custom_capability_types=[Notion],
+    )
+    (capability,) = [c for c in agent.root_capability.capabilities if isinstance(c, Notion)]
 
-    async def test_restored_approval_requires_original_connection_identity(
-        self, notion_server: FastMCP, notion_state: NotionState
-    ) -> None:
-        def propose(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        'notion-update-page',
-                        {'page_id': 'page-1', 'command': 'replace_content', 'new_str': 'Wrong workspace'},
-                        'update-1',
-                    )
-                ]
-            )
-
-        original = NotionToolset[None](client=notion_server)
-        deferred = await Agent(
-            FunctionModel(propose),
-            deps_type=type(None),
-            toolsets=[original.approval_required()],
-            output_type=[str, DeferredToolRequests],
-        ).run('Replace the launch plan')
-        assert isinstance(deferred.output, DeferredToolRequests)
-        expected_identity = original.connection_identity
-
-        notion_state['workspace_id'] = 'workspace-2'
-        restored = NotionToolset[None](client=notion_server, expected_identity=expected_identity)
-        restored_agent = Agent(
-            FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart('should not run')])),
-            deps_type=type(None),
-            toolsets=[restored.approval_required()],
-            output_type=[str, DeferredToolRequests],
-        )
-        with pytest.raises(UserError, match='connection identity changed'):
-            await restored_agent.run(
-                message_history=deferred.all_messages(),
-                deferred_tool_results=DeferredToolResults(approvals={'update-1': True}),
-            )
-        assert notion_state['page_content'] == 'Old launch plan'
-
-    async def test_mutation_provider_error_is_not_model_retryable(
-        self, notion_server: FastMCP, notion_state: NotionState
-    ) -> None:
-        notion_state['mutation_error'] = True
-        model_calls = 0
-
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            nonlocal model_calls
-            model_calls += 1
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        'notion-update-page',
-                        {'page_id': 'page-1', 'command': 'replace_content', 'new_str': 'Applied once'},
-                        f'update-{model_calls}',
-                    )
-                ]
-            )
-
-        agent = Agent(
-            FunctionModel(model),
-            capabilities=[Notion(client=notion_server)],
-        )
-        with pytest.raises(ToolError, match='ambiguous provider failure'):
-            await agent.run('Replace the launch plan')
-
-        update_calls = [name for name, _args in notion_state['calls'] if name == 'notion-update-page']
-        assert update_calls == ['notion-update-page']
-        assert model_calls == 1
-
-    async def test_approved_mutation_is_rejected_after_connection_identity_changes(
-        self, notion_server: FastMCP, notion_state: NotionState
-    ) -> None:
-        model_calls = 0
-
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            nonlocal model_calls
-            model_calls += 1
-            if model_calls == 1:
-                return ModelResponse(
-                    parts=[
-                        ToolCallPart(
-                            'notion-update-page',
-                            {'page_id': 'page-1', 'command': 'replace_content', 'new_str': 'Wrong workspace'},
-                            'update-1',
-                        )
-                    ]
-                )
-            return ModelResponse(parts=[TextPart('should not run')])  # pragma: no cover
-
-        notion = NotionToolset[None](client=notion_server)
-        agent = Agent(
-            FunctionModel(model),
-            deps_type=type(None),
-            toolsets=[notion.approval_required()],
-            output_type=[str, DeferredToolRequests],
-        )
-        deferred = await agent.run('Replace the launch plan')
-        assert isinstance(deferred.output, DeferredToolRequests)
-
-        notion_state['workspace_id'] = 'workspace-2'
-        with pytest.raises(UserError, match='connection identity changed'):
-            await agent.run(
-                message_history=deferred.all_messages(),
-                deferred_tool_results=DeferredToolResults(approvals={'update-1': True}),
-            )
-
-        assert notion_state['page_content'] == 'Old launch plan'
-
-    async def test_mutation_rechecks_identity_immediately_before_execution(
-        self, rotating_identity_server: FastMCP
-    ) -> None:
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        'notion-update-page',
-                        {'page_id': 'page-1', 'command': 'replace_content', 'new_str': 'Wrong workspace'},
-                        'update-1',
-                    )
-                ]
-            )
-
-        agent = Agent(
-            FunctionModel(model),
-            capabilities=[Notion(client=rotating_identity_server)],
-        )
-        with pytest.raises(
-            UserError, match='connection identity changed after tool discovery; tool invocation refused'
-        ):
-            await agent.run('Replace the launch plan')
-
-    async def test_mutation_rechecks_access_immediately_before_execution(
-        self, notion_server: FastMCP, notion_state: NotionState
-    ) -> None:
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            notion_state['unavailable_tools'].add('update_page')
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        'notion-update-page',
-                        {'page_id': 'page-1', 'command': 'replace_content', 'new_str': 'Blocked'},
-                        'update-1',
-                    )
-                ]
-            )
-
-        agent = Agent(
-            FunctionModel(model),
-            capabilities=[Notion(client=notion_server)],
-        )
-        with pytest.raises(UserError, match='tool `notion-update-page` is no longer available'):
-            await agent.run('Replace the launch plan')
-        assert notion_state['page_content'] == 'Old launch plan'
-
-    async def test_read_rechecks_identity_immediately_before_execution(self, rotating_identity_server: FastMCP) -> None:
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            return ModelResponse(parts=[ToolCallPart('notion-search', {'query': 'private page'}, 'search-1')])
-
-        agent = Agent(FunctionModel(model), capabilities=[Notion(client=rotating_identity_server)])
-        with pytest.raises(
-            UserError, match='connection identity changed after tool discovery; tool invocation refused'
-        ):
-            await agent.run('Find the private page')
-
-    async def test_instructions_can_be_disabled(self, notion_server: FastMCP) -> None:
-        seen: list[str] = []
-
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            seen.append(info.instructions or '')
-            return ModelResponse(parts=[TextPart('done')])
-
-        await Agent(
-            FunctionModel(model),
-            capabilities=[Notion(client=notion_server, include_instructions=False)],
-        ).run('hello')
-        assert all('connection identity' not in instructions for instructions in seen)
+    assert capability.id == 'team-notion'
+    assert capability.read_only is True
