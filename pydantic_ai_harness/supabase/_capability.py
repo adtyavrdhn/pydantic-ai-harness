@@ -1,25 +1,4 @@
-"""Supabase hosted MCP policy.
-
-External contract, verified 2026-09-04:
-
-- The official remote endpoint is `https://mcp.supabase.com/mcp`.
-- `project_ref`, `read_only`, and `features` are URL query parameters. Project
-  scoping disables account tools, and Supabase recommends both project scoping
-  and read-only mode.
-- The remote server uses browser OAuth by default. CI clients can pass a PAT as
-  bearer authentication. Scoped PATs are Public Alpha and may not be enabled
-  for every account yet.
-- The MCP server is Public Alpha. Harness keeps this capability development-only.
-  Supabase's current production guidance requires project scoping, read-only
-  mode, restricted features, and narrowly scoped queries. Branching is a paid,
-  experimental feature.
-
-Sources: https://supabase.com/docs/guides/ai-tools/mcp,
-https://supabase.com/features/mcp-server, and
-https://supabase.com/docs/guides/platform/personal-access-tokens. Re-check the
-endpoint, tool groups, mutation list, auth modes, and plan notes against those
-pages before changing this module.
-"""
+"""Supabase hosted MCP policy."""
 
 from __future__ import annotations
 
