@@ -45,9 +45,24 @@ def _write_model(*, tool_call_id: str, path: str) -> FunctionModel:
 
 
 class TestStripe:
-    async def test_read_only_by_default(self, stripe_server: StripeServer) -> None:
+    async def test_write_tool_is_exposed_by_default(self, stripe_server: StripeServer) -> None:
+        model = TestModel(call_tools=[])
+        capability = Stripe(api_key='rk_test_default')
+        await Agent(model, capabilities=[capability]).run('What Stripe tools are available?')
+        request_parameters = model.last_model_request_parameters
+        assert request_parameters is not None
+        assert {tool.name for tool in request_parameters.function_tools} == {
+            'get_stripe_account_info',
+            'search_stripe_documentation',
+            'stripe_api_details',
+            'stripe_api_read',
+            'stripe_api_search',
+            'stripe_api_write',
+        }
+
+    async def test_read_only_drops_write_tool(self, stripe_server: StripeServer) -> None:
         model = TestModel()
-        capability = Stripe(api_key='rk_test_read_only')
+        capability = Stripe(api_key='rk_test_read_only', read_only=True)
         await Agent(model, capabilities=[capability]).run('What Stripe tools are available?')
         request_parameters = model.last_model_request_parameters
         assert request_parameters is not None
@@ -59,19 +74,10 @@ class TestStripe:
             'stripe_api_search',
         }
 
-    async def test_agent_uses_stripe_read_tool(self, stripe_server: StripeServer) -> None:
-        agent = Agent(
-            TestModel(call_tools=['stripe_api_read']),
-            capabilities=[Stripe(api_key='rk_test_agent')],
-        )
-        result = await agent.run('List customers')
-        assert 'stripe_api_read' in result.output
-        assert '"mode":"read"' in result.output
-
     async def test_mutations_require_approval(self, stripe_server: StripeServer) -> None:
         agent = Agent(
             TestModel(call_tools=['stripe_api_write']),
-            capabilities=[Stripe(api_key='rk_test_write', enable_writes=True)],
+            capabilities=[Stripe(api_key='rk_test_write')],
             output_type=[str, DeferredToolRequests],
         )
         result = await agent.run('Create a refund')
@@ -113,7 +119,6 @@ class TestStripe:
         capability = Stripe(
             api_key='rk_test_operation',
             connected_account='acct_operation',
-            enable_writes=True,
         )
         first = await Agent(
             _write_model(tool_call_id='write-1', path='/v1/refunds'),
@@ -141,10 +146,10 @@ class TestStripe:
                 ),
             )
 
-    async def test_reads_do_not_require_approval_when_writes_are_enabled(self, stripe_server: StripeServer) -> None:
+    async def test_reads_do_not_require_approval(self, stripe_server: StripeServer) -> None:
         agent = Agent(
             TestModel(call_tools=['stripe_api_read']),
-            capabilities=[Stripe(api_key='rk_test_read_with_writes', enable_writes=True)],
+            capabilities=[Stripe(api_key='rk_test_read')],
             output_type=[str, DeferredToolRequests],
         )
         result = await agent.run('List customers')
@@ -172,7 +177,6 @@ class TestStripe:
                 Stripe(
                     api_key='rk_test_shared',
                     connected_account='acct_first',
-                    enable_writes=True,
                 )
             ],
             output_type=[str, DeferredToolRequests],
@@ -187,7 +191,6 @@ class TestStripe:
                     api_key=api_key,
                     mode=mode,
                     connected_account=connected_account,
-                    enable_writes=True,
                 )
             ],
             output_type=[str, DeferredToolRequests],
@@ -201,7 +204,7 @@ class TestStripe:
     async def test_approval_requires_scope_metadata(self, stripe_server: StripeServer) -> None:
         agent = Agent(
             TestModel(call_tools=['stripe_api_write']),
-            capabilities=[Stripe(api_key='rk_test_write', enable_writes=True)],
+            capabilities=[Stripe(api_key='rk_test_write')],
             output_type=[str, DeferredToolRequests],
         )
         result = await agent.run('Create a refund')
@@ -212,21 +215,16 @@ class TestStripe:
                 deferred_tool_results=result.output.build_results(approve_all=True),
             )
 
-    async def test_write_tool_is_absent_without_opt_in(self, stripe_server: StripeServer) -> None:
-        with pytest.raises(UserError, match='stripe_api_write'):
-            await Agent(
-                TestModel(call_tools=['stripe_api_write']),
-                capabilities=[Stripe(api_key='rk_test_read_only')],
-            ).run('Create a refund')
-
     async def test_account_boundaries_do_not_cross(self, stripe_server: StripeServer) -> None:
         platform = Stripe(api_key='rk_test_platform')
         connected = Stripe(api_key='rk_live_connected', mode='live', connected_account='acct_connected')
 
-        await Agent(TestModel(), capabilities=[platform]).run('Inspect the platform')
+        await Agent(TestModel(call_tools=['stripe_api_read']), capabilities=[platform]).run('Inspect the platform')
         platform_headers = list(stripe_server.headers)
         stripe_server.headers.clear()
-        await Agent(TestModel(), capabilities=[connected]).run('Inspect the connected account')
+        await Agent(TestModel(call_tools=['stripe_api_read']), capabilities=[connected]).run(
+            'Inspect the connected account'
+        )
         connected_headers = list(stripe_server.headers)
 
         assert platform_headers and connected_headers
@@ -243,7 +241,6 @@ class TestStripe:
             api_key='rk_live_top_secret',
             mode='live',
             connected_account='acct_privateidentity',
-            enable_writes=True,
         )
         representations = (repr(capability), repr(capability.get_toolset()))
         for representation in representations:
@@ -258,8 +255,8 @@ class TestStripe:
         assert Stripe(api_key='rk_test_secret', include_instructions=False).get_instructions() is None
 
     def test_instructions_encode_safe_provider_behavior(self) -> None:
-        read_instructions = Stripe(api_key='rk_test_secret').get_instructions()
-        write_instructions = Stripe(api_key='rk_test_secret', enable_writes=True).get_instructions()
+        read_instructions = Stripe(api_key='rk_test_secret', read_only=True).get_instructions()
+        write_instructions = Stripe(api_key='rk_test_secret').get_instructions()
         assert read_instructions is not None
         assert write_instructions is not None
         for instructions in (read_instructions, write_instructions):
@@ -333,10 +330,10 @@ class TestStripe:
         with pytest.raises(UserError, match='connected_account'):
             Stripe(api_key='rk_test_secret', connected_account=account)
 
-    @pytest.mark.parametrize('enable_writes', [1, 'false'])
-    def test_enable_writes_requires_a_boolean(self, enable_writes: object) -> None:
-        with pytest.raises(UserError, match='enable_writes'):
-            Stripe(api_key='rk_test_secret', enable_writes=enable_writes)  # pyright: ignore[reportArgumentType]
+    @pytest.mark.parametrize('read_only', [1, 'false'])
+    def test_read_only_requires_a_boolean(self, read_only: object) -> None:
+        with pytest.raises(UserError, match='read_only'):
+            Stripe(api_key='rk_test_secret', read_only=read_only)  # pyright: ignore[reportArgumentType]
 
     async def test_mutated_security_fields_are_revalidated(self, stripe_server: StripeServer) -> None:
         unrestricted = Stripe(api_key='rk_test_initial')
@@ -355,10 +352,10 @@ class TestStripe:
         with pytest.raises(UserError, match='connected_account'):
             await Agent(TestModel(), capabilities=[wrong_account]).run('List customers')
 
-        wrong_write_setting = Stripe(api_key='rk_test_initial')
-        object.__setattr__(wrong_write_setting, 'enable_writes', 1)
-        with pytest.raises(UserError, match='enable_writes'):
-            await Agent(TestModel(), capabilities=[wrong_write_setting]).run('List customers')
+        wrong_read_only = Stripe(api_key='rk_test_initial')
+        wrong_read_only.read_only = 1  # pyright: ignore[reportAttributeAccessIssue]
+        with pytest.raises(UserError, match='read_only'):
+            await Agent(TestModel(), capabilities=[wrong_read_only]).run('List customers')
 
         assert stripe_server.headers == []
 

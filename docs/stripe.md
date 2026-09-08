@@ -1,12 +1,12 @@
 ---
 title: Stripe
-description: Give a Pydantic AI agent read-only Stripe access with explicit, approval-gated writes.
+description: Give a Pydantic AI agent approval-gated access to one Stripe account, or read-only access with `read_only=True`.
 ---
 
 # Stripe
 
-`Stripe` lets an agent read one Stripe platform or connected account and request approval for opt-in writes through
-Stripe's hosted MCP server.
+`Stripe` lets an agent read one Stripe platform or connected account through Stripe's hosted MCP server and change it
+with approval on every write. Set `read_only=True` to drop the write tool.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/stripe/)
 
@@ -21,7 +21,7 @@ uv add "pydantic-ai-harness[stripe]" "pydantic-ai-slim[openai]"
 ## Set up Stripe and your model
 
 In the Stripe Dashboard, create a restricted API key and set `Customers` to `Read` for the example below. Grant only
-the other read permissions the agent needs. Export that key and your model-provider key:
+the other permissions the agent needs. Export that key and your model-provider key:
 
 ```bash
 export STRIPE_API_KEY='rk_test_...'
@@ -53,19 +53,18 @@ You can ask the agent to:
 - retrieve account information;
 - read customers, payments, refunds, invoices, subscriptions, and other methods supported by Stripe MCP;
 - search Stripe documentation;
-- request supported API writes when writes are enabled.
+- request supported API writes, each gated on approval (not available with `read_only=True`).
 
 ## Operational constraints
 
-- The default tool allowlist is `get_stripe_account_info`, `search_stripe_documentation`, `stripe_api_details`,
-  `stripe_api_read`, and `stripe_api_search`. `stripe_api_write` is the only tool added by `enable_writes=True`.
-- Access is read-only by default. `enable_writes=True` exposes `stripe_api_write`; every call returns a
-  `DeferredToolRequests` approval request before Stripe receives the write. Preserve the request metadata when
-  resuming. The restricted key must grant write permission for each resource the agent may change. An approved result
-  remains replayable for the same tool call ID, arguments, and account scope, so persist and consume it atomically.
-  Approval is not idempotency; after a timeout or unknown response, verify the resource before retrying a write. If an
-  API or UI accepts approval decisions, it must authenticate the caller and authorize that caller for the exact
-  operation and account scope before accepting one.
+- The tool allowlist is `get_stripe_account_info`, `search_stripe_documentation`, `stripe_api_details`,
+  `stripe_api_read`, `stripe_api_search`, and `stripe_api_write`. `read_only=True` drops `stripe_api_write`.
+- Every `stripe_api_write` call returns a `DeferredToolRequests` approval request before Stripe receives the write.
+  Preserve the request metadata when resuming. The restricted key must grant write permission for each resource the
+  agent may change. An approved result remains replayable for the same tool call ID, arguments, and account scope, so
+  persist and consume it atomically. Approval is not idempotency; after a timeout or unknown response, verify the
+  resource before retrying a write. If an API or UI accepts approval decisions, it must authenticate the caller and
+  authorize that caller for the exact operation and account scope before accepting one.
 - Stripe list reads can be paginated. Follow the pagination fields returned by Stripe when complete results are
   required.
 - `mode='sandbox'` accepts `rk_test_...` keys. Set `mode='live'` explicitly for an `rk_live_...` key.
