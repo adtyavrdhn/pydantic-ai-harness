@@ -47,7 +47,7 @@ Tool names are prefixed by product, so the agent sees `gmail_search_threads` and
 ## Operational constraints
 
 - The token's scopes are the real boundary: issue a read-scoped token for an agent that should only read. `read_only=True` narrows further, to the tools Google marks read-only.
-- Nothing pauses before a write. To require confirmation, wrap the toolset with the [approval recipe](stackone.md#require-approval).
+- Nothing pauses before a write. To require confirmation, wrap the toolset with the [tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval).
 
 ## API reference
 
