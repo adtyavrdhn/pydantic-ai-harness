@@ -1,19 +1,28 @@
-"""In-process Atlassian MCP boundary for tests."""
+"""Fixtures for the Atlassian capability tests.
+
+Atlassian's Rovo MCP server is stood in for by a FastMCP server running in a child process and
+served over real HTTP, so the credential travels the same path it does in production. Each tool
+reports the `Authorization` header it received. One child process serves the whole session.
+"""
 
 from __future__ import annotations
 
-import importlib.util
-from typing import TYPE_CHECKING
+import multiprocessing
+import socket
+import time
+from collections.abc import Callable, Iterator
 
 import pytest
-from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import RunContext
-from pydantic_ai.usage import RunUsage
 
-if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
+# `fastmcp-slim` imports but raises ImportError for server support, so widen the skip.
+pytest.importorskip('fastmcp.server', exc_type=ImportError)
+pytest.importorskip('mcp')
 
-collect_ignore = ['test_atlassian.py'] if importlib.util.find_spec('mcp') is None else []
+from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_http_request
+from mcp.types import ToolAnnotations
+
+from pydantic_ai_harness.atlassian import _capability
 
 
 @pytest.fixture
@@ -21,124 +30,60 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
-@pytest.fixture
-def run_context() -> RunContext[None]:
-    return RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0)
+# `_tool` and `run_fake_server` execute only in the spawned child, which coverage does not measure.
+def _tool(name: str) -> Callable[[str], dict[str, str | None]]:  # pragma: no cover
+    def tool(query: str = '') -> dict[str, str | None]:
+        """An Atlassian tool that reports the credentials it was called with."""
+        return {'authorization': get_http_request().headers.get('authorization')}
+
+    tool.__name__ = name
+    return tool
 
 
-@pytest.fixture
-def atlassian_calls() -> list[str]:
-    return []
+def run_fake_server(*, host: str, port: int) -> None:  # pragma: no cover
+    """Serve a stand-in Rovo server with Atlassian-style annotations; runs in the child process.
 
-
-@pytest.fixture
-def atlassian_server(atlassian_calls: list[str]) -> FastMCP:
-    from mcp.server.fastmcp.server import FastMCP, Settings  # noqa: PLC0415
-
-    Settings.model_rebuild()
+    The unannotated tool is the fail-closed case: the read-only filter must drop it.
+    """
     server = FastMCP('atlassian-fake')
+    server.tool(_tool('read_item'), annotations=ToolAnnotations(readOnlyHint=True))
+    server.tool(_tool('write_item'), annotations=ToolAnnotations(readOnlyHint=False))
+    server.tool(_tool('unannotated_item'))
+    server.run(transport='http', host=host, port=port, path='/mcp', stateless_http=True, log_level='error')
 
-    @server.tool()
-    def atlassianUserInfo() -> dict[str, str]:
-        """Return the authenticated Atlassian user."""
-        atlassian_calls.append('atlassianUserInfo')
-        return {'accountId': 'user-1'}
 
-    @server.tool()
-    def getJiraIssue(cloudId: str, issueIdOrKey: str) -> dict[str, str]:
-        """Get one Jira work item."""
-        atlassian_calls.append('getJiraIssue')
-        return {'cloudId': cloudId, 'key': issueIdOrKey, 'summary': 'Fix login'}
+@pytest.fixture(scope='session')
+def fake_server() -> Iterator[str]:
+    """A stand-in Rovo server in a spawned process, yielding its URL once it accepts connections.
 
-    @server.tool()
-    def searchJiraIssuesUsingJql(cloudId: str, jql: str) -> list[dict[str, str]]:
-        """Search Jira work items."""
-        atlassian_calls.append('searchJiraIssuesUsingJql')
-        return [{'cloudId': cloudId, 'key': 'ENG-42', 'jql': jql}]
-
-    @server.tool()
-    def createJiraIssue(cloudId: str, projectKey: str, summary: str) -> dict[str, str]:
-        """Create one Jira work item."""
-        atlassian_calls.append('createJiraIssue')
-        return {'cloudId': cloudId, 'key': f'{projectKey}-43', 'summary': summary}
-
-    @server.tool()
-    def deleteJiraIssue(cloudId: str, issueIdOrKey: str) -> dict[str, str]:
-        """Permanently delete one Jira work item."""
-        atlassian_calls.append('deleteJiraIssue')
-        return {'cloudId': cloudId, 'deleted': issueIdOrKey}
-
-    @server.tool()
-    def getConfluenceContent(cloudId: str, contentId: str) -> dict[str, str]:
-        """Get one Confluence content item."""
-        atlassian_calls.append('getConfluenceContent')
-        return {'cloudId': cloudId, 'id': contentId}
-
-    @server.tool()
-    def createConfluenceContent(cloudId: str, title: str) -> dict[str, str]:
-        """Create one Confluence content item."""
-        atlassian_calls.append('createConfluenceContent')
-        return {'cloudId': cloudId, 'title': title}
-
-    @server.tool()
-    def getJsmOpsAlerts(cloudId: str) -> list[dict[str, str]]:
-        """Get Jira Service Management alerts."""
-        atlassian_calls.append('getJsmOpsAlerts')
-        return [{'cloudId': cloudId, 'id': 'alert-1'}]
-
-    @server.tool()
-    def updateJsmOpsAlert(cloudId: str, alertId: str) -> dict[str, str]:
-        """Update one Jira Service Management alert."""
-        atlassian_calls.append('updateJsmOpsAlert')
-        return {'cloudId': cloudId, 'id': alertId}
-
-    @server.tool()
-    def getBitbucketRepository(cloudId: str, workspace: str, repoSlug: str) -> dict[str, str]:
-        """Get one Bitbucket repository."""
-        atlassian_calls.append('getBitbucketRepository')
-        return {'cloudId': cloudId, 'workspace': workspace, 'slug': repoSlug}
-
-    @server.tool()
-    def createBitbucketRepoPullRequest(cloudId: str, workspace: str, repoSlug: str) -> dict[str, str]:
-        """Create one Bitbucket pull request."""
-        atlassian_calls.append('createBitbucketRepoPullRequest')
-        return {'cloudId': cloudId, 'workspace': workspace, 'slug': repoSlug}
-
-    # An exact allowlist is expected never to execute this fake server tool.
-    @server.tool()
-    def futureUnreviewedAtlassianMutation(cloudId: str) -> dict[str, str]:  # pragma: no cover
-        """A future server tool that Harness has not reviewed."""
-        return {'cloudId': cloudId}
-
-    return server
+    Spawn rather than fork: on Linux a forked child inherits the test's running event loop and
+    cannot start the server's own.
+    """
+    host = '127.0.0.1'
+    with socket.socket() as sock:
+        sock.bind((host, 0))
+        port: int = sock.getsockname()[1]
+    process = multiprocessing.get_context('spawn').Process(
+        target=run_fake_server, kwargs={'host': host, 'port': port}, daemon=True
+    )
+    process.start()
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                break
+        except OSError:
+            if not process.is_alive() or time.monotonic() > deadline:  # pragma: no cover
+                raise RuntimeError('the fake Atlassian server did not start') from None
+            time.sleep(0.05)
+    try:
+        yield f'http://{host}:{port}/mcp'
+    finally:
+        process.terminate()
+        process.join(timeout=5)
 
 
 @pytest.fixture
-def unavailable_atlassian_server() -> FastMCP:
-    from mcp.server.fastmcp.server import FastMCP, Settings  # noqa: PLC0415
-
-    Settings.model_rebuild()
-    server = FastMCP('atlassian-unavailable-fake')
-
-    # A fail-closed allowlist is expected never to execute this fake server tool.
-    @server.tool()
-    def futureUnreviewedAtlassianMutation(cloudId: str) -> dict[str, str]:  # pragma: no cover
-        """A future server tool that Harness has not reviewed."""
-        return {'cloudId': cloudId}
-
-    return server
-
-
-@pytest.fixture
-def jira_only_atlassian_server() -> FastMCP:
-    from mcp.server.fastmcp.server import FastMCP, Settings  # noqa: PLC0415
-
-    Settings.model_rebuild()
-    server = FastMCP('atlassian-jira-only-fake')
-
-    @server.tool()
-    def getJiraIssue(cloudId: str, issueIdOrKey: str) -> dict[str, str]:  # pragma: no cover
-        """A Jira tool that cannot run while another selected product is unavailable."""
-        return {'cloudId': cloudId, 'key': issueIdOrKey}
-
-    return server
+def fake_atlassian(fake_server: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the capability's pinned endpoint at the stand-in server."""
+    monkeypatch.setattr(_capability, '_ATLASSIAN_MCP_URL', fake_server)

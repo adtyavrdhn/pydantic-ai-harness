@@ -1,83 +1,57 @@
 # Atlassian
 
-Give an agent site-scoped access to Jira, with optional Confluence, Jira Service Management, and Bitbucket tools.
+Use `Atlassian` when an agent needs to work with Jira, Confluence, Bitbucket and the other Atlassian
+apps through Atlassian's hosted Rovo MCP server. The default serves Atlassian's write tools as well
+as its read ones, so the credential's scopes and the permission groups your organization admin has
+enabled are the real boundary on what an agent can change.
 
-## Installation
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
+
+## Install
 
 ```bash
 uv add "pydantic-ai-harness[atlassian]" "pydantic-ai-slim[openai]"
 ```
 
-## Setup
+The second package installs the OpenAI provider used by the example. For another model, install its
+matching provider extra instead.
 
-Your organization needs a paid Jira, Confluence, Service Collection, or Teamwork Collection Cloud subscription and a
-verified business domain. An organization administrator must enable Rovo, allow Rovo MCP, and give the account you sign
-in with access to the site and data you want the agent to use.
+## Connect
 
-Find the site's `cloudId` by opening `https://<your-site>.atlassian.net/_edge/tenant_info`, then set it with your model
-credential:
+Atlassian takes three credentials, and your organization admin decides which are open to you: OAuth
+2.1 is the primary method, while a personal API token and a service account API key work only where
+authentication by API token has been turned on. Separately, the `delete_jira` and `manage_jira`
+permission groups are off until an admin enables them. See
+[Atlassian's authentication guide](https://developer.atlassian.com/cloud/rovo-mcp/guides/authentication-and-authorization/).
+
+Left unset, `auth` reads `$ATLASSIAN_API_KEY` and sends it as a bearer token, which is how Atlassian
+takes a service account API key, falling back to `'oauth'`, which opens a browser for Atlassian
+sign-in and consent to one site. A *personal* API token is a different credential, which Atlassian
+takes over Basic auth: pass `auth=httpx.BasicAuth('you@example.com', 'your-personal-api-token')`
+rather than setting the environment variable. Some tool sets are reachable over only one method --
+Jira Service Management needs an API token, while code search and Teams need OAuth -- so pick the one
+your work needs. A credential cannot be written into an agent spec file, where a spec naming `auth:`
+is rejected; set it in the environment instead. Set your model provider's credential as well:
 
 ```bash
-export ATLASSIAN_CLOUD_ID='the-cloudId-from-tenant_info'
-export OPENAI_API_KEY='your-openai-api-key'
+export ATLASSIAN_API_KEY="your-service-account-api-key"
+export OPENAI_API_KEY="your-openai-api-key"
 ```
 
-Pydantic AI starts Atlassian's OAuth 2.1 flow through its MCP client. The first run opens a browser for Atlassian
-sign-in and site consent. The default OAuth token store is in memory, so a new process may ask you to sign in again.
-
-## Example
-
 ```python
-import os
-
 from pydantic_ai import Agent
 from pydantic_ai_harness.atlassian import Atlassian
 
-agent = Agent(
-    'openai:gpt-5.6-sol',
-    capabilities=[Atlassian(cloud_id=os.environ['ATLASSIAN_CLOUD_ID'])],
-)
-
-result = agent.run_sync('Summarize my unresolved Jira work and identify the oldest item')
+agent = Agent('openai:gpt-5.6-sol', capabilities=[Atlassian()])
+result = agent.run_sync('Summarize my unresolved Jira work and find the oldest item')
 print(result.output)
 ```
 
-## What the agent can do
-
-- Read and search Jira work items, projects, boards, sprints, comments, transitions, and versions.
-- Read selected Confluence pages, spaces, comments, attachments, tasks, and permissions when `products` includes
-  `'confluence'`.
-- Read selected Jira Service Management alerts, schedules, and teams when `products` includes
-  `'jira_service_management'`.
-- Read selected Bitbucket repositories, branches, commits, pull requests, and pipelines when `products` includes
-  `'bitbucket'` and the workspace is linked to an Atlassian organization.
-- Create and update selected Jira, Confluence, JSM, and Bitbucket records, and delete Jira issues, comments, and
-  attachments, approving each change when the agent requests it.
-
-## Operational constraints
-
-- The default is Jira-only and exposes every reviewed Jira tool, including permanent deletes. Set `products=(...)` to
-  add the other product families, and `read_only=True` to keep only the read and search tools.
-- `Atlassian` requests approval for each write or delete by default. `require_approval=False` is for callers that
-  supply another approval policy or intentionally allow unattended changes.
-- Direct `AtlassianToolset` use controls tool exposure and site scope but does not request approval. Wrap it with
-  `.approval_required()` when mutations need approval.
-- Every product call must use the configured `cloud_id`; Harness checks it before the request reaches Atlassian.
-- OAuth consent is site-scoped. API-token credentials are not site-scoped by Atlassian, so the `cloud_id` check remains
-  important. Use `authorization_token=` only for an Atlassian service-account API key sent as a Bearer token. Personal
-  API tokens require Basic authentication on a preconfigured FastMCP client passed with `client=`. JSM tools require
-  one of these API-token mechanisms and do not support OAuth 2.1.
-- In a multi-user service, create a separate `Atlassian` capability or `AtlassianToolset` for each user. Do not share an
-  authenticated MCP client between users.
-- Atlassian organization permission groups and the signed-in account's product permissions can further reduce the
-  available tools.
-- For two sites on one agent, wrap each `Atlassian` capability in Pydantic AI's `PrefixTools` so their tool names do not
-  collide.
+- `read_only=True` keeps only the tools Atlassian marks read-only, and drops any tool it leaves
+  unmarked.
+- An API token is not bound to one Atlassian site, so tools that act on one take a `cloudId`
+  argument; OAuth consent instead covers only the site you approve.
+- To have a person confirm each write, wrap the toolset with the
+  [approval recipe](../stackone/README.md#require-approval).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/atlassian/)
-
-See Atlassian's [Rovo MCP tools](https://support.atlassian.com/atlassian-ai-gateway/docs/supported-tools/),
-[OAuth setup](https://support.atlassian.com/atlassian-ai-gateway/docs/configure-oauth-2-1/), and
-[API-token setup](https://support.atlassian.com/atlassian-ai-gateway/docs/configure-authentication-via-api-token/).
-
-> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).

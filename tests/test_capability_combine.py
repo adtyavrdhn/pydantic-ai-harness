@@ -250,7 +250,6 @@ COMBINE_POLICY: dict[str, Policy] = {
     'Skills': Anonymous('a factory: one deferred capability per skill, each named after the skill'),
     'SlidingWindowCompaction': Anonymous('composes as a tier under `TieredCompaction`'),
     'StackOne': Anonymous('one per linked account, and `account_id` is what names it'),
-    'Atlassian': Anonymous('one per Atlassian Cloud site, and `cloud_id` is what names it'),
     'TieredCompaction': Anonymous('drives other strategies; one per tier list'),
     'WarnNearLimits': Anonymous('a passive observer; several thresholds compose'),
     'WarnOnCacheBusts': Anonymous('a passive observer; several thresholds compose'),
@@ -276,6 +275,7 @@ COMBINE_POLICY: dict[str, Policy] = {
         lambda cls: (cls(), cls()),
     ),
     'PyaiDocs': Collides('deprecated alias of `PydanticAIDocs`, and collides the same way'),
+    'Atlassian': Collides("its toolset registers Atlassian's tool names under a fixed toolset id"),
     'Macroscope': Collides(
         'its toolset registers `run_macroscope_review` under a fixed name',
         lambda cls: (cls(), cls()),
