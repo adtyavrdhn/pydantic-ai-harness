@@ -57,7 +57,7 @@ print(result.output)
 - An API token is not bound to one Atlassian site, so tools that act on one take a `cloudId`
   argument; OAuth consent instead covers only the site you approve.
 - To have a person confirm each write, wrap the toolset with the
-  [approval recipe](stackone.md#require-approval).
+  [tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/atlassian/)
 
