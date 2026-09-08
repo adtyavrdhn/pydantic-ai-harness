@@ -1,8 +1,4 @@
-"""Google Workspace hosted MCP: one endpoint per product, listed in `_MCP_URLS`.
-
-Endpoints and `readOnlyHint` annotations verified 2026-09-07 against the live servers and
-https://developers.google.com/workspace/guides/configure-mcp-servers.
-"""
+"""Google Workspace hosted MCP capability."""
 
 from __future__ import annotations
 
