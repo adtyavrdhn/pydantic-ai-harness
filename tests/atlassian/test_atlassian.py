@@ -22,7 +22,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 
-from pydantic_ai_harness.atlassian import Atlassian, AtlassianAccess, AtlassianProduct, AtlassianToolset
+from pydantic_ai_harness.atlassian import Atlassian, AtlassianProduct, AtlassianToolset
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
@@ -95,19 +95,16 @@ class TestAtlassian:
                 lambda: AtlassianToolset(cloud_id='site-1', products=('compass',)),  # pyright: ignore[reportArgumentType]
                 'Unknown Atlassian product',
             ),
-            (
-                lambda: AtlassianToolset(cloud_id='site-1', access='admin'),  # pyright: ignore[reportArgumentType]
-                '`access` must be',
-            ),
         ],
     )
     def test_invalid_configuration_fails_at_construction(self, build: Callable[[], object], match: str):
         with pytest.raises(UserError, match=match):
             build()
 
-    def test_agent_spec_excludes_runtime_client(self):
-        schema = AgentSpec.model_json_schema_with_capabilities([Atlassian])
-        assert '"client"' not in json.dumps(schema, sort_keys=True)
+    def test_agent_spec_lists_read_only_and_excludes_runtime_client(self):
+        schema = json.dumps(AgentSpec.model_json_schema_with_capabilities([Atlassian]), sort_keys=True)
+        assert '"read_only"' in schema
+        assert '"client"' not in schema
         with pytest.warns(UserWarning, match='in-memory token storage'):
             agent = Agent.from_spec(
                 {'capabilities': [{'Atlassian': {'cloud_id': 'site-1', 'products': 'confluence'}}]},
@@ -156,12 +153,18 @@ class TestAtlassian:
         result = await agent.run('compare Jira sites')
         assert result.output == 'done'
 
-    async def test_default_agent_path_exposes_only_reviewed_jira_reads(self, atlassian_server: FastMCP):
+    async def test_default_agent_path_exposes_every_reviewed_jira_tool(self, atlassian_server: FastMCP):
         capability = Atlassian(cloud_id='site-1', client=atlassian_server)
 
         def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             names = {tool.name for tool in info.function_tools}
-            assert names == {'atlassianUserInfo', 'getJiraIssue', 'searchJiraIssuesUsingJql'}
+            assert names == {
+                'atlassianUserInfo',
+                'getJiraIssue',
+                'searchJiraIssuesUsingJql',
+                'createJiraIssue',
+                'deleteJiraIssue',
+            }
             if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
                 return ModelResponse(
                     parts=[ToolCallPart(tool_name='getJiraIssue', args={'cloudId': 'site-1', 'issueIdOrKey': 'ENG-42'})]
@@ -202,7 +205,10 @@ class TestAtlassian:
     @pytest.mark.parametrize(
         ('product', 'expected'),
         [
-            ('jira', {'atlassianUserInfo', 'getJiraIssue', 'searchJiraIssuesUsingJql', 'createJiraIssue'}),
+            (
+                'jira',
+                {'atlassianUserInfo', 'getJiraIssue', 'searchJiraIssuesUsingJql', 'createJiraIssue', 'deleteJiraIssue'},
+            ),
             ('confluence', {'atlassianUserInfo', 'getConfluenceContent', 'createConfluenceContent'}),
             ('jira_service_management', {'atlassianUserInfo', 'getJsmOpsAlerts', 'updateJsmOpsAlert'}),
             (
@@ -221,7 +227,6 @@ class TestAtlassian:
         toolset = AtlassianToolset(
             cloud_id='site-1',
             products=product,  # pyright: ignore[reportArgumentType]
-            access='read_write',
             client=atlassian_server,
         )
         async with toolset:
@@ -229,28 +234,23 @@ class TestAtlassian:
         assert set(tools) == expected
 
     @pytest.mark.parametrize(
-        ('product', 'access', 'tool_name', 'args'),
+        ('product', 'read_only', 'tool_name', 'args'),
         [
-            ('jira', 'read_write', 'createJiraIssue', {'cloudId': 'site-1', 'projectKey': 'ENG', 'summary': 'Fix SSO'}),
-            ('jira', 'destructive', 'deleteJiraIssue', {'cloudId': 'site-1', 'issueIdOrKey': 'ENG-42'}),
-            ('confluence', 'read_only', 'getConfluenceContent', {'cloudId': 'site-1', 'contentId': 'page-1'}),
-            ('confluence', 'read_write', 'createConfluenceContent', {'cloudId': 'site-1', 'title': 'Runbook'}),
-            ('jira_service_management', 'read_only', 'getJsmOpsAlerts', {'cloudId': 'site-1'}),
-            (
-                'jira_service_management',
-                'read_write',
-                'updateJsmOpsAlert',
-                {'cloudId': 'site-1', 'alertId': 'alert-1'},
-            ),
+            ('jira', False, 'createJiraIssue', {'cloudId': 'site-1', 'projectKey': 'ENG', 'summary': 'Fix SSO'}),
+            ('jira', False, 'deleteJiraIssue', {'cloudId': 'site-1', 'issueIdOrKey': 'ENG-42'}),
+            ('confluence', True, 'getConfluenceContent', {'cloudId': 'site-1', 'contentId': 'page-1'}),
+            ('confluence', False, 'createConfluenceContent', {'cloudId': 'site-1', 'title': 'Runbook'}),
+            ('jira_service_management', True, 'getJsmOpsAlerts', {'cloudId': 'site-1'}),
+            ('jira_service_management', False, 'updateJsmOpsAlert', {'cloudId': 'site-1', 'alertId': 'alert-1'}),
             (
                 'bitbucket',
-                'read_only',
+                True,
                 'getBitbucketRepository',
                 {'cloudId': 'site-1', 'workspace': 'acme', 'repoSlug': 'api'},
             ),
             (
                 'bitbucket',
-                'read_write',
+                False,
                 'createBitbucketRepoPullRequest',
                 {'cloudId': 'site-1', 'workspace': 'acme', 'repoSlug': 'api'},
             ),
@@ -259,14 +259,16 @@ class TestAtlassian:
     async def test_selected_product_tools_execute_at_the_mcp_boundary(
         self,
         product: AtlassianProduct,
-        access: AtlassianAccess,
+        read_only: bool,
         tool_name: str,
         args: dict[str, Any],
         atlassian_server: FastMCP,
         atlassian_calls: list[str],
         run_context: RunContext[None],
     ):
-        toolset = AtlassianToolset[None](cloud_id='site-1', products=product, access=access, client=atlassian_server)
+        toolset = AtlassianToolset[None](
+            cloud_id='site-1', products=product, read_only=read_only, client=atlassian_server
+        )
         async with toolset:
             tools = await toolset.get_tools(run_context)
             await toolset.call_tool(tool_name, args, run_context, tools[tool_name])
@@ -282,7 +284,13 @@ class TestAtlassian:
         )
         async with toolset:
             tools = await toolset.get_tools(run_context)
-        assert set(tools) == {'atlassianUserInfo', 'getConfluenceContent', 'getBitbucketRepository'}
+        assert set(tools) == {
+            'atlassianUserInfo',
+            'getConfluenceContent',
+            'createConfluenceContent',
+            'getBitbucketRepository',
+            'createBitbucketRepoPullRequest',
+        }
         assert tools['getConfluenceContent'].tool_def.metadata == {
             'meta': None,
             'annotations': None,
@@ -312,15 +320,15 @@ class TestAtlassian:
 
         result = await Agent(
             FunctionModel(model),
-            capabilities=[Atlassian(cloud_id='site-1', access='read_write', client=atlassian_server)],
+            capabilities=[Atlassian(cloud_id='site-1', client=atlassian_server)],
         ).run('Search Jira')
         assert result.output == 'done'
         assert atlassian_calls == ['searchJiraIssuesUsingJql']
 
-    async def test_write_access_requires_approval_before_server_call(
+    async def test_write_tool_requires_approval_before_server_call(
         self, atlassian_server: FastMCP, atlassian_calls: list[str]
     ):
-        capability = Atlassian(cloud_id='site-1', access='read_write', client=atlassian_server)
+        capability = Atlassian(cloud_id='site-1', client=atlassian_server)
 
         def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             return ModelResponse(
@@ -339,30 +347,10 @@ class TestAtlassian:
         assert [call.tool_name for call in result.output.approvals] == ['createJiraIssue']
         assert atlassian_calls == []
 
-    async def test_reads_still_execute_in_write_mode(self, atlassian_server: FastMCP, atlassian_calls: list[str]):
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
-                return ModelResponse(
-                    parts=[ToolCallPart(tool_name='getJiraIssue', args={'cloudId': 'site-1', 'issueIdOrKey': 'ENG-42'})]
-                )
-            return ModelResponse(parts=[TextPart('done')])
-
-        result = await Agent(
-            FunctionModel(model),
-            capabilities=[Atlassian(cloud_id='site-1', access='read_write', client=atlassian_server)],
-        ).run('Read ENG-42')
-        assert result.output == 'done'
-        assert atlassian_calls == ['getJiraIssue']
-
     async def test_external_approval_wrapper_composes_when_builtin_approval_is_disabled(
         self, atlassian_server: FastMCP, atlassian_calls: list[str]
     ):
-        toolset = Atlassian[None](
-            cloud_id='site-1',
-            access='read_write',
-            require_approval=False,
-            client=atlassian_server,
-        ).get_toolset()
+        toolset = Atlassian[None](cloud_id='site-1', require_approval=False, client=atlassian_server).get_toolset()
 
         def require_mutation_approval(ctx: RunContext[None], tool_def: ToolDefinition, args: dict[str, Any]) -> bool:
             del ctx, args
@@ -399,19 +387,18 @@ class TestAtlassian:
                     tools['getJiraIssue'],
                 )
 
-    async def test_destructive_tools_require_explicit_mode(
-        self, atlassian_server: FastMCP, run_context: RunContext[None]
-    ):
-        write_tools = AtlassianToolset(cloud_id='site-1', access='read_write', client=atlassian_server)
-        destructive_tools = AtlassianToolset(cloud_id='site-1', access='destructive', client=atlassian_server)
-        async with write_tools:
-            assert 'deleteJiraIssue' not in await write_tools.get_tools(run_context)
-        async with destructive_tools:
-            tools = await destructive_tools.get_tools(run_context)
-        assert 'deleteJiraIssue' in tools
-        metadata = tools['deleteJiraIssue'].tool_def.metadata
-        assert metadata is not None
-        assert metadata['atlassian_access'] == 'destructive'
+    async def test_read_only_drops_write_and_destructive_tools(self, atlassian_server: FastMCP):
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            names = {tool.name for tool in info.function_tools}
+            assert names == {'atlassianUserInfo', 'getJiraIssue', 'searchJiraIssuesUsingJql'}
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent = Agent(
+            FunctionModel(model),
+            capabilities=[Atlassian(cloud_id='site-1', read_only=True, client=atlassian_server)],
+        )
+        result = await agent.run('read Jira')
+        assert result.output == 'done'
 
     async def test_common_user_info_does_not_require_cloud_id(
         self, atlassian_server: FastMCP, atlassian_calls: list[str], run_context: RunContext[None]
@@ -450,7 +437,7 @@ class TestAtlassian:
 
         result = await Agent(
             FunctionModel(model),
-            capabilities=[Atlassian(cloud_id='site-1', access='destructive', client=atlassian_server)],
+            capabilities=[Atlassian(cloud_id='site-1', client=atlassian_server)],
             output_type=[str, DeferredToolRequests],
         ).run('Delete ENG-42')
         assert isinstance(result.output, DeferredToolRequests)

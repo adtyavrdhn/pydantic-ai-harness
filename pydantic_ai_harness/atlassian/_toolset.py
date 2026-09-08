@@ -40,9 +40,6 @@ except ImportError as _import_error:  # pragma: no cover
 
 _ATLASSIAN_MCP_URL = 'https://mcp.atlassian.com/v2/mcp?tools=all'
 
-AtlassianAccess = Literal['read_only', 'read_write', 'destructive']
-"""Maximum class of Atlassian operation exposed to the agent."""
-
 AtlassianProduct = Literal['jira', 'confluence', 'jira_service_management', 'bitbucket']
 """Atlassian products represented by the supported Rovo MCP tool catalogue."""
 
@@ -172,11 +169,6 @@ def normalize_products(products: AtlassianProduct | Sequence[AtlassianProduct]) 
     return tuple(dict.fromkeys(values))
 
 
-def validate_access(access: AtlassianAccess) -> None:
-    if access not in ('read_only', 'read_write', 'destructive'):
-        raise UserError('`access` must be `read_only`, `read_write`, or `destructive`.')
-
-
 def _is_url(client: MCPToolsetClient) -> bool:
     return isinstance(client, AnyUrl) or (
         isinstance(client, str) and urlsplit(client).scheme.lower() in ('http', 'https')
@@ -216,7 +208,7 @@ class AtlassianToolset(MCPToolset[AgentDepsT]):
         *,
         cloud_id: str,
         products: AtlassianProduct | Sequence[AtlassianProduct] = ('jira',),
-        access: AtlassianAccess = 'read_only',
+        read_only: bool = False,
         authorization_token: str | None = None,
         client: MCPToolsetClient | None = None,
         id: str = 'atlassian',
@@ -226,7 +218,8 @@ class AtlassianToolset(MCPToolset[AgentDepsT]):
         Args:
             cloud_id: Atlassian site ID accepted by every selected product tool.
             products: Product tool families to expose. Jira is the default.
-            access: Read-only, read-write, or destructive tool exposure.
+            read_only: Expose only the reviewed read and search tools, dropping the ones that create, update, or
+                delete records. By default every reviewed tool for the selected products is exposed.
             authorization_token: Atlassian service-account API key sent as a Bearer token. Omit for OAuth 2.1.
             client: Replacement MCP client for custom auth, transport, or tests.
             id: Stable toolset ID.
@@ -234,7 +227,6 @@ class AtlassianToolset(MCPToolset[AgentDepsT]):
         if not cloud_id.strip():
             raise UserError('`cloud_id` must not be empty.')
         normalized_products = normalize_products(products)
-        validate_access(access)
         validate_auth_configuration(normalized_products, authorization_token, client)
 
         resolved_client: MCPToolsetClient = _ATLASSIAN_MCP_URL if client is None else client
@@ -242,7 +234,7 @@ class AtlassianToolset(MCPToolset[AgentDepsT]):
         super().__init__(resolved_client, id=id, auth=auth, process_tool_call=self._enforce_site_scope)
         self.cloud_id = cloud_id
         self.products = normalized_products
-        self.access = access
+        self.read_only = read_only
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
         tools = await super().get_tools(ctx)
@@ -252,9 +244,8 @@ class AtlassianToolset(MCPToolset[AgentDepsT]):
         for product in self.products:
             selected.update((name, (product, 'read')) for name in _READ_TOOLS[product])
             selected.update((name, (product, 'search')) for name in _SEARCH_TOOLS[product])
-            if self.access != 'read_only':
+            if not self.read_only:
                 selected.update((name, (product, 'write')) for name in _WRITE_TOOLS[product])
-            if self.access == 'destructive':
                 selected.update((name, (product, 'destructive')) for name in _DESTRUCTIVE_TOOLS[product])
 
         filtered = {
