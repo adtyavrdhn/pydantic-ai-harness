@@ -46,7 +46,7 @@ print(result.output)
   package's own: a tool Notion adds later stays hidden until the list is updated here.
 - To have a person confirm each write, call `.approval_required()` on the toolset returned by
   `Notion().get_toolset()` and pass that to the agent as a toolset; the
-  [approval recipe](https://github.com/pydantic/pydantic-ai-harness/blob/main/pydantic_ai_harness/stackone/README.md#require-approval)
+  [tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval)
   shows how to handle the resulting requests.
 
 Pass `auth=` with an OAuth access token your application already holds, or a custom `httpx.Auth`, to
