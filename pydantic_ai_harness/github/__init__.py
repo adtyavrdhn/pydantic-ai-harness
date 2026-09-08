@@ -1,4 +1,4 @@
-"""Read and change GitHub through its official remote MCP server; `read_only=True` narrows it to read tools."""
+"""Read and change GitHub through its official hosted MCP server."""
 
 from pydantic_ai_harness.github._capability import GitHub
 
