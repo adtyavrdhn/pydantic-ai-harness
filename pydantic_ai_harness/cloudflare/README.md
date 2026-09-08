@@ -47,6 +47,6 @@ the environment variable.
   a server's `tools/list` before relying on the flag: where it annotates nothing, the agent gets no
   tools at all.
 - Writes run without confirmation. To review each one first, follow the
-  [approval recipe](https://github.com/pydantic/pydantic-ai-harness/blob/main/pydantic_ai_harness/stackone/README.md#require-approval).
+  [tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/cloudflare/)
