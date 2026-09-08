@@ -46,7 +46,7 @@ print(result.output)
 ## Operational constraints
 
 - The token's permissions are GitHub's authorization boundary, and writes run without confirmation.
-  Use the [approval recipe](https://github.com/pydantic/pydantic-ai-harness/blob/main/pydantic_ai_harness/stackone/README.md#require-approval) where a change needs a human first.
+  Use the [tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval) where a change needs a human first.
 - `read_only=True` sends GitHub's `X-MCP-Readonly` header, and GitHub then serves only the tools it
   marks read-only.
 - For GitHub Enterprise Cloud with data residency, pass your tenant's endpoint as
