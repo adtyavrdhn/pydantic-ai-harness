@@ -1,26 +1,4 @@
-"""Managed AWS MCP Server capability.
-
-External contract, verified 2026-09-04:
-
-- The managed server is GA in `us-east-1` and `eu-central-1`; SigV4 connections
-  can configure a separate default Region for AWS operations.
-- Public knowledge tools accept unauthenticated remote connections. Authenticated
-  connections use a caller-owned AWS Sign-In OAuth 2.1 transport or AWS's MCP Proxy
-  for AWS, which owns credential resolution and SigV4 signing.
-- MCP tools carry `readOnlyHint`; the proxy's read-only mode uses that hint too.
-- The service has no additional charge. Called AWS services and data transfer
-  retain their normal charges.
-
-Sources:
-https://docs.aws.amazon.com/agent-toolkit/latest/userguide/getting-started-aws-mcp-server.html
-https://docs.aws.amazon.com/agent-toolkit/latest/userguide/understanding-mcp-server-tools.html
-https://docs.aws.amazon.com/general/latest/gr/aws-mcp.html
-https://aws.amazon.com/about-aws/whats-new/2026/05/aws-mcp-server/
-https://github.com/aws/mcp-proxy-for-aws
-
-Re-check the endpoint table, authentication decision guide, tool annotations,
-and launch status before changing transport, access, or Region behavior.
-"""
+"""Managed AWS MCP Server capability."""
 
 from __future__ import annotations
 
