@@ -250,7 +250,6 @@ COMBINE_POLICY: dict[str, Policy] = {
     'Skills': Anonymous('a factory: one deferred capability per skill, each named after the skill'),
     'SlidingWindowCompaction': Anonymous('composes as a tier under `TieredCompaction`'),
     'StackOne': Anonymous('one per linked account, and `account_id` is what names it'),
-    'Supabase': Anonymous('one per project; instances coexist when their selected feature groups have disjoint tools'),
     'TieredCompaction': Anonymous('drives other strategies; one per tier list'),
     'WarnNearLimits': Anonymous('a passive observer; several thresholds compose'),
     'WarnOnCacheBusts': Anonymous('a passive observer; several thresholds compose'),
@@ -293,6 +292,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     'ExaSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
     'YouResearch': Collides('its toolset registers `research` and friends under fixed names'),
     'YouSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
+    'Supabase': Collides('its toolset registers the Supabase MCP tool names, which are the same for every project'),
 }
 
 
