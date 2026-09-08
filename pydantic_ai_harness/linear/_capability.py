@@ -17,7 +17,6 @@ from typing import Literal
 
 from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 
 try:
@@ -36,8 +35,8 @@ _DEFAULT_DESCRIPTION = 'Use Linear issues, projects, and teams.'
 class Linear(AbstractCapability[AgentDepsT]):
     """Connect an agent to Linear's hosted MCP server.
 
-    The default uses Linear's read-only endpoint, so the server decides which tools exist.
-    Set `access='write'` to use the read-write endpoint.
+    The default connects to Linear's read-write endpoint, which serves the tools that create and
+    update issues, projects, and comments. Set `read_only=True` to connect to the read-only endpoint.
     """
 
     _: KW_ONLY
@@ -48,19 +47,16 @@ class Linear(AbstractCapability[AgentDepsT]):
     description: str | None = _DEFAULT_DESCRIPTION
     """Routing description used when the capability is loaded on demand."""
 
-    access: Literal['read', 'write'] = 'read'
-    """`'read'` connects to Linear's read-only endpoint; `'write'` connects to the read-write endpoint."""
+    read_only: bool = False
+    """Connect to Linear's read-only endpoint, so the server hides the tools that create and update
+    issues, projects, and comments."""
 
     auth: Auth | Literal['oauth'] | str = field(repr=False)
     """`'oauth'` for browser login, a Linear API key or OAuth token, or a custom `httpx.Auth`."""
 
-    def __post_init__(self):
-        if self.access not in ('read', 'write'):
-            raise UserError('`access` must be `read` or `write`.')
-
     def get_toolset(self) -> MCPToolset[AgentDepsT]:
         """Build the Linear MCP connection."""
-        url = _LINEAR_MCP_URL if self.access == 'write' else _LINEAR_READ_ONLY_MCP_URL
+        url = _LINEAR_READ_ONLY_MCP_URL if self.read_only else _LINEAR_MCP_URL
         return MCPToolset(url, id=self.id or 'linear', auth=self.auth)
 
     @classmethod
@@ -70,11 +66,11 @@ class Linear(AbstractCapability[AgentDepsT]):
         id: str | None = None,
         description: str | None = _DEFAULT_DESCRIPTION,
         defer_loading: bool = False,
-        access: Literal['read', 'write'] = 'read',
+        read_only: bool = False,
         auth: Literal['oauth'] | str,
     ) -> Linear[AgentDepsT]:
         """Construct a Linear capability from serializable options."""
-        return cls(id=id, description=description, defer_loading=defer_loading, access=access, auth=auth)
+        return cls(id=id, description=description, defer_loading=defer_loading, read_only=read_only, auth=auth)
 
     @classmethod
     def get_serialization_name(cls) -> str:

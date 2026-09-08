@@ -6,7 +6,6 @@ import httpx
 import pytest
 from fastmcp.client.auth import BearerAuth, OAuth
 from fastmcp.client.transports import StreamableHttpTransport
-from pydantic_ai import UserError
 from pydantic_ai.agent.spec import AgentSpec
 
 from pydantic_ai_harness.linear import Linear
@@ -19,15 +18,11 @@ def _http_transport(linear: Linear[None]) -> StreamableHttpTransport:
 
 
 class TestLinear:
-    def test_default_uses_read_only_endpoint(self):
-        assert _http_transport(Linear(auth='token')).url == 'https://mcp.linear.app/mcp/readonly'
+    def test_default_uses_read_write_endpoint(self):
+        assert _http_transport(Linear(auth='token')).url == 'https://mcp.linear.app/mcp'
 
-    def test_write_access_uses_read_write_endpoint(self):
-        assert _http_transport(Linear(auth='token', access='write')).url == 'https://mcp.linear.app/mcp'
-
-    def test_access_rejects_unknown_value(self):
-        with pytest.raises(UserError, match='`access` must be `read` or `write`'):
-            Linear(auth='token', access='readonly')  # pyright: ignore[reportArgumentType]
+    def test_read_only_uses_read_only_endpoint(self):
+        assert _http_transport(Linear(auth='token', read_only=True)).url == 'https://mcp.linear.app/mcp/readonly'
 
     def test_bearer_token_reaches_transport_and_stays_out_of_repr(self):
         capability = Linear(auth='lin_api_secret')
@@ -56,16 +51,16 @@ class TestLinear:
         schema = AgentSpec.model_json_schema_with_capabilities([Linear])
         params = schema['$defs']['spec_params_Linear']
 
-        assert set(params['properties']) == {'id', 'description', 'defer_loading', 'access', 'auth'}
+        assert set(params['properties']) == {'id', 'description', 'defer_loading', 'read_only', 'auth'}
         assert params['required'] == ['auth']
 
     def test_from_spec_forwards_options(self):
         capability = Linear.from_spec(
-            id='tenant-linear', description='Tenant issues', defer_loading=True, access='write', auth='token'
+            id='tenant-linear', description='Tenant issues', defer_loading=True, read_only=True, auth='token'
         )
 
         assert capability.id == 'tenant-linear'
         assert capability.description == 'Tenant issues'
         assert capability.defer_loading is True
-        assert capability.access == 'write'
+        assert capability.read_only is True
         assert capability.auth == 'token'

@@ -5,9 +5,9 @@ description: Connect a Pydantic AI agent to Linear's hosted MCP server.
 
 # Linear
 
-Use `Linear` when an agent needs to read Linear issues, projects, and teams, or, with write access,
-create and update issues, projects, and comments. It connects to Linear's hosted MCP server and uses the read-only endpoint by
-default, so the server decides which tools the agent can see.
+Use `Linear` when an agent needs to read, create, and update Linear issues, projects, teams, and
+comments. It connects to Linear's hosted MCP server with write access by default; `read_only=True`
+switches to Linear's read-only endpoint, so the server hides the tools that change data.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
@@ -48,10 +48,10 @@ Pass `auth='oauth'` instead of a token for Linear's browser login. OAuth connect
 first tool call ([python-sdk #3209](https://github.com/modelcontextprotocol/python-sdk/issues/3209));
 an API key avoids that.
 
-## Write access
+## Approving writes
 
-`access='write'` connects to Linear's read-write endpoint, which adds the tools that create and
-update issues, projects, and comments. Pair it with [tool approval](/ai/tools-toolsets/toolsets/#requiring-tool-approval) so a person confirms each
+The default endpoint serves the tools that create and update issues, projects, and comments. Pair
+it with [tool approval](/ai/tools-toolsets/toolsets/#requiring-tool-approval) so a person confirms each
 change:
 
 ```python
@@ -61,7 +61,7 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import DeferredToolRequests
 from pydantic_ai_harness.linear import Linear
 
-linear = Linear(auth=os.environ['LINEAR_ACCESS_TOKEN'], access='write')
+linear = Linear(auth=os.environ['LINEAR_ACCESS_TOKEN'])
 agent = Agent(
     'openai:gpt-5.6-sol',
     toolsets=[linear.get_toolset().approval_required()],
