@@ -67,7 +67,7 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
 
     def __post_init__(self) -> None:
         """Normalize `services` to a tuple of products that have an endpoint."""
-        self.services = (self.services,) if isinstance(self.services, str) else tuple(self.services)
+        self.services = (self.services,) if isinstance(self.services, str) else tuple(dict.fromkeys(self.services))
         if not self.services:
             raise UserError('Google Workspace needs at least one service.')
         for service in self.services:
@@ -77,7 +77,7 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build one product-prefixed MCP connection per selected service."""
         auth = self.auth if self.auth is not None else environ.get('GOOGLE_ACCESS_TOKEN')
-        if not auth:
+        if auth is None or auth == '':
             raise UserError('Google Workspace needs a token: pass auth= or set GOOGLE_ACCESS_TOKEN.')
         prefix = self.id or 'google-workspace'
         toolset: AbstractToolset[AgentDepsT] = CombinedToolset(

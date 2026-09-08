@@ -47,7 +47,11 @@ class TestGoogleWorkspace:
     async def test_product_connections_share_caller_auth(
         self, connections: list[tuple[str, httpx.Auth | str | None]]
     ) -> None:
-        auth = httpx.BasicAuth('user', 'secret')
+        class FalseyAuth(httpx.BasicAuth):
+            def __bool__(self) -> bool:
+                return False
+
+        auth = FalseyAuth('user', 'secret')
         agent = Agent(TestModel(call_tools=[]), capabilities=[GoogleWorkspace(['gmail', 'calendar'], auth=auth)])
         await agent.run('Hello')
         assert connections == [
@@ -71,3 +75,8 @@ class TestGoogleWorkspace:
         request = result.all_messages()[0]
         assert isinstance(request, ModelRequest)
         assert ('Google instructions.' in (request.instructions or '')) is include
+
+    async def test_duplicate_services(self, connections: list[tuple[str, httpx.Auth | str | None]]) -> None:
+        capability = GoogleWorkspace(['gmail', 'gmail'], auth='token', read_only=True)
+        result = await Agent(TestModel(), capabilities=[capability]).run('Read')
+        assert result.output == '{"gmail_read_item":"read"}'
