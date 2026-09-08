@@ -6,6 +6,7 @@ from ._warn import HarnessDeprecationWarning
 
 if TYPE_CHECKING:
     from .advisor import Advisor
+    from .aws import AWS
     from .browser_use import BrowserUse
     from .capability_creation import CapabilityCreation
     from .code_mode import CodeMode
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
     from .youdotcom import YouResearch, YouSearch
 
 __all__ = [
+    'AWS',
     'Advisor',
     'BrowserUse',
     'CapabilityCreation',
@@ -116,6 +118,7 @@ __all__ = [
 ]
 
 _CAPABILITY_EXPORTS = {
+    'AWS': 'aws',
     'Advisor': 'advisor',
     'BrowserUse': 'browser_use',
     'CapabilityCreation': 'capability_creation',

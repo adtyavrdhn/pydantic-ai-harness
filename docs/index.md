@@ -156,7 +156,7 @@ Connections to systems outside the agent's workspace, and abilities the provider
 |---|---|---|
 | [MCP](/ai/capabilities/mcp/) | Core | Connect any MCP server's tools; local by default, provider-native connectors opt-in |
 | [Image Generation](/ai/capabilities/image-generation/) | Core | Generate and edit images; provider-native where supported, sub-agent fallback elsewhere |
-| [AWS](aws.md) | Harness | Use the managed AWS MCP Server for one account and Region; non-read tools need approval, `read_only=True` hides them |
+| [AWS](aws.md) | Harness | Read AWS documentation and operate AWS resources through the managed AWS MCP Server |
 | [StackOne](stackone.md) | Harness | Act on linked SaaS accounts (HRIS, ATS, CRM, …) via [StackOne](https://www.stackone.com) |
 | [LocalStack](localstack.md) | Harness | An emulated AWS environment with AWS CLI tools |
 | [Macroscope](macroscope.md) | Harness | Run a local [Macroscope](https://docs.macroscope.com/cli) code review and hand the findings to the agent |

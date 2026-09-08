@@ -249,7 +249,6 @@ COMBINE_POLICY: dict[str, Policy] = {
     'ReportContextUsage': Anonymous('a passive observer; several callbacks compose'),
     'Skills': Anonymous('a factory: one deferred capability per skill, each named after the skill'),
     'SlidingWindowCompaction': Anonymous('composes as a tier under `TieredCompaction`'),
-    'AWS': Anonymous('account, target Region, and endpoint Region derive its id'),
     'StackOne': Anonymous('one per linked account, and `account_id` is what names it'),
     'TieredCompaction': Anonymous('drives other strategies; one per tier list'),
     'WarnNearLimits': Anonymous('a passive observer; several thresholds compose'),
@@ -259,6 +258,7 @@ COMBINE_POLICY: dict[str, Policy] = {
         'itself up, before any id is consulted'
     ),
     # -- No default `id`, but two never coexist anyway: their tool names collide. --
+    'AWS': Collides("its toolset registers AWS's tool names under a fixed toolset id"),
     'FileSystem': Collides(
         'its toolset registers `read_file` and friends under fixed names',
         lambda cls: (cls(str(_TMP_A)), cls(str(_TMP_B))),
