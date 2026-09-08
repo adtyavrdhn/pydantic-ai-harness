@@ -6,7 +6,6 @@ from ._warn import HarnessDeprecationWarning
 
 if TYPE_CHECKING:
     from .advisor import Advisor
-    from .atlassian import Atlassian
     from .browser_use import BrowserUse
     from .capability_creation import CapabilityCreation
     from .code_mode import CodeMode
@@ -60,7 +59,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     'Advisor',
-    'Atlassian',
     'BrowserUse',
     'CapabilityCreation',
     'ClampOversizedMessages',
@@ -119,7 +117,6 @@ __all__ = [
 
 _CAPABILITY_EXPORTS = {
     'Advisor': 'advisor',
-    'Atlassian': 'atlassian',
     'BrowserUse': 'browser_use',
     'CapabilityCreation': 'capability_creation',
     'ClampOversizedMessages': 'compaction',
