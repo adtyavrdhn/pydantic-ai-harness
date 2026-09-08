@@ -10,7 +10,6 @@ streams, and this suite turns warnings into errors.
 
 from __future__ import annotations
 
-import importlib.util
 import multiprocessing
 import socket
 import time
@@ -18,9 +17,9 @@ from collections.abc import Iterator
 
 import pytest
 
-collect_ignore = (
-    ['test_aws.py'] if importlib.util.find_spec('mcp') is None or importlib.util.find_spec('fastmcp') is None else []
-)
+# `fastmcp-slim` imports but raises ImportError for server support, so widen the skip.
+pytest.importorskip('fastmcp.server', exc_type=ImportError)
+pytest.importorskip('mcp')
 
 
 @pytest.fixture
