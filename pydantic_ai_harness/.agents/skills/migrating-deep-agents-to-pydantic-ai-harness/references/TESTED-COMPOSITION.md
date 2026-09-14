@@ -1,10 +1,11 @@
 # Tested Composition
 
-Use this construction smoke test only when a local coding-agent composition is a plausible target. `Coder(workspace)` is shorter when its documented defaults match the source.
+Use this target smoke test only when a local coding-agent composition is plausible. `Coder(workspace)` is shorter when its documented defaults match the source.
 
 The repository's skill-example test executes this example and forbids execution or lint skips, so imports and public constructor signatures cannot drift unnoticed. It does not prove behavioral parity with a source application.
 
 ```python
+import asyncio
 from tempfile import TemporaryDirectory
 
 from pydantic_ai import Agent
@@ -23,6 +24,8 @@ worker = Agent(TestModel(call_tools=[]), name='researcher', description='Researc
 with TemporaryDirectory() as workspace:
     migrated = Agent(
         TestModel(call_tools=[]),
+        output_type=str,
+        instructions='Work only inside the configured workspace.',
         capabilities=[
             Planning(),
             FileSystem(workspace, read_only=True),
@@ -30,4 +33,7 @@ with TemporaryDirectory() as workspace:
             SlidingWindowCompaction(max_messages=20, keep_messages=10),
         ],
     )
+    result = asyncio.run(migrated.run('Describe the available workspace tools.'))
+    assert isinstance(result.output, str)
+    assert result.all_messages()
 ```
