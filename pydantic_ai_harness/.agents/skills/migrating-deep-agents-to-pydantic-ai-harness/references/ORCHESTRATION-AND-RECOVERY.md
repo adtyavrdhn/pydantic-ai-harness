@@ -2,6 +2,8 @@
 
 Read only when the source uses subagents, grading loops, approvals, checkpoints, retries, durable execution, or streaming.
 
+Import `SubAgent` and `SubAgents` from `pydantic_ai_harness.subagents`. Harness can load its Markdown agent format from configured folders, but it does not consume a Deep Agents YAML roster. Parse and validate retained application configuration into explicit `Agent` and `SubAgent` objects, or intentionally convert it: YAML `system_prompt` becomes `Agent.instructions` or the Markdown body, `description` remains the description, and `tools` become explicit toolsets or a `tool_resolver`. Set the child model explicitly or through `AgentOverride`; a `model` key in Harness Markdown is parsed but not applied.
+
 | Deep Agents feature | Pydantic AI and Harness candidate | Important difference |
 | --- | --- | --- |
 | synchronous named children | `SubAgents` | Inspect the automatic general-purpose child and disablement, isolated versus forked context, declarative versus compiled children, tools, skills, permissions, approvals, state, structured results, and streaming inheritance. Harness does not transfer mutable parent capability state implicitly; use explicit dependencies or state transfer, `shared_capabilities`, or an application repository, then test child write visibility. |

@@ -31,7 +31,7 @@ Do not mark a mapping equivalent from documentation or a matching class name alo
 - **Streaming:** compare event types, lineage, order, redaction, backpressure, child and tool events, error termination, and when the final result becomes visible.
 - **Observability:** capture spans or callbacks and verify conversation, run, child, tool-call, and external-job correlation plus redaction and error attributes.
 
-Use `TestModel(call_tools=[])` for construction-only checks. When a test claims tool behavior, use a `FunctionModel` callback that returns scripted `ModelResponse` tool calls, or `TestModel(call_tools=[...])` for simple coverage. Exercise public `Agent(..., capabilities=[...])` paths where possible, and probe the locked external runtime for contracts that deterministic models cannot establish.
+Use `TestModel(call_tools=[])` for construction-only checks. When a test claims tool behavior, use `TestModel(call_tools=[...])` for simple coverage or a `FunctionModel` that returns scripted `ModelResponse` tool calls. `FunctionModel(function=...)` covers only non-streamed requests. Event-aware capabilities such as `RepoContext` can make `Agent.run()` use the streamed model path; provide `stream_function` (or both callbacks) and yield the documented text or tool-call deltas. Execute the complete composition once so that path is not guessed from the model stub alone. Exercise public `Agent(..., capabilities=[...])` paths where possible, and probe the locked external runtime for contracts that deterministic models cannot establish.
 
 ## Example policy
 
