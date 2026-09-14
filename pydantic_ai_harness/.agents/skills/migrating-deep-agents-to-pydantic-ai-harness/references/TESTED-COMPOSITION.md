@@ -18,11 +18,11 @@ from pydantic_ai_harness import (
     SubAgents,
 )
 
-worker = Agent(TestModel(), name='researcher', description='Research a bounded question.')
+worker = Agent(TestModel(call_tools=[]), name='researcher', description='Research a bounded question.')
 
 with TemporaryDirectory() as workspace:
     migrated = Agent(
-        TestModel(),
+        TestModel(call_tools=[]),
         capabilities=[
             Planning(),
             FileSystem(workspace, read_only=True),

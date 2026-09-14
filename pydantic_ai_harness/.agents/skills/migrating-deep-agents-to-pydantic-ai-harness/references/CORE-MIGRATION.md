@@ -7,11 +7,15 @@ Deep Agents is an opinionated harness over LangChain's agent loop and the LangGr
 | Deep Agents contract | Pydantic AI candidate | Required check |
 | --- | --- | --- |
 | `create_deep_agent` | `Agent(...)` with explicit tools, toolsets, capabilities, outputs, and settings | Snapshot the effective prompt, tool schemas, profile behavior, result, errors, and limits. |
+| LangChain `BaseChatModel` | a Pydantic AI provider model or model string | Do not pass the LangChain model through. Translate provider settings, model profiles, retries, and limits, then validate the locked target configuration. |
+| graph `.invoke()` or `.stream()` | `run`, `run_sync`, or `run_stream` | Keep a boundary adapter until callers accept Pydantic AI result, message, error, and event shapes. |
 | `context_schema` | `deps_type` and `RunContext` | Dependencies are runtime resources and identity, not checkpointed state. |
 | custom `state_schema` and reducers | capability-owned run state, an application repository, or `pydantic_graph` | Classify each field's lifecycle and merge semantics. |
 | custom middleware | a core capability, `Hooks`, a wrapper toolset, or a focused Harness capability | Match hook timing, ordering, mutation, retry, and failure behavior. |
 | structured response | Pydantic `output_type` and an explicit output mode | Test invalid output, final-tool behavior, and streaming. |
 | LangSmith callbacks | OpenTelemetry or Logfire plus application correlation | Preserve conversation, run, child, tool-call, and external-job identities separately. |
+
+Adapt LangChain `@tool` and `StructuredTool` objects to typed Pydantic functions or toolsets. Preserve their names, schemas, return values, and errors rather than passing framework objects through unchanged.
 
 For plain chains, LCEL, or direct LangGraph code in a mixed project, use `$migrating-langchain-to-pydantic-ai` when it is available.
 

@@ -22,10 +22,10 @@ Do not mark a mapping equivalent from documentation or a matching class name alo
 - **Plans:** test create or replace semantics, status transitions, persistence, concurrent writers, visibility on the next request, and UI events.
 - **Files and sandboxes:** test traversal, absolute paths, symlinks, permissions, media and binary data, output bounds, environment leakage, timeout, reconnect, egress, and cleanup failure.
 - **Approvals:** test approve, deny, changed arguments, stale decisions, authorization changes, crash before and after execution, replay, and side-effect idempotency.
-- **Persistence:** test continuation from every promised stop point. Separate message snapshots from graph state, pending work, files, plans, and tool effects.
+- **Persistence:** test continuation from every promised stop point. Determine whether the source retains complete tool-call history or only selected user and final messages before choosing Pydantic AI `message_history`. Separate message snapshots from graph state, pending work, files, plans, and tool effects.
 - **Streaming:** compare event types, lineage, order, redaction, backpressure, child and tool events, error termination, and when the final result becomes visible.
 
-Use `TestModel` or `FunctionModel` for deterministic agent behavior. Exercise public `Agent(..., capabilities=[...])` paths where possible, and probe the locked external runtime for contracts that mocks cannot establish.
+Use `TestModel(call_tools=[])` for construction-only checks. When a test claims tool behavior, use a `FunctionModel` callback that returns scripted `ModelResponse` tool calls, or `TestModel(call_tools=[...])` for simple coverage. Exercise public `Agent(..., capabilities=[...])` paths where possible, and probe the locked external runtime for contracts that deterministic models cannot establish.
 
 ## Example policy
 

@@ -1,6 +1,6 @@
 ---
 name: migrating-deep-agents-to-pydantic-ai-harness
-description: Migrate Python LangChain Deep Agents applications to Pydantic AI and Pydantic AI Harness. Use when the source imports `deepagents`, calls `create_deep_agent`, or relies on Deep Agents middleware, backends, skills, memory, subagents, or sandbox behavior. Use `migrating-langchain-to-pydantic-ai` for plain LangChain, LangGraph, or LCEL migrations and `pydantic-ai-harness` for greenfield Harness usage.
+description: Migrate Python LangChain Deep Agents applications to Pydantic AI and Pydantic AI Harness. Use when the source uses the upstream `deepagents` package or demonstrably reproduces its middleware, backends, skills, memory, subagents, or sandbox contracts. Use `migrating-langchain-to-pydantic-ai` for plain LangChain, LangGraph, or LCEL migrations and `pydantic-ai-harness` for greenfield Harness usage.
 ---
 
 # Migrate Deep Agents to Pydantic AI Harness
@@ -9,7 +9,7 @@ Preserve the application's observed contracts, not the shape of `create_deep_age
 
 ## Establish the source contract
 
-1. Read repository instructions, manifests, lockfiles, tests, runtime entrypoints, and the installed Deep Agents source. Record exact Deep Agents, LangChain, LangGraph, Pydantic AI, and Harness versions.
+1. Resolve the `deepagents` import origin before applying these mappings. Route a local module or project-owned `create_deep_agent` to the ordinary LangChain migration only when its implementation has ordinary LangChain or LangGraph semantics; vendored implementations that reproduce Deep Agents contracts remain in scope. Read repository instructions, manifests, lockfiles, tests, runtime entrypoints, and the resolved source. Record exact Deep Agents, LangChain, LangGraph, Pydantic AI, and Harness versions.
    If the locked source is unavailable, reproduce its environment without changing the target lockfile. If that is not possible, mark affected behavior unverified and do not claim parity.
 2. Trace one representative request through the effective prompt and profile, tools, middleware, backend routes, skills and memory, subagents, state, checkpointer, interrupts, events, limits, side effects, and public result. Inspect every caller of the migrated boundary.
 3. Run the cheapest deterministic baseline. Record evidence separately from the outcome: `source-inspected`, `probe-observed`, or `regression-tested`.
