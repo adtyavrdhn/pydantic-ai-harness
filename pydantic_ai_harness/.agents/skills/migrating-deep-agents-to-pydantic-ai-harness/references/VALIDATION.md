@@ -17,13 +17,19 @@ Do not mark a mapping equivalent from documentation or a matching class name alo
 ## Focused checks
 
 - **Prompt and tools:** compare effective instructions, ordering, tool names, descriptions, JSON schemas, hidden context, retries, errors, timeouts, approvals, and provider-native tools.
+- **MCP:** test authentication, filtering, structured content, connection and session lifetime, elicitation, sampling, retries, and trace correlation against the selected transport.
 - **State and memory:** restart the process and test namespace isolation, retention, concurrent writes, deletion, corrupt data, and whether the next run observes a write.
 - **Subagents:** test context isolation, explicit state transfer, model and tool selection, parent and child budgets, timeout, cancellation, partial failure, result shape, and streamed identity.
 - **Plans:** test create or replace semantics, status transitions, persistence, concurrent writers, visibility on the next request, and UI events.
-- **Files and sandboxes:** test traversal, absolute paths, symlinks, permissions, media and binary data, output bounds, environment leakage, timeout, reconnect, egress, and cleanup failure.
+- **Files and sandboxes:** test traversal, absolute paths, symlinks, media and binary data, output bounds, environment leakage, timeout, reconnect, egress, and cleanup failure. For permissions, test operation classes, first-match order, unmatched calls, allow, deny, interrupt, route-relative paths, and child overrides.
+- **Interpreters:** test generated-code limits, state and reset scope, tool and subagent bridges, schema conversion, approval enforcement, OS access, timeouts, and resource-limit failures.
+- **Skills and repository context:** test discovery layout, precedence, catalog names and descriptions, deferred loading, snapshot or rescan behavior, runtime writes, bundled resources and scripts, walk-up boundaries, instruction precedence, and nested traversal.
+- **Retrieval:** test ingestion, chunking, filters, tenancy, ranking, metadata, citations, bounds, latency, and failure shapes.
+- **Context offload:** test thresholds, lossy versus lossless paths, backend/store failure, model-visible receipts, read-back bounds, store lifetime, serialization, and restoration of text and media.
 - **Approvals:** test approve, deny, changed arguments, stale decisions, authorization changes, crash before and after execution, replay, and side-effect idempotency.
 - **Persistence:** test continuation from every promised stop point. Determine whether the source retains complete tool-call history or only selected user and final messages before choosing Pydantic AI `message_history`. Separate message snapshots from graph state, pending work, files, plans, and tool effects.
 - **Streaming:** compare event types, lineage, order, redaction, backpressure, child and tool events, error termination, and when the final result becomes visible.
+- **Observability:** capture spans or callbacks and verify conversation, run, child, tool-call, and external-job correlation plus redaction and error attributes.
 
 Use `TestModel(call_tools=[])` for construction-only checks. When a test claims tool behavior, use a `FunctionModel` callback that returns scripted `ModelResponse` tool calls, or `TestModel(call_tools=[...])` for simple coverage. Exercise public `Agent(..., capabilities=[...])` paths where possible, and probe the locked external runtime for contracts that deterministic models cannot establish.
 

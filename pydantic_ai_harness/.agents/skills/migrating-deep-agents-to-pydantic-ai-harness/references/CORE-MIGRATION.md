@@ -7,16 +7,20 @@ Deep Agents is an opinionated harness over LangChain's agent loop and the LangGr
 | Deep Agents contract | Pydantic AI candidate | Required check |
 | --- | --- | --- |
 | `create_deep_agent` | `Agent(...)` with explicit tools, toolsets, capabilities, outputs, and settings | Snapshot the effective prompt, tool schemas, profile behavior, result, errors, and limits. |
-| LangChain `BaseChatModel` | a Pydantic AI provider model or model string | Do not pass the LangChain model through. Translate provider settings, model profiles, retries, and limits, then validate the locked target configuration. |
-| graph `.invoke()` or `.stream()` | `run`, `run_sync`, or `run_stream` | Keep a boundary adapter until callers accept Pydantic AI result, message, error, and event shapes. |
+| LangChain `BaseChatModel` | a Pydantic AI provider model or model string | Do not pass the LangChain model through. Translate transport, endpoint, authentication, provider settings, model profiles, retries, and limits. Construct and validate every configured model branch. |
+| Deep Agents harness and provider profiles | explicit agent configuration plus Pydantic AI model settings and profiles | Trace provider/model lookup and merge order. Preserve prompt layers, tool descriptions and exclusions, middleware changes, general-purpose-child settings, and model-construction defaults; a Pydantic AI model profile does not configure the Harness composition. |
+| graph `.invoke()`, `.ainvoke()`, `.stream()`, `.astream()`, or event callbacks | `run_sync`, `run`, `run_stream`, and `event_stream_handler` | Preserve sync, async, output-stream, and event-stream behavior. Keep a boundary adapter until callers accept Pydantic AI result, message, error, and event shapes. |
 | `context_schema` | `deps_type` and `RunContext` | Dependencies are runtime resources and identity, not checkpointed state. |
 | custom `state_schema` and reducers | capability-owned run state, an application repository, or `pydantic_graph` | Classify each field's lifecycle and merge semantics. |
-| custom middleware | a core capability, `Hooks`, a wrapper toolset, or a focused Harness capability | Match hook timing, ordering, mutation, retry, and failure behavior. |
+| custom or replaced middleware | a core capability, `Hooks`, a wrapper toolset, or a focused Harness capability | Match hook timing, ordering, name-based replacement or exclusion, request mutation, retry, and failure behavior on main and child stacks. |
 | structured response | Pydantic `output_type` and an explicit output mode | Test invalid output, final-tool behavior, and streaming. |
-| LangSmith callbacks | OpenTelemetry or Logfire plus application correlation | Preserve conversation, run, child, tool-call, and external-job identities separately. |
+| graph cache and provider prompt caching | application caching plus the selected Pydantic AI provider behavior | Separate graph-step caching from provider prompt caching; verify keys, scope, invalidation, cached content, usage, and replay behavior. |
+| LangSmith, Langfuse, or other callbacks | retain the existing system, or use OpenTelemetry or Logfire after agreement | Compare correlation, dashboards, evaluations, retention, export, and privacy. Preserve conversation, run, child, tool-call, and external-job identities separately. |
 
 Adapt LangChain `@tool` and `StructuredTool` objects to typed Pydantic functions or toolsets. Preserve their names, schemas, return values, and errors rather than passing framework objects through unchanged.
 
+For MCP, use `pydantic_ai.capabilities.MCP` when provider-native or client-side selection is needed; use `pydantic_ai.mcp.MCPToolset` for client-side MCP connections. Preserve transport, authentication, tool filtering, structured content, connection and session lifetime, elicitation, sampling, retries, and tracing at the integration boundary.
+
 For plain chains, LCEL, or direct LangGraph code in a mixed project, use `$migrating-langchain-to-pydantic-ai` when it is available.
 
-Primary sources: [Deep Agents architecture](https://github.com/langchain-ai/deepagents/blob/main/libs/ARCHITECTURE.md), [`create_deep_agent` source](https://github.com/langchain-ai/deepagents/blob/main/libs/deepagents/deepagents/graph.py), [Pydantic AI capabilities](https://pydantic.dev/docs/ai/capabilities/overview/), and [hooks](https://pydantic.dev/docs/ai/core-concepts/hooks/).
+Primary sources: [Deep Agents architecture](https://github.com/langchain-ai/deepagents/blob/main/libs/ARCHITECTURE.md), [`create_deep_agent` source](https://github.com/langchain-ai/deepagents/blob/main/libs/deepagents/deepagents/graph.py), [profiles](https://docs.langchain.com/oss/python/deepagents/profiles), [Pydantic AI capabilities](https://pydantic.dev/docs/ai/capabilities/overview/), and [hooks](https://pydantic.dev/docs/ai/core-concepts/hooks/).
