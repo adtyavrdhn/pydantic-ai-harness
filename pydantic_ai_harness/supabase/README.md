@@ -84,7 +84,7 @@ class Deps:
 
 
 def supabase(ctx: RunContext[Deps]) -> Supabase[Deps] | None:
-    if ctx.deps.supabase_token is None or ctx.deps.supabase_project_ref is None:
+    if not ctx.deps.supabase_token or not ctx.deps.supabase_project_ref:
         return None
     return Supabase(auth=ctx.deps.supabase_token, project_ref=ctx.deps.supabase_project_ref)
 
