@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
@@ -25,8 +24,8 @@ class Supabase(AbstractCapability[AgentDepsT]):
     """Give the agent the tools of Supabase's hosted MCP server."""
 
     description: str | None = 'Use Supabase project and account tools.'
-    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
-    """A Supabase personal access token, an `httpx.Auth`, or a function of the run context that returns one.
+    auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
+    """A Supabase personal access token or a function of the run context that returns one.
 
     Unset, it uses `SUPABASE_ACCESS_TOKEN`. If the function returns `None`, that run has no Supabase tools.
     """
@@ -59,7 +58,7 @@ class Supabase(AbstractCapability[AgentDepsT]):
         auth = self.auth(ctx) if callable(self.auth) else self.auth
         return None if auth is None else self._connect(auth)
 
-    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
+    def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         query: dict[str, str] = {}
         if self.project_ref is not None:
             query['project_ref'] = self.project_ref

@@ -10,7 +10,7 @@ Let an agent work with your Supabase projects and account. `Supabase` gives the 
 pip/uv-add "pydantic-ai-harness[supabase]" "pydantic-ai-slim[openai]"
 ```
 
-Set `SUPABASE_ACCESS_TOKEN` to a Supabase personal access token, or pass `auth=` a token or an `httpx.Auth`. See the [provider setup](https://supabase.com/docs/guides/ai-tools/mcp).
+Set `SUPABASE_ACCESS_TOKEN` to a Supabase personal access token, or pass `auth=` a token. See the [provider setup](https://supabase.com/docs/guides/ai-tools/mcp).
 
 ```python
 from pydantic_ai import Agent
@@ -23,7 +23,9 @@ print(result.output)
 
 ## Per-user credentials
 
-A token or `SUPABASE_ACCESS_TOKEN` connects every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
+A fixed token or `SUPABASE_ACCESS_TOKEN` connects every run as the same account. That suits a script or an agent on your own machine.
+
+In an app where each user connects their own Supabase account, one agent serves all of them, so the token cannot be fixed when the agent is created. Pass a function that reads the current user's token from the run's deps:
 
 ```python
 from dataclasses import dataclass
@@ -44,9 +46,9 @@ def supabase_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Supabase(auth=supabase_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can return a token or an `httpx.Auth`. If it returns `None`, that run has no Supabase tools; it never falls back to `SUPABASE_ACCESS_TOKEN`. `project_ref`, `features`, and `read_only` apply to every user.
+The function is called at the start of each run, so each run connects as its own user. If it returns `None`, that run has no Supabase tools; it never falls back to `SUPABASE_ACCESS_TOKEN`. `project_ref`, `features`, and `read_only` apply to every user.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Supabase" button in your web app. Look the token up before the run, for example with `await`, and put it in the deps; the function only reads it.
+Your app gets each user's token, stores it, and refreshes it. For example, a settings page where each user pastes their own Supabase personal access token, or a "Connect Supabase" button that signs them in through your Supabase OAuth app and saves the token to their account. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
 When users differ in more than their credential, such as each user working in their own project, build the whole capability for each run with a [dynamic capability](/ai/capabilities/custom/#dynamically-building-a-capability):
 
