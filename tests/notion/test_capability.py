@@ -125,7 +125,10 @@ class TestNotion:
         Agent(TestModel(), capabilities=[Notion(client=server, defer_loading=True)])
 
     def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
-        with pytest.raises(UserError, match="Two `Notion` capabilities share the id 'notion'"):
+        with pytest.raises(
+            UserError,
+            match="Capability id 'notion' is used by multiple Notion capabilities that disagree on 'auth', 'read_only'",
+        ):
             Agent(TestModel(), capabilities=[Notion(auth='a'), Notion(auth='b', read_only=True)])
 
     def test_credential_is_not_in_repr(self) -> None:
