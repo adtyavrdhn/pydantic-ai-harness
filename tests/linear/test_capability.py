@@ -125,7 +125,10 @@ class TestLinear:
         Agent(TestModel(), capabilities=[Linear(client=server, defer_loading=True)])
 
     def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
-        with pytest.raises(UserError, match="Two `Linear` capabilities share the id 'linear'"):
+        with pytest.raises(
+            UserError,
+            match="Capability id 'linear' is used by multiple Linear capabilities that disagree on 'auth', 'read_only'",
+        ):
             Agent(TestModel(), capabilities=[Linear(auth='a'), Linear(auth='b', read_only=True)])
 
     def test_credential_is_not_in_repr(self) -> None:

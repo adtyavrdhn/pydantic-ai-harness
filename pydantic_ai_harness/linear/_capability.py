@@ -26,7 +26,11 @@ class Linear(AbstractCapability[AgentDepsT]):
     """Give an agent the tools of Linear's hosted MCP server, with the permissions of the connected user."""
 
     id: str | None = _ID
-    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `Linear` on one agent its own."""
+    """Stable capability and toolset ID, so `defer_loading=True` needs none.
+
+    One `Linear` is one connection to one account, like `StackOne`'s linked account. Two sharing this `id` are
+    one connection stated twice when they agree, and an error when they differ; give each its own `id` to keep both.
+    """
     description: str | None = 'Use Linear issues, projects, and teams.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
     """A Linear API key or token, or a function of the run context that returns one.
@@ -49,7 +53,7 @@ class Linear(AbstractCapability[AgentDepsT]):
 
     @classmethod
     def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
-        """Two `Linear`s under one `id` are the same connection stated twice, or an error if they differ."""
+        """Two under one `id` are one connection stated twice; two that disagree raise rather than merge."""
         return one_connection(capabilities)
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
