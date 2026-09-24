@@ -1,4 +1,4 @@
-"""Test that hosted MCP capabilities connect each run with that run's own credential."""
+"""Test the shared hosted MCP helpers: per-run credentials and read-only selection."""
 
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import RunContext
+from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, per_run_auth, per_run_client
+from pydantic_ai_harness._mcp import MCPAuth, is_read_only, per_run_auth, per_run_client
 
 
 @pytest.fixture
@@ -156,3 +156,16 @@ class _Bearer(httpx.Auth):
     def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
         request.headers['Authorization'] = f'Bearer {self.token}'
         yield request
+
+
+@pytest.mark.parametrize(
+    ('metadata', 'expected'),
+    [
+        ({'annotations': {'readOnlyHint': True}}, True),
+        ({'annotations': {'readOnlyHint': False}}, False),
+        ({'annotations': {}}, False),
+        (None, False),
+    ],
+)
+def test_is_read_only_requires_an_explicit_hint(metadata: dict[str, object] | None, expected: bool) -> None:
+    assert is_read_only(ToolDefinition(name='tool', metadata=metadata)) is expected
