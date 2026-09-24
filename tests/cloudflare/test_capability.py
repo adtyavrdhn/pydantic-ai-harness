@@ -8,6 +8,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
@@ -125,11 +126,10 @@ class TestCloudflare:
         assert connection.url == 'https://docs.mcp.cloudflare.com/mcp'
         assert connection.auth is None
 
-    def test_private_server_uses_oauth(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_private_server_without_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('CLOUDFLARE_API_TOKEN', raising=False)
-        with pytest.warns(UserWarning, match='in-memory token storage'):
-            connection = transport(Cloudflare(server=CloudflareServer.API))
-        assert connection.url == 'https://mcp.cloudflare.com/mcp'
+        with pytest.raises(UserError, match='Set `CLOUDFLARE_API_TOKEN`'):
+            Cloudflare(server=CloudflareServer.API).get_toolset()
 
 
 class TestPerRunAuth:

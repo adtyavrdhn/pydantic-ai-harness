@@ -23,7 +23,7 @@ print(result.output)
 
 ## Per-user credentials
 
-A token, `CLOUDFLARE_API_TOKEN`, and browser login (`'oauth'`) all connect every run as the same account. Browser login opens on the machine running the agent, so it only works when you run it on your own machine. When one agent serves several users, pass a function that returns the current user's credential instead:
+A token or `CLOUDFLARE_API_TOKEN` connects every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -48,9 +48,9 @@ agent = Agent(
 )
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no Cloudflare tools, even on a public documentation server; it never falls back to `CLOUDFLARE_API_TOKEN` or browser login.
+The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no Cloudflare tools, even on a public documentation server; it never falls back to `CLOUDFLARE_API_TOKEN`.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Cloudflare" OAuth flow in your web app. The function only reads the current token. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Cloudflare" button in your web app. The function only reads the current token.
 
 `client` also accepts a function that returns a client or transport for each run. Cloudflare sets a user's accounts and permissions through the token, so `auth` covers most per-user setups.
 
@@ -58,7 +58,7 @@ With durable execution such as Temporal, read the credential from the run's deps
 
 ## Provider settings
 
-`Cloudflare()` uses the public documentation server, which needs no credential. Use `server=CloudflareServer.API` for the full API server, or another `CloudflareServer` member for a product server. For a server that is not public, with no token set, the agent opens a browser so you can log in to Cloudflare. Set account and resource permissions on the API token or in the OAuth login.
+`Cloudflare()` uses the public documentation server, which needs no credential. Use `server=CloudflareServer.API` for the full API server, or another `CloudflareServer` member for a product server. A server that is not public needs a token. Set account and resource permissions on the API token.
 
 The full API server currently does not mark its `docs`, `search`, and `execute` tools as read-only. So `read_only=True` hides all three, including reads done through `execute`. For that server, keep the default tools and use a token with limited permissions.
 
@@ -85,7 +85,7 @@ Handle the approval requests with the [deferred tools workflow](/ai/tools-toolse
 
 ## Connection customization
 
-Pass `client` to use your own FastMCP client or transport, for example one with custom OAuth token storage or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` still applies. `include_instructions=False` stops the server's instructions from reaching the model.
+Pass `client` to use your own FastMCP client or transport, for example one with custom authentication or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` still applies. `include_instructions=False` stops the server's instructions from reaching the model.
 
 A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](/ai/capabilities/prefix-tools/).
 

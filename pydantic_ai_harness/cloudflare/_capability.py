@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
@@ -77,10 +78,10 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Use Cloudflare API, product, and documentation tools.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """An API token, `'oauth'`, an `httpx.Auth`, or a function that returns one for each run's user.
+    """A Cloudflare API token, an `httpx.Auth`, or a function of the run context that returns one.
 
-    Unset, `CLOUDFLARE_API_TOKEN` is used, then browser login for servers that are not public.
-    If the function returns `None`, that run has no Cloudflare tools.
+    Unset, it uses `CLOUDFLARE_API_TOKEN`; public servers need neither. If the function returns `None`, that run
+    has no Cloudflare tools.
     """
     read_only: bool = False
     """Keep only the tools the server marks as read-only."""
@@ -112,7 +113,7 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
         if auth is None:
             auth = environ.get('CLOUDFLARE_API_TOKEN')
         if auth is None and self.server not in _PUBLIC_SERVERS:
-            auth = 'oauth'
+            raise UserError('Set `CLOUDFLARE_API_TOKEN` or pass `auth` to connect to Cloudflare.')
         return MCPToolset(
             _URLS[self.server],
             id=self.id or 'cloudflare',
