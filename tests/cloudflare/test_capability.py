@@ -117,9 +117,17 @@ class TestCloudflare:
     def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
         Agent(TestModel(), capabilities=[Cloudflare(client=server, defer_loading=True)])
 
-    def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
-        with pytest.raises(UserError, match="Two `Cloudflare` capabilities share the id 'cloudflare'"):
-            Agent(TestModel(), capabilities=[Cloudflare(), Cloudflare(server=CloudflareServer.BLOG)])
+    def test_two_for_different_servers_share_an_agent(self) -> None:
+        docs, blog = Cloudflare(), Cloudflare(server=CloudflareServer.BLOG)
+        assert (docs.id, blog.id) == ('cloudflare-docs', 'cloudflare-blog')
+        Agent(TestModel(), capabilities=[docs, blog])
+
+    def test_two_for_the_same_server_raise_when_the_agent_is_built(self) -> None:
+        with pytest.raises(UserError, match="Capability id 'cloudflare-blog' is used by multiple capabilities"):
+            Agent(
+                TestModel(),
+                capabilities=[Cloudflare(server=CloudflareServer.BLOG), Cloudflare(server=CloudflareServer.BLOG)],
+            )
 
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(Cloudflare(auth='secret-token'))
