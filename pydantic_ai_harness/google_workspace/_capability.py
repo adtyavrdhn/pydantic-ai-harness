@@ -7,13 +7,12 @@ from dataclasses import KW_ONLY, dataclass, field
 from os import environ
 from typing import Literal
 
-from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset
 
-from pydantic_ai_harness._mcp import is_read_only
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, is_read_only, per_run_auth
 
 try:
     from pydantic_ai.mcp import MCPToolset
@@ -56,8 +55,12 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
     description: str | None = _DEFAULT_DESCRIPTION
     """Routing description used when the capability is loaded on demand."""
 
-    auth: Auth | str | None = field(default=None, repr=False)
-    """A Google OAuth bearer token, or a custom `httpx.Auth`. Defaults to `$GOOGLE_ACCESS_TOKEN`."""
+    auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
+    """A Google OAuth bearer token, a custom `httpx.Auth`, or a callable that returns one for each run.
+
+    Unset, it defaults to `$GOOGLE_ACCESS_TOKEN`. A callable receives the run context, so each run can
+    connect with its own user's token from `ctx.deps`; returning `None` omits the tools.
+    """
 
     read_only: bool = False
     """Expose only the tools Google marks read-only."""
@@ -76,11 +79,16 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build one product-prefixed MCP connection per selected service."""
-        auth = self.auth if self.auth is not None else environ.get('GOOGLE_ACCESS_TOKEN')
+        toolset = per_run_auth(self.auth, self._connect, id=self.id or 'google-workspace')
+        return toolset.filtered(lambda _ctx, tool_def: is_read_only(tool_def)) if self.read_only else toolset
+
+    def _connect(self, auth: MCPAuth | None) -> AbstractToolset[AgentDepsT]:
+        if auth is None:
+            auth = environ.get('GOOGLE_ACCESS_TOKEN')
         if auth is None or auth == '':
             raise UserError('Google Workspace needs a token: pass auth= or set GOOGLE_ACCESS_TOKEN.')
         prefix = self.id or 'google-workspace'
-        toolset: AbstractToolset[AgentDepsT] = CombinedToolset(
+        return CombinedToolset(
             [
                 MCPToolset[AgentDepsT](
                     _MCP_URLS[service],
@@ -91,4 +99,3 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
                 for service in self.services
             ]
         )
-        return toolset.filtered(lambda _ctx, tool_def: is_read_only(tool_def)) if self.read_only else toolset

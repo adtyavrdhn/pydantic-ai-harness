@@ -6,11 +6,19 @@ Use Gmail, Calendar, Drive, and other Google Workspace tools. `GoogleWorkspace` 
 
 ## Install and connect
 
+uv:
+
 ```bash
 uv add "pydantic-ai-harness[google-workspace]" "pydantic-ai-slim[openai]"
 ```
 
-Set `GOOGLE_ACCESS_TOKEN` to a Google OAuth access token, or pass `auth=...`. `auth` accepts an `httpx.Auth` for caller-managed authentication. See the [provider setup](https://developers.google.com/workspace/guides/configure-mcp-servers).
+pip:
+
+```bash
+pip install "pydantic-ai-harness[google-workspace]" "pydantic-ai-slim[openai]"
+```
+
+Set `GOOGLE_ACCESS_TOKEN` to a Google OAuth access token, or pass `auth=...`. `auth` accepts an `httpx.Auth` for caller-managed authentication, or a callable that returns a token for each run (see [Per-user credentials](#per-user-credentials)). See the [provider setup](https://developers.google.com/workspace/guides/configure-mcp-servers).
 
 ```python
 from pydantic_ai import Agent
@@ -20,6 +28,39 @@ agent = Agent('openai:gpt-5.6-sol', capabilities=[GoogleWorkspace(services=['gma
 result = agent.run_sync('Summarize the resources I can access')
 print(result.output)
 ```
+
+## Per-user credentials
+
+A fixed `auth` and `GOOGLE_ACCESS_TOKEN` give every run the same connections and the same Google identity. Use them for scripts, local tools, and single-user agents.
+
+When one agent serves several users, pass a callable instead. It receives the run context at the start of each run and returns that user's access token, so each run opens its own connections:
+
+```python
+from dataclasses import dataclass
+
+from pydantic_ai import Agent, RunContext
+from pydantic_ai_harness.google_workspace import GoogleWorkspace
+
+
+@dataclass
+class Deps:
+    google_token: str | None
+
+
+def google_token(ctx: RunContext[Deps]) -> str | None:
+    return ctx.deps.google_token
+
+
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    deps_type=Deps,
+    capabilities=[GoogleWorkspace(services=['gmail', 'calendar'], auth=google_token)],
+)
+```
+
+The callable can be async and can return a token or an `httpx.Auth`. When it returns `None`, the run has no Google Workspace tools; it does not fall back to `GOOGLE_ACCESS_TOKEN`. Returning `'oauth'` raises an error, because it would open a browser on the server. Your application owns obtaining, storing, and refreshing each user's token, for example through a Google OAuth flow in your web app, and the callable reads the current token from that store.
+
+Each run connects to every selected product and lists its tools when it starts, and disconnects when it ends. Under durable execution such as Temporal, the callable runs in the worker, so it should derive the credential from serializable deps. Give each `GoogleWorkspace` on one agent a distinct `id`.
 
 ## Provider settings
 
@@ -48,6 +89,6 @@ Handle the resulting requests using the [deferred tools workflow](https://pydant
 
 ## Connection customization
 
-`include_instructions` controls whether server instructions reach the model. Keep authenticated connections separate for different users. To combine connections with overlapping tool names, give them distinct IDs and compose [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
+`include_instructions` controls whether server instructions reach the model. A fixed `auth` is one set of connections shared by every run; see [Per-user credentials](#per-user-credentials) for per-run connections. To combine connections with overlapping tool names, give them distinct IDs and compose [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/google_workspace/)
