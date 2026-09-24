@@ -96,7 +96,7 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
 
     def _derived_id(self) -> str:
         """This capability's `id`, falling back to the one the products name."""
-        return self.id if self.id is not None else f'google-workspace-{"-".join(self.services)}'
+        return self.id if self.id is not None else f'google-workspace-{"-".join(sorted(self.services))}'
 
     def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
         auth = self.auth(ctx) if callable(self.auth) else self.auth

@@ -70,7 +70,7 @@ Each run connects as its own user, so concurrent runs never share an account.
 
 Your app gets each user's token, stores it, and refreshes it. For example, a "Connect Google" button that signs them in with Google OAuth, saves the refresh token to their account, and exchanges it for a fresh access token when the old one expires. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
-With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. The capability's `id` defaults to `google-workspace-<products>`, such as `google-workspace-gmail-calendar`, so `defer_loading=True` works without one. Two for different products can share an agent; to add two for the same ones, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. The capability's `id` defaults to `google-workspace-<products>` with the products sorted, such as `google-workspace-calendar-gmail`, so `defer_loading=True` works without one. Two for different products can share an agent; to add two for the same ones, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same.
 
 ## Provider settings
 
