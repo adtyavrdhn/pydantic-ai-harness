@@ -19,27 +19,27 @@ except ImportError as exc:  # pragma: no cover
 
 @dataclass(kw_only=True)
 class Linear(AbstractCapability[AgentDepsT]):
-    """Use Linear's hosted tools with the permissions of the connected user."""
+    """Give an agent the tools of Linear's hosted MCP server, with the permissions of the connected user."""
 
     description: str | None = 'Use Linear issues, projects, and teams.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """API key, OAuth token, `'oauth'`, HTTP authentication, or a callable that returns one for each run.
+    """An API key or OAuth token, `'oauth'` for browser login, an `httpx.Auth`, or a function of the run context.
 
-    Unset, it defaults to `LINEAR_ACCESS_TOKEN`, then OAuth. A callable receives the run context, so each
-    run can connect with its own user's credential from `ctx.deps`; returning `None` omits the tools.
+    Unset, it uses `LINEAR_ACCESS_TOKEN`, then browser login.
+    If the function returns `None`, that run has no Linear tools.
     """
     read_only: bool = False
-    """Use Linear's read-only endpoint. A custom client is filtered by `readOnlyHint` instead."""
+    """Use Linear's read-only endpoint. With `client`, keep only the tools the server marks as read-only."""
     include_instructions: bool = True
-    """Forward the server's instructions to the agent."""
+    """Pass the server's own instructions to the agent."""
     client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Override the connection with a caller-configured MCP client or transport, or a callable that returns one for each run.
+    """Your own MCP client or transport, or a function of the run context that returns one.
 
-    The supplied client owns its URL, authentication, and server configuration.
+    The client owns the URL, authentication, and server settings.
     """
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
-        """Build the Linear connection and optional read-only selection."""
+        """Return the Linear tools."""
         id = self.id or 'linear'
         if self.client is not None:
             toolset: AbstractToolset[AgentDepsT] = per_run_client(self.client, self._from_client, id=id)
