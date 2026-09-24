@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -10,7 +10,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import credential, is_read_only
+from pydantic_ai_harness._mcp import credential, is_read_only, one_connection
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -19,12 +19,15 @@ except ImportError as exc:  # pragma: no cover
 
 
 GITHUB_MCP_URL = 'https://api.githubcopilot.com/mcp/'
+_ID = 'github'
 
 
 @dataclass(kw_only=True)
 class GitHub(AbstractCapability[AgentDepsT]):
     """Use GitHub's hosted tools with the permissions of the connected credential."""
 
+    id: str | None = _ID
+    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `GitHub` on one agent its own."""
     description: str | None = 'Read and change GitHub resources.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
     """A GitHub token or a function of the run context that returns one.
@@ -57,9 +60,14 @@ class GitHub(AbstractCapability[AgentDepsT]):
         if self.toolsets is not None and any(not group.strip() or ',' in group for group in self.toolsets):
             raise UserError('Each `toolsets` entry must name one tool group, such as `repos`.')
 
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """Two `GitHub`s under one `id` are the same connection stated twice, or an error if they differ."""
+        return one_connection(capabilities)
+
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the GitHub tools."""
-        id = self.id or 'github'
+        id = self.id or _ID
         if self.client is not None:
             toolset: AbstractToolset[AgentDepsT] = MCPToolset(
                 self.client, id=id, include_instructions=self.include_instructions
@@ -85,7 +93,7 @@ class GitHub(AbstractCapability[AgentDepsT]):
             headers['X-MCP-Toolsets'] = ','.join(self.toolsets)
         return MCPToolset(
             self.url,
-            id=self.id or 'github',
+            id=self.id or _ID,
             auth=credential(auth, env='GITHUB_TOKEN', service='GitHub'),
             headers=headers,
             include_instructions=self.include_instructions,
