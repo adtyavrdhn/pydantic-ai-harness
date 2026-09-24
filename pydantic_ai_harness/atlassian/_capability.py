@@ -19,25 +19,25 @@ except ImportError as exc:  # pragma: no cover
 
 @dataclass(kw_only=True)
 class Atlassian(AbstractCapability[AgentDepsT]):
-    """Use Atlassian's hosted tools with the permissions of the connected user."""
+    """Give an agent the tools of Atlassian's hosted MCP server, with the permissions of the connected user."""
 
     description: str | None = 'Use Jira, Confluence, and other Atlassian tools.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Bearer token, `'oauth'`, HTTP authentication, or a callable that returns one for each run.
+    """A bearer token, `'oauth'` for browser login, an `httpx.Auth`, or a function of the run context.
 
-    Unset, it defaults to `ATLASSIAN_API_KEY`, then OAuth. A callable receives the run context, so each
-    run can connect with its own user's credential from `ctx.deps`; returning `None` omits the tools.
+    Unset, it uses `ATLASSIAN_API_KEY`, then browser login.
+    If the function returns `None`, that run has no Atlassian tools.
     """
     include_instructions: bool = True
-    """Forward the server's instructions to the agent."""
+    """Pass the server's own instructions to the agent."""
     client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Override the connection with a caller-configured MCP client or transport, or a callable that returns one for each run.
+    """Your own MCP client or transport, or a function of the run context that returns one.
 
-    The supplied client owns its URL, authentication, and server configuration.
+    The client owns the URL, authentication, and server settings.
     """
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
-        """Build the Atlassian connection."""
+        """Return the Atlassian tools."""
         id = self.id or 'atlassian'
         if self.client is not None:
             return per_run_client(self.client, self._from_client, id=id)
