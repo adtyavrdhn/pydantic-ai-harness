@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
@@ -30,9 +31,18 @@ class Stripe(AbstractCapability[AgentDepsT]):
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
     client: MCPToolsetClient | None = field(default=None, repr=False)
-    """Your own MCP client or transport, which then owns the URL and authentication."""
+    """Your own MCP client or transport, for full control of the connection.
+
+    It cannot be combined with `auth` or `connected_account`.
+    """
     connected_account: str | None = None
-    """The Stripe Connect account to act on, such as `'acct_...'`. Not used with a custom `client`."""
+    """The Stripe Connect account to act on, such as `'acct_...'`."""
+
+    def __post_init__(self) -> None:
+        if self.client is not None and (self.auth is not None or self.connected_account is not None):
+            raise UserError(
+                '`client` owns the connection, so it cannot be combined with `auth` or `connected_account`.'
+            )
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the Stripe MCP toolset."""

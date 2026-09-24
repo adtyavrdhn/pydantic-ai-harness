@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 from fastmcp.client.transports import StreamableHttpTransport
@@ -88,7 +90,14 @@ class TestStripe:
 
     def test_custom_client_owns_authentication(self) -> None:
         client = StreamableHttpTransport('https://example.com/mcp', auth=httpx.BasicAuth('user', 'secret'))
-        assert transport(Stripe(client=client, auth='ignored')).auth is client.auth
+        assert transport(Stripe(client=client)).auth is client.auth
+
+    @pytest.mark.parametrize(
+        'settings', [{'auth': 'key'}, {'auth': no_credential}, {'connected_account': 'acct_example'}]
+    )
+    def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
+        with pytest.raises(UserError, match='`client` owns the connection'):
+            Stripe(client='https://example.com/mcp', **settings)
 
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(Stripe(auth='secret-token'))
