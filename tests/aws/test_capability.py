@@ -83,12 +83,6 @@ def bearer(connection: MCPToolset[str | None]) -> str:
     return request.headers['Authorization']
 
 
-def regional_client(ctx: RunContext[str | None]) -> StreamableHttpTransport | None:
-    if ctx.deps is None:
-        return None
-    return StreamableHttpTransport(f'https://aws-mcp.{ctx.deps}.api.aws/mcp', auth='token')
-
-
 class TestAWS:
     @pytest.mark.parametrize(
         ('read_only', 'expected'),
@@ -157,19 +151,3 @@ class TestPerRunAuth:
     async def test_read_only_applies_per_run(self) -> None:
         capability = AWS[str | None](auth=lambda ctx: ctx.deps, read_only=True)
         assert len(await connections_for(capability, 'alice-token')) == 1
-
-    async def test_client_function_selects_each_users_region(self) -> None:
-        capability = AWS[str | None](client=regional_client)
-        [eu] = await connections_for(capability, 'eu-central-1')
-        transport = eu.client.transport
-        assert isinstance(transport, StreamableHttpTransport)
-        assert transport.url == 'https://aws-mcp.eu-central-1.api.aws/mcp'
-        assert await connections_for(capability, None) == []
-
-    async def test_read_only_filters_client_function_per_run(self, server: FastMCP) -> None:
-        def client(ctx: RunContext[object]) -> FastMCP:
-            return server
-
-        agent = Agent(TestModel(), capabilities=[AWS[object](client=client, read_only=True)])
-        result = await agent.run('Use the tools')
-        assert result.output == '{"read_resource":"read"}'

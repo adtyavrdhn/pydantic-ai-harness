@@ -9,7 +9,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, credential, is_read_only, per_run
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, credential, is_read_only, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -33,8 +33,8 @@ class AWS(AbstractCapability[AgentDepsT]):
     """Keep only the tools the server marks as read-only."""
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
-    client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Your own MCP client or transport, or a function that returns one for each run.
+    client: MCPToolsetClient | None = field(default=None, repr=False)
+    """Your own MCP client or transport, which then owns the URL and authentication.
 
     It replaces `region` and `auth`.
     """
@@ -45,15 +45,14 @@ class AWS(AbstractCapability[AgentDepsT]):
         """Return the AWS tools."""
         id = self.id or 'aws'
         if self.client is not None:
-            toolset: AbstractToolset[AgentDepsT] = per_run(self.client, self._from_client, id=id)
+            toolset: AbstractToolset[AgentDepsT] = MCPToolset(
+                self.client, id=id, include_instructions=self.include_instructions
+            )
         else:
             toolset = per_run(self.auth, self._connect, id=id)
         if self.read_only:
             return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
         return toolset
-
-    def _from_client(self, client: MCPToolsetClient) -> MCPToolset[AgentDepsT]:
-        return MCPToolset(client, id=self.id or 'aws', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
         if auth is None:
