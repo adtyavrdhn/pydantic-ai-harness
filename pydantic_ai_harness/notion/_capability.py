@@ -24,7 +24,7 @@ class Notion(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Search and change Notion workspace content.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
-    """A Notion OAuth access token or a function of the run context that returns one.
+    """A Notion OAuth access token, `'oauth'` to sign in through the browser locally, or a function of the run context that returns a token.
 
     Unset, it uses `NOTION_ACCESS_TOKEN`. A function never does: if it returns `None` or `''`, that run has no
     Notion tools.
@@ -58,6 +58,9 @@ class Notion(AbstractCapability[AgentDepsT]):
 
     def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
         auth = self.auth(ctx) if callable(self.auth) else self.auth
+        if auth == 'oauth':
+            # FastMCP reads 'oauth' as "log in through a browser", which would hang a server run.
+            raise UserError("The `auth` function must return an API key or token, not 'oauth'.")
         return self._connect(auth) if auth else None
 
     def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
