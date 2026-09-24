@@ -52,7 +52,7 @@ The function is called at the start of each run, so each run connects as its own
 
 Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Google" OAuth flow in your web app. The function only reads the current token. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
 
-With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `GoogleWorkspace` to an agent, give each a distinct `id`.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `GoogleWorkspace` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same.
 
 ## Provider settings
 
