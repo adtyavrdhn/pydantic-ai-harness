@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
@@ -25,9 +26,9 @@ class Supabase(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Use Supabase project and account tools.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """A personal access token, `'oauth'`, an `httpx.Auth`, or a function of the run context that returns the current user's credential.
+    """A Supabase personal access token, an `httpx.Auth`, or a function of the run context that returns one.
 
-    Unset, it uses `SUPABASE_ACCESS_TOKEN`, then browser login. If the function returns `None`, that run has no Supabase tools.
+    Unset, it uses `SUPABASE_ACCESS_TOKEN`. If the function returns `None`, that run has no Supabase tools.
     """
     read_only: bool = False
     """Turn on Supabase's read-only mode. With a custom `client`, keep only the tools the server marks as read-only."""
@@ -58,6 +59,10 @@ class Supabase(AbstractCapability[AgentDepsT]):
         return MCPToolset(client, id=self.id or 'supabase', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+        if auth is None:
+            auth = environ.get('SUPABASE_ACCESS_TOKEN')
+        if auth is None:
+            raise UserError('Set `SUPABASE_ACCESS_TOKEN` or pass `auth` to connect to Supabase.')
         query: dict[str, str] = {}
         if self.project_ref is not None:
             query['project_ref'] = self.project_ref
@@ -68,7 +73,7 @@ class Supabase(AbstractCapability[AgentDepsT]):
         return MCPToolset(
             'https://mcp.supabase.com/mcp' + ('?' + urlencode(query) if query else ''),
             id=self.id or 'supabase',
-            auth=auth if auth is not None else environ.get('SUPABASE_ACCESS_TOKEN', 'oauth'),
+            auth=auth,
             headers=None,
             include_instructions=self.include_instructions,
         )
