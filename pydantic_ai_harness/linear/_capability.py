@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -10,7 +10,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import credential, is_read_only
+from pydantic_ai_harness._mcp import credential, is_read_only, one_connection
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -18,10 +18,15 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError('Install Linear support with: uv add "pydantic-ai-harness[linear]"') from exc
 
 
+_ID = 'linear'
+
+
 @dataclass(kw_only=True)
 class Linear(AbstractCapability[AgentDepsT]):
     """Give an agent the tools of Linear's hosted MCP server, with the permissions of the connected user."""
 
+    id: str | None = _ID
+    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `Linear` on one agent its own."""
     description: str | None = 'Use Linear issues, projects, and teams.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
     """A Linear API key or token, or a function of the run context that returns one.
@@ -42,9 +47,14 @@ class Linear(AbstractCapability[AgentDepsT]):
         if self.client is not None and self.auth is not None:
             raise UserError('`client` owns the connection, so it cannot be combined with `auth`.')
 
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """Two `Linear`s under one `id` are the same connection stated twice, or an error if they differ."""
+        return one_connection(capabilities)
+
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the Linear tools."""
-        id = self.id or 'linear'
+        id = self.id or _ID
         if self.client is not None:
             toolset: AbstractToolset[AgentDepsT] = MCPToolset(
                 self.client, id=id, include_instructions=self.include_instructions
@@ -66,7 +76,7 @@ class Linear(AbstractCapability[AgentDepsT]):
     def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             'https://mcp.linear.app/mcp/readonly' if self.read_only else 'https://mcp.linear.app/mcp',
-            id=self.id or 'linear',
+            id=self.id or _ID,
             auth=credential(auth, env='LINEAR_ACCESS_TOKEN', service='Linear'),
             headers=None,
             include_instructions=self.include_instructions,

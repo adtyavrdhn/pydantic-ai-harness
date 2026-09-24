@@ -59,7 +59,7 @@ Each run connects as its own user, so concurrent runs never share an account. `r
 
 Your app gets each user's token, stores it, and refreshes it. For example, a settings page where each user pastes their own Linear API key, or a "Connect Linear" button that signs them in with Linear OAuth and saves the access token to their account. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
-With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `Linear` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. The capability's `id` defaults to `linear`, so `defer_loading=True` works without one. To add more than one `Linear` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same; two that share an `id` but differ raise an error.
 
 ## Provider settings
 
