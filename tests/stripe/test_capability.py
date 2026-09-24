@@ -104,7 +104,10 @@ class TestStripe:
         Agent(TestModel(), capabilities=[Stripe(client=server, defer_loading=True)])
 
     def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
-        with pytest.raises(UserError, match="Two `Stripe` capabilities share the id 'stripe'"):
+        with pytest.raises(
+            UserError,
+            match="Capability id 'stripe' is used by multiple Stripe capabilities that disagree on 'auth', 'connected_account'",
+        ):
             Agent(TestModel(), capabilities=[Stripe(auth='a'), Stripe(auth='b', connected_account='acct_other')])
 
     def test_credential_is_not_in_repr(self) -> None:
