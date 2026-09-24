@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, is_read_only, per_run_auth, per_run_client
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, credential, is_read_only, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -48,9 +46,9 @@ class Supabase(AbstractCapability[AgentDepsT]):
         """Return the Supabase MCP toolset."""
         id = self.id or 'supabase'
         if self.client is not None:
-            toolset: AbstractToolset[AgentDepsT] = per_run_client(self.client, self._from_client, id=id)
+            toolset: AbstractToolset[AgentDepsT] = per_run(self.client, self._from_client, id=id)
         else:
-            toolset = per_run_auth(self.auth, self._connect, id=id)
+            toolset = per_run(self.auth, self._connect, id=id)
         if self.read_only and self.client is not None:
             return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
         return toolset
@@ -59,10 +57,6 @@ class Supabase(AbstractCapability[AgentDepsT]):
         return MCPToolset(client, id=self.id or 'supabase', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
-        if auth is None:
-            auth = environ.get('SUPABASE_ACCESS_TOKEN')
-        if auth is None:
-            raise UserError('Set `SUPABASE_ACCESS_TOKEN` or pass `auth` to connect to Supabase.')
         query: dict[str, str] = {}
         if self.project_ref is not None:
             query['project_ref'] = self.project_ref
@@ -73,7 +67,7 @@ class Supabase(AbstractCapability[AgentDepsT]):
         return MCPToolset(
             'https://mcp.supabase.com/mcp' + ('?' + urlencode(query) if query else ''),
             id=self.id or 'supabase',
-            auth=auth,
+            auth=credential(auth, env='SUPABASE_ACCESS_TOKEN', service='Supabase'),
             headers=None,
             include_instructions=self.include_instructions,
         )
