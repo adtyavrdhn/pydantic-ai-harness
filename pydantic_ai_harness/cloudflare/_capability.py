@@ -9,7 +9,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, credential, is_read_only, per_run
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, credential, is_read_only, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -86,11 +86,8 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
     """Keep only the tools the server marks as read-only."""
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
-    client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Your own MCP client or transport, or a function that returns one for each run.
-
-    It replaces `server` and `auth`.
-    """
+    client: MCPToolsetClient | None = field(default=None, repr=False)
+    """Your own MCP client or transport, which then owns the URL and authentication. It replaces `server`."""
     server: CloudflareServer = CloudflareServer.DOCS
     """The server to use. Public ones, such as the documentation server, need no credential."""
 
@@ -98,15 +95,14 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
         """Return the Cloudflare tools."""
         id = self.id or 'cloudflare'
         if self.client is not None:
-            toolset: AbstractToolset[AgentDepsT] = per_run(self.client, self._from_client, id=id)
+            toolset: AbstractToolset[AgentDepsT] = MCPToolset(
+                self.client, id=id, include_instructions=self.include_instructions
+            )
         else:
             toolset = per_run(self.auth, self._connect, id=id)
         if self.read_only:
             return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
         return toolset
-
-    def _from_client(self, client: MCPToolsetClient) -> MCPToolset[AgentDepsT]:
-        return MCPToolset(client, id=self.id or 'cloudflare', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
         # Public servers need no credential, but still receive one when it is set.

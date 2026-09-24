@@ -160,11 +160,3 @@ class TestPerRunAuth:
     async def test_read_only_applies_per_run(self) -> None:
         capability = Cloudflare[str | None](auth=lambda ctx: ctx.deps, read_only=True)
         assert len(await connections_for(capability, 'alice-token')) == 1
-
-    async def test_client_function_runs_per_run(self, server: FastMCP) -> None:
-        def client(ctx: RunContext[object]) -> FastMCP:
-            return server
-
-        agent = Agent(TestModel(), capabilities=[Cloudflare[object](client=client, read_only=True)])
-        result = await agent.run('Use the tools')
-        assert result.output == '{"read_resource":"read"}'
