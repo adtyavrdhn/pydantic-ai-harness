@@ -70,9 +70,16 @@ class TestGoogleWorkspace:
     def test_defer_loading_needs_no_id(self, connections: list[tuple[str, str | None]]) -> None:
         Agent(TestModel(), capabilities=[GoogleWorkspace('gmail', auth='token', defer_loading=True)])
 
-    def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
-        with pytest.raises(UserError, match="Two `GoogleWorkspace` capabilities share the id 'google-workspace'"):
-            Agent(TestModel(), capabilities=[GoogleWorkspace('gmail', auth='a'), GoogleWorkspace('drive', auth='b')])
+    def test_id_is_derived_from_the_services(self) -> None:
+        assert GoogleWorkspace(['gmail', 'calendar', 'gmail']).id == 'google-workspace-gmail-calendar'
+        assert GoogleWorkspace('gmail', id='mail').id == 'mail'
+
+    def test_two_for_different_services_share_an_agent(self, connections: list[tuple[str, str | None]]) -> None:
+        Agent(TestModel(), capabilities=[GoogleWorkspace('gmail', auth='a'), GoogleWorkspace('drive', auth='b')])
+
+    def test_two_for_the_same_services_raise_when_the_agent_is_built(self) -> None:
+        with pytest.raises(UserError, match="Capability id 'google-workspace-gmail' is used by multiple capabilities"):
+            Agent(TestModel(), capabilities=[GoogleWorkspace('gmail', auth='a'), GoogleWorkspace('gmail', auth='b')])
 
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(GoogleWorkspace('gmail', auth='secret-token'))

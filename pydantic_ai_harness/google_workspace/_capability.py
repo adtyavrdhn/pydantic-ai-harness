@@ -11,7 +11,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import credential, is_read_only, one_connection
+from pydantic_ai_harness._mcp import credential, is_read_only
 
 try:
     from pydantic_ai.mcp import MCPToolset
@@ -35,8 +35,6 @@ _MCP_URLS: dict[str, str] = {
     'people': 'https://people.googleapis.com/mcp/v1',
 }
 
-_ID = 'google-workspace'
-
 _DEFAULT_DESCRIPTION = 'Use Gmail, Calendar, Drive, and the other Google Workspace products.'
 
 
@@ -52,8 +50,14 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
 
     _: KW_ONLY
 
-    id: str | None = _ID
-    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `GoogleWorkspace` on one agent its own."""
+    id: str | None = None
+    """Stable capability and toolset ID, derived from `services` when not given.
+
+    The products are what decide this capability's tools, so they are what identify it -- the same way `StackOne`
+    is identified by its linked account. Deriving it rather than fixing it to `'google-workspace'` is what lets one
+    agent reach two different sets of products: their ids differ, so they stay two capabilities. Two for the same
+    products are a mistake, and collide.
+    """
 
     description: str | None = _DEFAULT_DESCRIPTION
     """Describes the capability when the agent loads it on demand."""
@@ -72,28 +76,27 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
     """Pass the servers' own instructions to the agent."""
 
     def __post_init__(self) -> None:
-        """Normalize `services` to a tuple of products that have an endpoint."""
+        """Normalize `services` to a tuple of products that have an endpoint, and derive the `id` from them."""
         self.services = (self.services,) if isinstance(self.services, str) else tuple(dict.fromkeys(self.services))
         if not self.services:
             raise UserError('Google Workspace needs at least one service.')
         for service in self.services:
             if service not in _MCP_URLS:
                 raise UserError(f'Unknown Google Workspace service {service!r}; expected one of {sorted(_MCP_URLS)}.')
-
-    @classmethod
-    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
-        """Two `GoogleWorkspace`s under one `id` are the same connection stated twice, or an error if they differ."""
-        return one_connection(capabilities)
+        self.id = self._derived_id()
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the tools for the selected products, with names prefixed by product."""
-        id = self.id or _ID
         toolset = (
-            DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
+            DynamicToolset(self._connect_for_run, per_run_step=False, id=self._derived_id())
             if callable(self.auth)
             else self._connect(self.auth)
         )
         return toolset.filtered(lambda _ctx, tool_def: is_read_only(tool_def)) if self.read_only else toolset
+
+    def _derived_id(self) -> str:
+        """This capability's `id`, falling back to the one the products name."""
+        return self.id if self.id is not None else f'google-workspace-{"-".join(self.services)}'
 
     def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
         auth = self.auth(ctx) if callable(self.auth) else self.auth
@@ -104,7 +107,7 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
 
     def _connect(self, auth: str | None) -> AbstractToolset[AgentDepsT]:
         auth = credential(auth, env='GOOGLE_ACCESS_TOKEN', service='Google Workspace')
-        prefix = self.id or _ID
+        prefix = self._derived_id()
         return CombinedToolset(
             [
                 MCPToolset[AgentDepsT](
