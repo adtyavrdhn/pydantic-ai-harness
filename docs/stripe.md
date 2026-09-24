@@ -10,7 +10,7 @@ Let an agent read and change your Stripe resources. `Stripe` gives the agent eve
 pip/uv-add "pydantic-ai-harness[stripe]" "pydantic-ai-slim[openai]"
 ```
 
-Set `STRIPE_API_KEY` to a Stripe restricted API key, or pass `auth=` a key or an `httpx.Auth`. With neither, the agent opens a browser so you can log in to Stripe, which only works when you run it on your own machine. See the [provider setup](https://docs.stripe.com/mcp).
+Set `STRIPE_API_KEY` to a Stripe restricted API key, or pass `auth=` a key or an `httpx.Auth`. See the [provider setup](https://docs.stripe.com/mcp).
 
 ```python
 from pydantic_ai import Agent
@@ -23,7 +23,7 @@ print(result.output)
 
 ## Per-user credentials
 
-An API key, `STRIPE_API_KEY`, and browser login all connect every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
+An API key or `STRIPE_API_KEY` connects every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -45,9 +45,9 @@ def stripe_key(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Stripe(auth=stripe_key)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a key, a token, or an `httpx.Auth`. If it returns `None`, that run has no Stripe tools; it never falls back to `STRIPE_API_KEY` or browser login. `connected_account` applies to every user.
+The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a key, a token, or an `httpx.Auth`. If it returns `None`, that run has no Stripe tools; it never falls back to `STRIPE_API_KEY`. `connected_account` applies to every user.
 
-Your application is responsible for getting each user's key or token, storing it, and refreshing it, for example with a "Connect Stripe" OAuth flow in your web app. The function only reads the current credential. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
+Your application is responsible for getting each user's key or token, storing it, and refreshing it, for example with a "Connect Stripe" button in your web app. The function only reads the current credential.
 
 `client` also accepts a function, for when users differ in more than their credential, such as a platform acting on each user's Connect account:
 
@@ -82,7 +82,7 @@ With durable execution such as Temporal, read the credential from the run's deps
 
 ## Provider settings
 
-The credential decides whether the agent works in a sandbox or in live mode, and which resources it can change. Give a restricted key only the permissions the agent needs. To act on a Connect account, set `connected_account='acct_...'` and use your platform's restricted API key. Stripe does not support browser login for Connect accounts.
+The credential decides whether the agent works in a sandbox or in live mode, and which resources it can change. Give a restricted key only the permissions the agent needs. To act on a Connect account, set `connected_account='acct_...'` and use your platform's restricted API key.
 
 ## Tool selection and approval
 
@@ -105,7 +105,7 @@ Handle the approval requests with the [deferred tools workflow](/ai/tools-toolse
 
 ## Connection customization
 
-Pass `client` to use your own FastMCP client or transport, for example one with custom OAuth token storage. The client then owns the URL, authentication, and server settings, including the Connect account, so set those on it rather than on the capability. `include_instructions=False` stops the server's instructions from reaching the model.
+Pass `client` to use your own FastMCP client or transport, for example one with custom authentication or MCP handlers. The client then owns the URL, authentication, and server settings, including the Connect account, so set those on it rather than on the capability. `include_instructions=False` stops the server's instructions from reaching the model.
 
 A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](/ai/capabilities/prefix-tools/).
 
