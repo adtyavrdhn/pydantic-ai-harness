@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
@@ -39,6 +40,11 @@ class GitHub(AbstractCapability[AgentDepsT]):
     """The MCP server URL, for example a GitHub Enterprise Cloud endpoint."""
     toolsets: list[str] | None = None
     """GitHub tool groups to offer, such as `'repos'`. `None` keeps the server's defaults."""
+
+    def __post_init__(self) -> None:
+        # GitHub reads an empty toolsets header as its defaults, which include write tools.
+        if self.toolsets == []:
+            raise UserError('`toolsets` must name at least one tool group; use `None` for the defaults.')
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the GitHub tools."""

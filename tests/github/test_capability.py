@@ -126,6 +126,10 @@ class TestGitHub:
         with pytest.raises(UserError, match='Set `GITHUB_TOKEN`'):
             GitHub().get_toolset()
 
+    def test_empty_toolsets_raise(self) -> None:
+        with pytest.raises(UserError, match='at least one tool group'):
+            GitHub(auth='token', toolsets=[])
+
     def test_native_server_settings(self) -> None:
         connection = transport(GitHub(auth='token', toolsets=['actions', 'notifications'], read_only=True))
         assert connection.headers == {'X-MCP-Readonly': 'true', 'X-MCP-Toolsets': 'actions,notifications'}
