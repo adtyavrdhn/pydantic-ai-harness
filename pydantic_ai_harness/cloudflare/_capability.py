@@ -20,7 +20,7 @@ from enum import Enum
 
 
 class CloudflareServer(str, Enum):
-    """Official Cloudflare managed MCP server selection."""
+    """Which of Cloudflare's hosted MCP servers to use."""
 
     API = 'api'
     DOCS = 'docs'
@@ -73,30 +73,29 @@ _PUBLIC_SERVERS = frozenset(
 
 @dataclass(kw_only=True)
 class Cloudflare(AbstractCapability[AgentDepsT]):
-    """Connect to a Cloudflare MCP server with provider-controlled permissions."""
+    """Use a Cloudflare hosted MCP server with the permissions of the connected credential."""
 
     description: str | None = 'Use Cloudflare API, product, and documentation tools.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """API token, `'oauth'`, HTTP authentication, or a callable that returns one for each run.
+    """An API token, `'oauth'`, an `httpx.Auth`, or a function that returns one for each run's user.
 
-    Unset, it defaults to `CLOUDFLARE_API_TOKEN`, then OAuth for servers that are not public. A callable
-    receives the run context, so each run can connect with its own user's credential from `ctx.deps`;
-    returning `None` omits the tools.
+    Unset, `CLOUDFLARE_API_TOKEN` is used, then browser login for servers that are not public.
+    If the function returns `None`, that run has no Cloudflare tools.
     """
     read_only: bool = False
-    """Expose only tools the server marks read-only; unmarked tools are omitted."""
+    """Keep only the tools the server marks as read-only."""
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
     client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Override the connection with a caller-configured MCP client or transport, or a callable that returns one for each run.
+    """Your own MCP client or transport, or a function that returns one for each run.
 
-    The supplied client owns its URL, authentication, and server configuration.
+    It replaces `server` and `auth`.
     """
     server: CloudflareServer = CloudflareServer.DOCS
-    """Managed server to connect to. Documentation is public; other servers may require OAuth."""
+    """The server to use. Public ones, such as the documentation server, need no credential."""
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
-        """Build the Cloudflare connection and optional read-only selection."""
+        """Return the Cloudflare tools."""
         id = self.id or 'cloudflare'
         if self.client is not None:
             toolset: AbstractToolset[AgentDepsT] = per_run_client(self.client, self._from_client, id=id)
