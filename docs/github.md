@@ -23,7 +23,15 @@ print(result.output)
 
 ## Per-user credentials
 
-A token or `GITHUB_TOKEN` connects every run as the same account. That suits a script or an agent on your own machine.
+`auth` decides which GitHub account each run uses:
+
+| `auth` | Account used |
+| --- | --- |
+| Not set, `None`, or `''` | `GITHUB_TOKEN`. If that is not set either, creating the agent raises an error. |
+| A token | That token, for every run. |
+| A function | Called at the start of each run. The token it returns is used for that run. If it returns `None` or `''`, that run has no GitHub tools. A function never uses `GITHUB_TOKEN`. |
+
+A fixed token or `GITHUB_TOKEN` suits a script or an agent on your own machine, where every run is the same account.
 
 In an app where each user connects their own GitHub account, one agent serves all of them, so the token cannot be fixed when the agent is created. Pass a function that reads the current user's token from the run's deps:
 
@@ -46,7 +54,7 @@ def github_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[GitHub(auth=github_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. If it returns `None`, that run has no GitHub tools; it never falls back to `GITHUB_TOKEN`. `read_only`, `toolsets`, and `url` still apply to every run.
+Each run connects as its own user, so concurrent runs never share an account. `read_only`, `toolsets`, and `url` still apply to every run.
 
 Your app gets each user's token, stores it, and refreshes it. For example, a "Connect GitHub" button that signs them in through your GitHub App with OAuth and saves the user access token to their account, or a settings page where each user pastes their own personal access token. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 

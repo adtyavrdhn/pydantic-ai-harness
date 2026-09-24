@@ -29,7 +29,7 @@ class GitHub(AbstractCapability[AgentDepsT]):
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
     """A GitHub token or a function of the run context that returns one.
 
-    Unset, `GITHUB_TOKEN` is used. If the function returns `None`, that run has no GitHub tools.
+    Unset, it uses `GITHUB_TOKEN`. A function never does: if it returns `None` or `''`, that run has no GitHub tools.
     """
     read_only: bool = False
     """Offer only read tools. With a custom `client`, keep only the tools the server marks as read-only."""
@@ -64,7 +64,7 @@ class GitHub(AbstractCapability[AgentDepsT]):
 
     def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
         auth = self.auth(ctx) if callable(self.auth) else self.auth
-        return None if auth is None else self._connect(auth)
+        return self._connect(auth) if auth else None
 
     def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         headers = {'X-MCP-Readonly': 'true'} if self.read_only else {}
