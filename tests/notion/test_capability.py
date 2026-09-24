@@ -121,6 +121,13 @@ class TestNotion:
         with pytest.raises(UserError, match='`client` owns the connection'):
             Notion(client='https://example.com/mcp', **settings)
 
+    def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
+        Agent(TestModel(), capabilities=[Notion(client=server, defer_loading=True)])
+
+    def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
+        with pytest.raises(UserError, match="Two `Notion` capabilities share the id 'notion'"):
+            Agent(TestModel(), capabilities=[Notion(auth='a'), Notion(auth='b', read_only=True)])
+
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(Notion(auth='secret-token'))
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -10,7 +10,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import credential, is_read_only
+from pydantic_ai_harness._mcp import credential, is_read_only, one_connection
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -18,10 +18,15 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError('Install Notion support with: uv add "pydantic-ai-harness[notion]"') from exc
 
 
+_ID = 'notion'
+
+
 @dataclass(kw_only=True)
 class Notion(AbstractCapability[AgentDepsT]):
     """Give the agent the tools of Notion's hosted MCP server, with the permissions of the connected user."""
 
+    id: str | None = _ID
+    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `Notion` on one agent its own."""
     description: str | None = 'Search and change Notion workspace content.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
     """A Notion OAuth access token, `'oauth'` to sign in through the browser locally, or a function of the run context that returns a token.
@@ -40,9 +45,14 @@ class Notion(AbstractCapability[AgentDepsT]):
         if self.client is not None and self.auth is not None:
             raise UserError('`client` owns the connection, so it cannot be combined with `auth`.')
 
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """Two `Notion`s under one `id` are the same connection stated twice, or an error if they differ."""
+        return one_connection(capabilities)
+
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the Notion MCP toolset."""
-        id = self.id or 'notion'
+        id = self.id or _ID
         if self.client is not None:
             toolset: AbstractToolset[AgentDepsT] = MCPToolset(
                 self.client, id=id, include_instructions=self.include_instructions
@@ -66,7 +76,7 @@ class Notion(AbstractCapability[AgentDepsT]):
     def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             'https://mcp.notion.com/mcp',
-            id=self.id or 'notion',
+            id=self.id or _ID,
             auth=credential(auth, env='NOTION_ACCESS_TOKEN', service='Notion'),
             headers=None,
             include_instructions=self.include_instructions,
