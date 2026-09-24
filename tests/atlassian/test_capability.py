@@ -9,6 +9,7 @@ import pytest
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import DynamicCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
@@ -142,11 +143,11 @@ class TestPerRunAuth:
         result = await agent.run('Use the tools')
         assert result.output == 'success (no tool calls)'
 
-    async def test_client_function_runs_per_run(self, server: FastMCP) -> None:
-        def client(ctx: RunContext[Tenant]) -> FastMCP | None:
-            return None if ctx.deps.token is None else server
+    async def test_dynamic_capability_builds_per_run(self, server: FastMCP) -> None:
+        def atlassian(ctx: RunContext[Tenant]) -> Atlassian[Tenant] | None:
+            return None if ctx.deps.token is None else Atlassian(client=server)
 
-        agent = Agent(TestModel(), deps_type=Tenant, capabilities=[Atlassian(client=client)])
+        agent = Agent(TestModel(), deps_type=Tenant, capabilities=[DynamicCapability(atlassian, id='atlassian')])
         alice = await agent.run('Use the tools', deps=Tenant('alice-token'))
         nobody = await agent.run('Use the tools', deps=Tenant(None))
         assert (alice.output, nobody.output) == ('{"read_resource":"read"}', 'success (no tool calls)')

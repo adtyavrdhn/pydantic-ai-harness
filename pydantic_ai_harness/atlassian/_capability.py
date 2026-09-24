@@ -8,7 +8,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, credential, per_run
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, credential, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -28,21 +28,15 @@ class Atlassian(AbstractCapability[AgentDepsT]):
     """
     include_instructions: bool = True
     """Pass the server's own instructions to the agent."""
-    client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Your own MCP client or transport, or a function of the run context that returns one.
-
-    The client owns the URL, authentication, and server settings.
-    """
+    client: MCPToolsetClient | None = field(default=None, repr=False)
+    """Your own MCP client or transport, which then owns the URL, authentication, and server settings."""
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the Atlassian tools."""
         id = self.id or 'atlassian'
         if self.client is not None:
-            return per_run(self.client, self._from_client, id=id)
+            return MCPToolset(self.client, id=id, include_instructions=self.include_instructions)
         return per_run(self.auth, self._connect, id=id)
-
-    def _from_client(self, client: MCPToolsetClient) -> MCPToolset[AgentDepsT]:
-        return MCPToolset(client, id=self.id or 'atlassian', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
