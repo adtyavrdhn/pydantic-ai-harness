@@ -21,31 +21,30 @@ from urllib.parse import urlencode
 
 @dataclass(kw_only=True)
 class Supabase(AbstractCapability[AgentDepsT]):
-    """Connect to Supabase using its native project, feature, and read-only settings."""
+    """Give the agent the tools of Supabase's hosted MCP server."""
 
     description: str | None = 'Use Supabase project and account tools.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """PAT, `'oauth'`, HTTP authentication, or a callable that returns one for each run.
+    """A personal access token, `'oauth'`, an `httpx.Auth`, or a function of the run context that returns the current user's credential.
 
-    Unset, it defaults to `SUPABASE_ACCESS_TOKEN`, then OAuth. A callable receives the run context, so each
-    run can connect with its own user's credential from `ctx.deps`; returning `None` omits the tools.
+    Unset, it uses `SUPABASE_ACCESS_TOKEN`, then browser login. If the function returns `None`, that run has no Supabase tools.
     """
     read_only: bool = False
-    """Use the server's native read-only mode. A custom client is filtered by `readOnlyHint` instead."""
+    """Turn on Supabase's read-only mode. With a custom `client`, keep only the tools the server marks as read-only."""
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
     client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Override the connection with a caller-configured MCP client or transport, or a callable that returns one for each run.
+    """Your own FastMCP client or transport, or a function of the run context that returns one.
 
-    The supplied client owns its URL, authentication, and server configuration.
+    The client owns the URL, authentication, and server settings.
     """
     project_ref: str | None = None
-    """Native project selection. Omit to retain account-level tools."""
+    """The project to limit the agent to. Leave it out to keep the account-level tools."""
     features: list[str] | None = None
-    """Native feature groups. `None` keeps the server defaults."""
+    """Supabase tool groups to enable. `None` keeps Supabase's defaults."""
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
-        """Build the Supabase connection and optional read-only selection."""
+        """Return the Supabase MCP toolset."""
         id = self.id or 'supabase'
         if self.client is not None:
             toolset: AbstractToolset[AgentDepsT] = per_run_client(self.client, self._from_client, id=id)
