@@ -120,8 +120,12 @@ class TestCloudflare:
         request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
         assert request.headers['Authorization'] == 'Bearer environment-token'
 
-    def test_default_public_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv('CLOUDFLARE_API_TOKEN', raising=False)
+    @pytest.mark.parametrize('token', [None, ''])
+    def test_default_public_endpoint(self, token: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
+        if token is None:
+            monkeypatch.delenv('CLOUDFLARE_API_TOKEN', raising=False)
+        else:
+            monkeypatch.setenv('CLOUDFLARE_API_TOKEN', token)
         connection = transport(Cloudflare())
         assert connection.url == 'https://docs.mcp.cloudflare.com/mcp'
         assert connection.auth is None

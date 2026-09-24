@@ -106,7 +106,7 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
         # Public servers need no credential, but still receive one when it is set.
-        if auth is None and self.server in _PUBLIC_SERVERS and 'CLOUDFLARE_API_TOKEN' not in environ:
+        if auth is None and self.server in _PUBLIC_SERVERS and not environ.get('CLOUDFLARE_API_TOKEN'):
             connect_auth = None
         else:
             connect_auth = credential(auth, env='CLOUDFLARE_API_TOKEN', service='Cloudflare')
