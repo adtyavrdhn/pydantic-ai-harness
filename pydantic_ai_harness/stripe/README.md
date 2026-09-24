@@ -52,9 +52,9 @@ def stripe_key(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Stripe(auth=stripe_key)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a key, a token, or an `httpx.Auth`. If it returns `None`, that run has no Stripe tools; it never falls back to `STRIPE_API_KEY`. `connected_account` applies to every user.
+The function is called at the start of each run, so each run connects as its own user. It can return a key, a token, or an `httpx.Auth`. If it returns `None`, that run has no Stripe tools; it never falls back to `STRIPE_API_KEY`. `connected_account` applies to every user.
 
-Your application is responsible for getting each user's key or token, storing it, and refreshing it, for example with a "Connect Stripe" button in your web app. The function only reads the current credential.
+Your application is responsible for getting each user's key or token, storing it, and refreshing it, for example with a "Connect Stripe" button in your web app. Look the key up before the run, for example with `await`, and put it in the deps; the function only reads it.
 
 When users differ in more than their credential, such as a platform acting on each user's Connect account, build the whole capability for each run with a [dynamic capability](https://pydantic.dev/docs/ai/capabilities/custom/#dynamically-building-a-capability):
 

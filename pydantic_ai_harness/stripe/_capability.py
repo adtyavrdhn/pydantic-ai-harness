@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.tools import AgentDepsT
-from pydantic_ai.toolsets import AbstractToolset
+from pydantic_ai.tools import AgentDepsT, RunContext
+from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, credential, per_run
+from pydantic_ai_harness._mcp import credential
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -21,7 +23,7 @@ class Stripe(AbstractCapability[AgentDepsT]):
     """Give the agent the tools of Stripe's hosted MCP server, with the permissions of the connected credential."""
 
     description: str | None = 'Read and change Stripe resources.'
-    auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
+    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
     """A Stripe restricted API key, an `httpx.Auth`, or a function of the run context that returns one.
 
     Unset, it uses `STRIPE_API_KEY`. If the function returns `None`, that run has no Stripe tools.
@@ -38,9 +40,16 @@ class Stripe(AbstractCapability[AgentDepsT]):
         id = self.id or 'stripe'
         if self.client is not None:
             return MCPToolset(self.client, id=id, include_instructions=self.include_instructions)
-        return per_run(self.auth, self._connect, id=id)
+        if callable(self.auth):
+            # Registered once under a fixed `id`, as durable execution requires; filled per run.
+            return DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
+        return self._connect(self.auth)
 
-    def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+    def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
+        auth = self.auth(ctx) if callable(self.auth) else self.auth
+        return None if auth is None else self._connect(auth)
+
+    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             'https://mcp.stripe.com',
             id=self.id or 'stripe',
