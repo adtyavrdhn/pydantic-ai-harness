@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from os import environ
 
-from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
+
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, per_run_auth, per_run_client
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -21,24 +22,35 @@ class Atlassian(AbstractCapability[AgentDepsT]):
     """Use Atlassian's hosted tools with the permissions of the connected user."""
 
     description: str | None = 'Use Jira, Confluence, and other Atlassian tools.'
-    auth: Auth | str | None = field(default=None, repr=False)
-    """Bearer token, `'oauth'`, or HTTP authentication. Defaults to `ATLASSIAN_API_KEY`, then OAuth."""
+    auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
+    """Bearer token, `'oauth'`, HTTP authentication, or a callable that returns one for each run.
+
+    Unset, it defaults to `ATLASSIAN_API_KEY`, then OAuth. A callable receives the run context, so each
+    run can connect with its own user's credential from `ctx.deps`; returning `None` omits the tools.
+    """
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
-    client: MCPToolsetClient | None = field(default=None, repr=False)
-    """Override the connection with a caller-configured MCP client or transport.
+    client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
+    """Override the connection with a caller-configured MCP client or transport, or a callable that returns one for each run.
 
     The supplied client owns its URL, authentication, and server configuration.
     """
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build the Atlassian connection."""
+        id = self.id or 'atlassian'
         if self.client is not None:
-            return MCPToolset(self.client, id=self.id or 'atlassian', include_instructions=self.include_instructions)
+            return per_run_client(self.client, self._from_client, id=id)
+        return per_run_auth(self.auth, self._connect, id=id)
+
+    def _from_client(self, client: MCPToolsetClient) -> MCPToolset[AgentDepsT]:
+        return MCPToolset(client, id=self.id or 'atlassian', include_instructions=self.include_instructions)
+
+    def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             'https://mcp.atlassian.com/v2/mcp?tools=all',
             id=self.id or 'atlassian',
-            auth=self.auth if self.auth is not None else environ.get('ATLASSIAN_API_KEY', 'oauth'),
+            auth=auth if auth is not None else environ.get('ATLASSIAN_API_KEY', 'oauth'),
             headers=None,
             include_instructions=self.include_instructions,
         )
