@@ -8,6 +8,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import DynamicCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
@@ -166,11 +167,11 @@ class TestPerRunAuth:
         assert isinstance(transport, StreamableHttpTransport)
         assert transport.headers == {'X-MCP-Readonly': 'true', 'X-MCP-Toolsets': 'repos'}
 
-    async def test_client_provider_filters_read_only_per_run(self, server: FastMCP) -> None:
-        def client(ctx: RunContext[str]) -> FastMCP | None:
-            return server if ctx.deps else None
+    async def test_dynamic_capability_builds_per_run(self, server: FastMCP) -> None:
+        def github(ctx: RunContext[str]) -> GitHub[str] | None:
+            return GitHub(client=server, read_only=True) if ctx.deps else None
 
-        agent = Agent(TestModel(), deps_type=str, capabilities=[GitHub(client=client, read_only=True)])
+        agent = Agent(TestModel(), deps_type=str, capabilities=[DynamicCapability(github, id='github')])
         result = await agent.run('Use the tools', deps='alice')
         assert result.output == '{"read_resource":"read"}'
         result = await agent.run('Use the tools', deps='')

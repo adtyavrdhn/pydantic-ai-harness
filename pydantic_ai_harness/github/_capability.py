@@ -8,7 +8,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, credential, is_read_only, per_run
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, credential, is_read_only, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -33,11 +33,8 @@ class GitHub(AbstractCapability[AgentDepsT]):
     """Offer only read tools. With a custom `client`, keep only the tools the server marks as read-only."""
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
-    client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Your own MCP client or transport, or a function that returns one for each run.
-
-    It replaces `url`, `auth`, and `toolsets`.
-    """
+    client: MCPToolsetClient | None = field(default=None, repr=False)
+    """Your own MCP client or transport, which then owns the URL and authentication. It replaces `url` and `toolsets`."""
     url: str = GITHUB_MCP_URL
     """The MCP server URL, for example a GitHub Enterprise Cloud endpoint."""
     toolsets: list[str] | None = None
@@ -47,14 +44,13 @@ class GitHub(AbstractCapability[AgentDepsT]):
         """Return the GitHub tools."""
         id = self.id or 'github'
         if self.client is not None:
-            toolset = per_run(self.client, self._from_client, id=id)
+            toolset: AbstractToolset[AgentDepsT] = MCPToolset(
+                self.client, id=id, include_instructions=self.include_instructions
+            )
             if self.read_only:
                 return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
             return toolset
         return per_run(self.auth, self._connect, id=id)
-
-    def _from_client(self, client: MCPToolsetClient) -> MCPToolset[AgentDepsT]:
-        return MCPToolset(client, id=self.id or 'github', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
         headers = {'X-MCP-Readonly': 'true'} if self.read_only else {}
