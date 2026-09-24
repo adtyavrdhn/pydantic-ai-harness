@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.tools import AgentDepsT
-from pydantic_ai.toolsets import AbstractToolset
+from pydantic_ai.tools import AgentDepsT, RunContext
+from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, credential, per_run
+from pydantic_ai_harness._mcp import credential
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -21,7 +23,7 @@ class Atlassian(AbstractCapability[AgentDepsT]):
     """Give an agent the tools of Atlassian's hosted MCP server, with the permissions of the connected user."""
 
     description: str | None = 'Use Jira, Confluence, and other Atlassian tools.'
-    auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
+    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
     """An Atlassian API key or token, an `httpx.Auth`, or a function of the run context that returns one.
 
     Unset, it uses `ATLASSIAN_API_KEY`. If the function returns `None`, that run has no Atlassian tools.
@@ -36,9 +38,15 @@ class Atlassian(AbstractCapability[AgentDepsT]):
         id = self.id or 'atlassian'
         if self.client is not None:
             return MCPToolset(self.client, id=id, include_instructions=self.include_instructions)
-        return per_run(self.auth, self._connect, id=id)
+        if callable(self.auth):
+            return DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
+        return self._connect(self.auth)
 
-    def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+    def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
+        auth = self.auth(ctx) if callable(self.auth) else self.auth
+        return None if auth is None else self._connect(auth)
+
+    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             'https://mcp.atlassian.com/v2/mcp?tools=all',
             id=self.id or 'atlassian',
