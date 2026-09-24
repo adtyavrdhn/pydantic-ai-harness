@@ -36,13 +36,20 @@ class GitHub(AbstractCapability[AgentDepsT]):
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
     client: MCPToolsetClient | None = field(default=None, repr=False)
-    """Your own MCP client or transport, which then owns the URL and authentication. It replaces `url` and `toolsets`."""
+    """Your own MCP client or transport, for full control of the connection.
+
+    It cannot be combined with `auth`, `url`, or `toolsets`.
+    """
     url: str = GITHUB_MCP_URL
     """The MCP server URL, for example a GitHub Enterprise Cloud endpoint."""
     toolsets: list[str] | None = None
     """GitHub tool groups to offer, such as `'repos'`. `None` keeps the server's defaults."""
 
     def __post_init__(self) -> None:
+        if self.client is not None and (
+            self.auth is not None or self.url != GITHUB_MCP_URL or self.toolsets is not None
+        ):
+            raise UserError('`client` owns the connection, so it cannot be combined with `auth`, `url`, or `toolsets`.')
         # GitHub reads an empty toolsets header as its defaults, which include write tools.
         if self.toolsets == []:
             raise UserError('`toolsets` must name at least one tool group; use `None` for the defaults.')
