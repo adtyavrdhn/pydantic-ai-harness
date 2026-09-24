@@ -31,7 +31,15 @@ print(result.output)
 
 ## Per-user credentials
 
-An API key or `STRIPE_API_KEY` connects every run as the same account. That suits a script or an agent on your own machine.
+`auth` decides which Stripe account each run uses:
+
+| `auth` | Account used |
+| --- | --- |
+| Not set, `None`, or `''` | `STRIPE_API_KEY`. If that is not set either, creating the agent raises an error. |
+| An API key | That key, for every run. |
+| A function | Called at the start of each run. The key it returns is used for that run. If it returns `None` or `''`, that run has no Stripe tools. A function never uses `STRIPE_API_KEY`. |
+
+A fixed key or `STRIPE_API_KEY` suits a script or an agent on your own machine, where every run is the same account.
 
 In an app where each user connects their own Stripe account, one agent serves all of them, so the key cannot be fixed when the agent is created. Pass a function that reads the current user's key from the run's deps:
 
@@ -54,7 +62,7 @@ def stripe_key(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Stripe(auth=stripe_key)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. If it returns `None`, that run has no Stripe tools; it never falls back to `STRIPE_API_KEY`. `connected_account` applies to every user.
+Each run connects as its own user, so concurrent runs never share an account. `connected_account` applies to every user.
 
 Your app gets each user's key, stores it, and refreshes it. For example, a settings page where each user pastes their own restricted API key, or a "Connect Stripe" button that signs them in with OAuth and saves the token to their account. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
