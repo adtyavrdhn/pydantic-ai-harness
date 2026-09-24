@@ -43,6 +43,7 @@ _FACTORIES = (
     ('spend_limits', 'spend:SpendLimits'),
     ('stackone', 'stackone:StackOne'),
     ('step_persistence', 'step_persistence:StepPersistence'),
+    ('stripe', 'stripe:Stripe'),
     ('subagents', 'subagents:SubAgents'),
     ('system_reminders', 'system_reminders:SystemReminders'),
     ('tool_output_limits', 'tool_output_limits:ToolOutputLimits'),
