@@ -18,7 +18,7 @@ pip:
 pip install "pydantic-ai-harness[linear]" "pydantic-ai-slim[openai]"
 ```
 
-Set `LINEAR_ACCESS_TOKEN` to a Linear API key or OAuth access token, or pass `auth=` a token or an `httpx.Auth`. With neither, the agent opens a browser so you can log in to Linear, which only works when you run it on your own machine. See the [provider setup](https://linear.app/docs/mcp).
+Set `LINEAR_ACCESS_TOKEN` to a Linear API key or OAuth access token, or pass `auth=` a token or an `httpx.Auth`. See the [provider setup](https://linear.app/docs/mcp).
 
 ```python
 from pydantic_ai import Agent
@@ -31,7 +31,7 @@ print(result.output)
 
 ## Per-user credentials
 
-A fixed token or `httpx.Auth`, `LINEAR_ACCESS_TOKEN`, and browser login all connect every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
+An API key or `LINEAR_ACCESS_TOKEN` connects every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -52,9 +52,9 @@ def linear_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Linear(auth=linear_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no Linear tools; it never falls back to `LINEAR_ACCESS_TOKEN` or browser login. `read_only=True` still applies to every run.
+The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no Linear tools; it never falls back to `LINEAR_ACCESS_TOKEN`. `read_only=True` still applies to every run.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Linear" OAuth flow in your web app. The function only reads the current token. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Linear" button in your web app. The function only reads the current token.
 
 `client` also accepts a function. It returns the MCP client or transport for the current run, or `None` for no Linear tools.
 
@@ -85,7 +85,7 @@ Handle the approval requests with the [deferred tools workflow](https://pydantic
 
 ## Connection customization
 
-Pass `client` to use your own FastMCP client or transport, for example one with custom OAuth token storage. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. With a `client`, `read_only=True` keeps only the tools the server marks as read-only. `include_instructions=False` stops the server's own instructions from reaching the agent.
+Pass `client` to use your own FastMCP client or transport, for example one with custom authentication or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. With a `client`, `read_only=True` keeps only the tools the server marks as read-only. `include_instructions=False` stops the server's own instructions from reaching the agent.
 
 A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
 

@@ -10,6 +10,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
@@ -131,10 +132,10 @@ class TestLinear:
         suffix = '/readonly' if read_only else ''
         assert transport(Linear(auth='token', read_only=read_only)).url == 'https://mcp.linear.app/mcp' + suffix
 
-    def test_oauth_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('LINEAR_ACCESS_TOKEN', raising=False)
-        with pytest.warns(UserWarning, match='in-memory token storage'):
-            assert transport(Linear()).auth is not None
+        with pytest.raises(UserError, match='Set `LINEAR_ACCESS_TOKEN`'):
+            Linear().get_toolset()
 
 
 class TestPerRunAuth:

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
@@ -23,10 +24,9 @@ class Linear(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Use Linear issues, projects, and teams.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """An API key or OAuth token, `'oauth'` for browser login, an `httpx.Auth`, or a function of the run context.
+    """A Linear API key or token, an `httpx.Auth`, or a function of the run context that returns one.
 
-    Unset, it uses `LINEAR_ACCESS_TOKEN`, then browser login.
-    If the function returns `None`, that run has no Linear tools.
+    Unset, it uses `LINEAR_ACCESS_TOKEN`. If the function returns `None`, that run has no Linear tools.
     """
     read_only: bool = False
     """Use Linear's read-only endpoint. With `client`, keep only the tools the server marks as read-only."""
@@ -52,10 +52,14 @@ class Linear(AbstractCapability[AgentDepsT]):
         return MCPToolset(client, id=self.id or 'linear', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+        if auth is None:
+            auth = environ.get('LINEAR_ACCESS_TOKEN')
+        if auth is None:
+            raise UserError('Set `LINEAR_ACCESS_TOKEN` or pass `auth` to connect to Linear.')
         return MCPToolset(
             'https://mcp.linear.app/mcp/readonly' if self.read_only else 'https://mcp.linear.app/mcp',
             id=self.id or 'linear',
-            auth=auth if auth is not None else environ.get('LINEAR_ACCESS_TOKEN', 'oauth'),
+            auth=auth,
             headers=None,
             include_instructions=self.include_instructions,
         )
