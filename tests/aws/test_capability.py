@@ -10,6 +10,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
@@ -124,9 +125,9 @@ class TestAWS:
     def test_regional_endpoint(self, region: Literal['us-east-1', 'eu-central-1']) -> None:
         assert transport(AWS(region=region, auth='token')).url == f'https://aws-mcp.{region}.api.aws/mcp'
 
-    def test_default_uses_oauth(self) -> None:
-        with pytest.warns(UserWarning, match='in-memory token storage'):
-            assert transport(AWS()).auth is not None
+    def test_missing_credential_raises(self) -> None:
+        with pytest.raises(UserError, match='Pass `auth` or `client`'):
+            AWS().get_toolset()
 
 
 class TestPerRunAuth:

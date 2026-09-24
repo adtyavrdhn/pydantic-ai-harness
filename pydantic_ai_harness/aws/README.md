@@ -18,20 +18,20 @@ pip:
 pip install "pydantic-ai-harness[aws]" "pydantic-ai-slim[openai]"
 ```
 
-By default the agent opens a browser so you can sign in to AWS, which only works when you run it on your own machine. You can instead pass `auth=` an access token or an `httpx.Auth`. See the [provider setup](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/getting-started-aws-mcp-server.html).
+Pass `auth=` an access token or an `httpx.Auth`, or pass `client` an MCP transport, such as the [AWS MCP proxy](#provider-settings). See the [provider setup](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/getting-started-aws-mcp-server.html).
 
 ```python
 from pydantic_ai import Agent
 from pydantic_ai_harness.aws import AWS
 
-agent = Agent('openai:gpt-5.6-sol', capabilities=[AWS()])
+agent = Agent('openai:gpt-5.6-sol', capabilities=[AWS(auth='your-access-token')])
 result = agent.run_sync('Summarize the resources I can access')
 print(result.output)
 ```
 
 ## Per-user credentials
 
-A token and browser sign-in both connect every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
+An access token connects every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -54,9 +54,9 @@ def aws_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[AWS(auth=aws_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return an access token or an `httpx.Auth`, such as one that signs each request with SigV4 using that user's AWS credentials. If it returns `None`, that run has no AWS tools; it never falls back to browser sign-in.
+The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return an access token or an `httpx.Auth`, such as one that signs each request with SigV4 using that user's AWS credentials. If it returns `None`, that run has no AWS tools.
 
-Your application is responsible for getting each user's credentials, storing them, and refreshing them, for example with a "Connect AWS" OAuth flow in your web app. The function only reads the current credential. Returning `'oauth'` from it raises an error, because browser sign-in would open on the server rather than for the user.
+Your application is responsible for getting each user's credentials, storing them, and refreshing them, for example with a "Connect AWS" button in your web app. The function only reads the current credential.
 
 `client` also accepts a function, for when users differ in more than their credential, such as a user who should connect through the Frankfurt endpoint:
 
@@ -88,7 +88,7 @@ With durable execution such as Temporal, read the credential from the run's deps
 
 ## Provider settings
 
-`AWS()` connects to the Virginia endpoint. `region='eu-central-1'` connects to the Frankfurt endpoint instead. It does not limit which regions the tools can act on. Your IAM permissions decide what is allowed. Browser sign-in needs the AWS sign-in permissions described in the [OAuth guide](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/oauth-authentication.html).
+`AWS()` connects to the Virginia endpoint. `region='eu-central-1'` connects to the Frankfurt endpoint instead. It does not limit which regions the tools can act on. Your IAM permissions decide what is allowed.
 
 To use SigV4 or a named AWS profile, set up the [official AWS MCP proxy](https://github.com/aws/mcp-proxy-for-aws) and pass its MCP transport as `client`. The proxy finds your AWS credentials and signs requests.
 
@@ -103,7 +103,7 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import DeferredToolRequests
 from pydantic_ai_harness.aws import AWS
 
-capability = AWS()
+capability = AWS(auth='your-access-token')
 agent = Agent(
     'openai:gpt-5.6-sol',
     toolsets=[capability.get_toolset().approval_required()],
@@ -115,7 +115,7 @@ Handle the approval requests with the [deferred tools workflow](https://pydantic
 
 ## Connection customization
 
-Pass `client` to use your own FastMCP client or transport, for example one with custom OAuth token storage or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` still applies. `include_instructions=False` stops the server's instructions from reaching the model.
+Pass `client` to use your own FastMCP client or transport, for example one with custom authentication or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` still applies. `include_instructions=False` stops the server's instructions from reaching the model.
 
 A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
 

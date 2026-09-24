@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
@@ -24,9 +25,9 @@ class AWS(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Use AWS knowledge and account tools.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """`'oauth'` for browser sign-in, an access token, an `httpx.Auth`, or a function that returns one for each run's user.
+    """An access token, an `httpx.Auth`, or a function of the run context that returns one.
 
-    Unset, browser sign-in is used. If the function returns `None`, that run has no AWS tools.
+    Unset, pass `client` instead. If the function returns `None`, that run has no AWS tools.
     """
     read_only: bool = False
     """Keep only the tools the server marks as read-only."""
@@ -55,10 +56,12 @@ class AWS(AbstractCapability[AgentDepsT]):
         return MCPToolset(client, id=self.id or 'aws', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+        if auth is None:
+            raise UserError('Pass `auth` or `client` to connect to AWS.')
         return MCPToolset(
             f'https://aws-mcp.{self.region}.api.aws/mcp',
             id=self.id or 'aws',
-            auth=auth if auth is not None else 'oauth',
+            auth=auth,
             headers=None,
             include_instructions=self.include_instructions,
         )
