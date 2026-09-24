@@ -121,7 +121,10 @@ class TestGitHub:
         Agent(TestModel(), capabilities=[GitHub(client=server, defer_loading=True)])
 
     def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
-        with pytest.raises(UserError, match="Two `GitHub` capabilities share the id 'github'"):
+        with pytest.raises(
+            UserError,
+            match="Capability id 'github' is used by multiple GitHub capabilities that disagree on 'auth', 'read_only'",
+        ):
             Agent(TestModel(), capabilities=[GitHub(auth='a'), GitHub(auth='b', read_only=True)])
 
     def test_credential_is_not_in_repr(self) -> None:
