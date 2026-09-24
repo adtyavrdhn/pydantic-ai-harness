@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, is_read_only, per_run_auth, per_run_client
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, credential, is_read_only, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -49,27 +47,23 @@ class GitHub(AbstractCapability[AgentDepsT]):
         """Return the GitHub tools."""
         id = self.id or 'github'
         if self.client is not None:
-            toolset = per_run_client(self.client, self._from_client, id=id)
+            toolset = per_run(self.client, self._from_client, id=id)
             if self.read_only:
                 return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
             return toolset
-        return per_run_auth(self.auth, self._connect, id=id)
+        return per_run(self.auth, self._connect, id=id)
 
     def _from_client(self, client: MCPToolsetClient) -> MCPToolset[AgentDepsT]:
         return MCPToolset(client, id=self.id or 'github', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
-        if auth is None:
-            auth = environ.get('GITHUB_TOKEN')
-        if auth is None:
-            raise UserError('Set `GITHUB_TOKEN` or pass `auth` to connect to GitHub.')
         headers = {'X-MCP-Readonly': 'true'} if self.read_only else {}
         if self.toolsets is not None:
             headers['X-MCP-Toolsets'] = ','.join(self.toolsets)
         return MCPToolset(
             self.url,
             id=self.id or 'github',
-            auth=auth,
+            auth=credential(auth, env='GITHUB_TOKEN', service='GitHub'),
             headers=headers,
             include_instructions=self.include_instructions,
         )
