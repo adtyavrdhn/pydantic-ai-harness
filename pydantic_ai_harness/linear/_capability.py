@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
@@ -33,7 +34,11 @@ class Linear(AbstractCapability[AgentDepsT]):
     include_instructions: bool = True
     """Pass the server's own instructions to the agent."""
     client: MCPToolsetClient | None = field(default=None, repr=False)
-    """Your own MCP client or transport, which then owns the URL, authentication, and server settings."""
+    """Your own MCP client or transport, for full control of the connection. It cannot be combined with `auth`."""
+
+    def __post_init__(self) -> None:
+        if self.client is not None and self.auth is not None:
+            raise UserError('`client` owns the connection, so it cannot be combined with `auth`.')
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the Linear tools."""
