@@ -1,6 +1,6 @@
 # AWS
 
-Use AWS knowledge and account tools through its managed MCP server. `AWS` connects an agent to the provider's hosted MCP server. By default it exposes the tools the server offers, including write tools. Provider credentials and server settings determine what those tools may access.
+Let an agent use AWS knowledge and account tools. `AWS` gives the agent every tool AWS's managed MCP server offers, including tools that make changes. Your IAM permissions decide what those tools can reach.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
@@ -10,7 +10,7 @@ Use AWS knowledge and account tools through its managed MCP server. `AWS` connec
 pip/uv-add "pydantic-ai-harness[aws]" "pydantic-ai-slim[openai]"
 ```
 
-`auth` accepts an `httpx.Auth` for caller-managed authentication, or a callable that returns a credential for each run (see [Per-user credentials](#per-user-credentials)). See the [provider setup](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/getting-started-aws-mcp-server.html).
+By default the agent opens a browser so you can sign in to AWS, which only works when you run it on your own machine. You can instead pass `auth=` an access token or an `httpx.Auth`. See the [provider setup](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/getting-started-aws-mcp-server.html).
 
 ```python
 from pydantic_ai import Agent
@@ -23,9 +23,7 @@ print(result.output)
 
 ## Per-user credentials
 
-A fixed `auth` and `'oauth'` both give every run the same connection and the same identity. Use them for scripts, local tools, and single-user agents. `'oauth'` opens a browser on the machine running the agent and keeps tokens in memory, so it does not suit a server.
-
-When one agent serves several users, pass a callable instead. It receives the run context at the start of each run and returns that user's credential, so each run opens its own connection:
+A token and browser sign-in both connect every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -48,9 +46,11 @@ def aws_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[AWS(auth=aws_token)])
 ```
 
-The callable can be async and can return an access token or an `httpx.Auth`, such as one that signs each request with SigV4 using that user's AWS credentials. When it returns `None`, the run has no AWS tools; it does not fall back to browser OAuth. Returning `'oauth'` raises an error, because it would open a browser on the server. Your application owns obtaining, storing, and refreshing each user's credentials, for example through an OAuth flow in your web app, and the callable reads the current credential from that store.
+The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return an access token or an `httpx.Auth`, such as one that signs each request with SigV4 using that user's AWS credentials. If it returns `None`, that run has no AWS tools; it never falls back to browser sign-in.
 
-`client` accepts a callable in the same way, for settings beyond the credential that differ per user, such as a user who should connect through the Frankfurt endpoint:
+Your application is responsible for getting each user's credentials, storing them, and refreshing them, for example with a "Connect AWS" OAuth flow in your web app. The function only reads the current credential. Returning `'oauth'` from it raises an error, because browser sign-in would open on the server rather than for the user.
+
+`client` also accepts a function, for when users differ in more than their credential, such as a user who should connect through the Frankfurt endpoint:
 
 ```python
 from fastmcp.client.transports import StreamableHttpTransport
@@ -67,19 +67,19 @@ def aws_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
 capability = AWS(client=aws_client)
 ```
 
-Each run connects and lists tools when it starts, and disconnects when it ends. Under durable execution such as Temporal, the callable runs in the worker, so it should derive the credential from serializable deps. Give each `AWS` on one agent a distinct `id`.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `AWS` to an agent, give each a distinct `id`.
 
 ## Provider settings
 
-`AWS()` uses browser OAuth with the Virginia endpoint. `region='eu-central-1'` selects the Frankfurt MCP endpoint; it does not constrain the regions used by tool calls. Existing IAM permissions determine access. OAuth requires the AWS sign-in permissions described in the [OAuth guide](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/oauth-authentication.html).
+`AWS()` connects to the Virginia endpoint. `region='eu-central-1'` connects to the Frankfurt endpoint instead. It does not limit which regions the tools can act on. Your IAM permissions decide what is allowed. Browser sign-in needs the AWS sign-in permissions described in the [OAuth guide](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/oauth-authentication.html).
 
-For SigV4 or a named AWS profile, configure the [official AWS MCP proxy](https://github.com/aws/mcp-proxy-for-aws) and pass its MCP transport through `client`. The proxy owns credential discovery and signing.
+To use SigV4 or a named AWS profile, set up the [official AWS MCP proxy](https://github.com/aws/mcp-proxy-for-aws) and pass its MCP transport as `client`. The proxy finds your AWS credentials and signs requests.
 
 ## Tool selection and approval
 
-`read_only=True` keeps only tools explicitly marked `readOnlyHint: true`; unmarked tools are omitted. This can leave no tools when a server does not annotate its read operations. Credentials remain the access-control boundary.
+`read_only=True` keeps only the tools the server marks as read-only. If the server does not mark its read tools, this can leave none. The credential is still what controls access.
 
-For application-level filtering or approval, compose the existing [toolset wrappers](/ai/tools-toolsets/toolsets/). For example, this requires approval before every tool call:
+To filter tools or require approval in your application, wrap the toolset with the existing [toolset wrappers](/ai/tools-toolsets/toolsets/). For example, this asks for approval before every tool call:
 
 ```python
 from pydantic_ai import Agent
@@ -94,12 +94,12 @@ agent = Agent(
 )
 ```
 
-Handle the resulting requests using the [deferred tools workflow](/ai/tools-toolsets/deferred-tools/). Output limits can be composed with [Tool Output Limits](tool-output-limits.md).
+Handle the approval requests with the [deferred tools workflow](/ai/tools-toolsets/deferred-tools/). To cap the size of tool output, add [Tool Output Limits](tool-output-limits.md).
 
 ## Connection customization
 
-Pass `client` to use a configured FastMCP client or transport, including custom OAuth token storage and MCP handlers. That client owns its URL, authentication, and server configuration; configure those on it instead of the capability. `read_only=True` applies the same annotation filter to custom clients.
+Pass `client` to use your own FastMCP client or transport, for example one with custom OAuth token storage or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` still applies. `include_instructions=False` stops the server's instructions from reaching the model.
 
-`include_instructions` controls whether server instructions reach the model. A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) for per-run connections. To combine connections with overlapping tool names, give them distinct IDs and compose [PrefixTools](/ai/capabilities/prefix-tools/).
+A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](/ai/capabilities/prefix-tools/).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/aws/)

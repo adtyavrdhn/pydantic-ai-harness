@@ -20,29 +20,28 @@ from typing import Literal
 
 @dataclass(kw_only=True)
 class AWS(AbstractCapability[AgentDepsT]):
-    """Use AWS's managed MCP server with IAM-controlled access."""
+    """Use AWS's managed MCP server with the permissions of the connected identity."""
 
     description: str | None = 'Use AWS knowledge and account tools.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """`'oauth'` for browser sign-in, a token, HTTP authentication, or a callable that returns one for each run.
+    """`'oauth'` for browser sign-in, an access token, an `httpx.Auth`, or a function that returns one for each run's user.
 
-    Unset, it defaults to OAuth. A callable receives the run context, so each run can connect with its own
-    user's credential from `ctx.deps`; returning `None` omits the tools.
+    Unset, browser sign-in is used. If the function returns `None`, that run has no AWS tools.
     """
     read_only: bool = False
-    """Expose only tools the server marks read-only; unmarked tools are omitted."""
+    """Keep only the tools the server marks as read-only."""
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
     client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Override the connection with a caller-configured MCP client or transport, or a callable that returns one for each run.
+    """Your own MCP client or transport, or a function that returns one for each run.
 
-    The supplied client owns its URL, authentication, and server configuration.
+    It replaces `region` and `auth`.
     """
     region: Literal['us-east-1', 'eu-central-1'] = 'us-east-1'
-    """Region hosting the MCP endpoint, independent of the regions your tools operate on."""
+    """Region of the MCP endpoint. It does not limit which regions the tools act on."""
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
-        """Build the AWS connection and optional read-only selection."""
+        """Return the AWS tools."""
         id = self.id or 'aws'
         if self.client is not None:
             toolset: AbstractToolset[AgentDepsT] = per_run_client(self.client, self._from_client, id=id)
