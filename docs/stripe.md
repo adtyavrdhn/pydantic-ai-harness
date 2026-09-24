@@ -52,9 +52,17 @@ Your application is responsible for getting each user's key or token, storing it
 `client` also accepts a function, for when users differ in more than their credential, such as a platform acting on each user's Connect account:
 
 ```python
+from dataclasses import dataclass
+
 from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai import RunContext
 from pydantic_ai_harness.stripe import Stripe
+
+
+@dataclass
+class Deps:
+    stripe_key: str | None
+    stripe_account: str | None = None
 
 
 def stripe_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
@@ -70,7 +78,7 @@ def stripe_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
 capability = Stripe(client=stripe_client)
 ```
 
-With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `Stripe` to an agent, give each a distinct `id`.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `Stripe` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same.
 
 ## Provider settings
 
