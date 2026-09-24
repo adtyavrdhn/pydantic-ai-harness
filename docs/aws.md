@@ -53,9 +53,17 @@ Your application is responsible for getting each user's credentials, storing the
 `client` also accepts a function, for when users differ in more than their credential, such as a user who should connect through the Frankfurt endpoint:
 
 ```python
+from dataclasses import dataclass
+
 from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai import RunContext
 from pydantic_ai_harness.aws import AWS
+
+
+@dataclass
+class Deps:
+    aws_token: str | None
+    aws_region: Literal['us-east-1', 'eu-central-1'] = 'us-east-1'
 
 
 def aws_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
@@ -67,7 +75,7 @@ def aws_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
 capability = AWS(client=aws_client)
 ```
 
-With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `AWS` to an agent, give each a distinct `id`.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `AWS` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same.
 
 ## Provider settings
 
