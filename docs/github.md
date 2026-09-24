@@ -1,6 +1,6 @@
 # GitHub
 
-Let an agent read and change GitHub repositories, issues, pull requests, and other resources. `GitHub` gives the agent every tool GitHub's hosted MCP server offers, including tools that make changes. The credential you connect with decides what those tools can reach.
+Let an agent read and change GitHub repositories, issues, pull requests, and other resources. `GitHub` gives the agent the tools in GitHub's default tool groups, including tools that make changes; `toolsets` picks other groups. The credential you connect with decides what those tools can reach.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
@@ -52,9 +52,17 @@ Your application is responsible for getting each user's token, storing it, and r
 `client` also accepts a function, for when users differ in more than their credential, such as a user whose organization is on a GitHub Enterprise Cloud data-residency endpoint:
 
 ```python
+from dataclasses import dataclass
+
 from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai import RunContext
 from pydantic_ai_harness.github import GITHUB_MCP_URL, GitHub
+
+
+@dataclass
+class Deps:
+    github_token: str | None
+    github_mcp_url: str | None = None
 
 
 def github_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
@@ -66,7 +74,7 @@ def github_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
 capability = GitHub(client=github_client)
 ```
 
-With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `GitHub` to an agent, give each a distinct `id`.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `GitHub` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same.
 
 ## Provider settings
 
