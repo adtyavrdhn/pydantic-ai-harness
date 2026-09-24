@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 import pytest
@@ -112,7 +113,12 @@ class TestNotion:
 
     def test_custom_client_owns_authentication(self) -> None:
         client = StreamableHttpTransport('https://example.com/mcp', auth=httpx.BasicAuth('user', 'secret'))
-        assert transport(Notion(client=client, auth='ignored')).auth is client.auth
+        assert transport(Notion(client=client)).auth is client.auth
+
+    @pytest.mark.parametrize('settings', [{'auth': 'key'}, {'auth': no_credential}])
+    def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
+        with pytest.raises(UserError, match='`client` owns the connection'):
+            Notion(client='https://example.com/mcp', **settings)
 
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(Notion(auth='secret-token'))
