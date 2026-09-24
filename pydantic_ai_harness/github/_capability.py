@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.tools import AgentDepsT
-from pydantic_ai.toolsets import AbstractToolset
+from pydantic_ai.tools import AgentDepsT, RunContext
+from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, credential, is_read_only, per_run
+from pydantic_ai_harness._mcp import credential, is_read_only
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -25,7 +27,7 @@ class GitHub(AbstractCapability[AgentDepsT]):
     """Use GitHub's hosted tools with the permissions of the connected credential."""
 
     description: str | None = 'Read and change GitHub resources.'
-    auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
+    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
     """A GitHub token, an `httpx.Auth`, or a function of the run context that returns one.
 
     Unset, `GITHUB_TOKEN` is used. If the function returns `None`, that run has no GitHub tools.
@@ -56,9 +58,16 @@ class GitHub(AbstractCapability[AgentDepsT]):
             if self.read_only:
                 return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
             return toolset
-        return per_run(self.auth, self._connect, id=id)
+        if callable(self.auth):
+            # Registered once under a fixed `id`, as durable execution requires; filled per run.
+            return DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
+        return self._connect(self.auth)
 
-    def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+    def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
+        auth = self.auth(ctx) if callable(self.auth) else self.auth
+        return None if auth is None else self._connect(auth)
+
+    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
         headers = {'X-MCP-Readonly': 'true'} if self.read_only else {}
         if self.toolsets is not None:
             headers['X-MCP-Toolsets'] = ','.join(self.toolsets)

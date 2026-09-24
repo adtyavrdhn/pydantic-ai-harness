@@ -44,9 +44,9 @@ def github_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[GitHub(auth=github_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no GitHub tools; it never falls back to `GITHUB_TOKEN`. `read_only`, `toolsets`, and `url` still apply to every run.
+The function is called at the start of each run, so each run connects as its own user. It can return a token or an `httpx.Auth`. If it returns `None`, that run has no GitHub tools; it never falls back to `GITHUB_TOKEN`. `read_only`, `toolsets`, and `url` still apply to every run.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect GitHub" button in your web app. The function only reads the current token.
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect GitHub" button in your web app. Look the token up before the run, for example with `await`, and put it in the deps; the function only reads it.
 
 When users differ in more than their credential, such as a user whose organization is on a GitHub Enterprise Cloud data-residency endpoint, build the whole capability for each run with a [dynamic capability](/ai/capabilities/custom/#dynamically-building-a-capability):
 
