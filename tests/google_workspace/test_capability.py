@@ -112,10 +112,13 @@ class TestPerRunAuth:
         assert [bearer(connection) for connection in alice] == ['Bearer alice-token', 'Bearer alice-token']
         assert [bearer(connection) for connection in bob] == ['Bearer bob-token', 'Bearer bob-token']
 
-    async def test_provider_returning_none_does_not_fall_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize('missing', [None, ''])
+    async def test_provider_returning_none_does_not_fall_back(
+        self, missing: str | None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', 'deployment-token')
         capability = GoogleWorkspace[str | None]('gmail', auth=lambda ctx: ctx.deps)
-        assert await connections_for(capability, None) == []
+        assert await connections_for(capability, missing) == []
         agent = Agent(TestModel(), capabilities=[GoogleWorkspace[object]('gmail', auth=no_credential)])
         result = await agent.run('Use the tools')
         assert result.output == 'success (no tool calls)'

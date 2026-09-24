@@ -23,7 +23,15 @@ print(result.output)
 
 ## Per-user credentials
 
-A fixed token or `GOOGLE_ACCESS_TOKEN` connects every run as the same Google account. That suits a script or an agent on your own machine.
+`auth` decides which Google account each run uses:
+
+| `auth` | Account used |
+| --- | --- |
+| Not set, `None`, or `''` | `GOOGLE_ACCESS_TOKEN`. If that is not set either, creating the agent raises an error. |
+| An access token | That token, for every run. |
+| A function | Called at the start of each run. The token it returns is used for that run. If it returns `None` or `''`, that run has no Google Workspace tools. A function never uses `GOOGLE_ACCESS_TOKEN`. |
+
+A fixed token or `GOOGLE_ACCESS_TOKEN` suits a script or an agent on your own machine, where every run is the same account.
 
 In an app where each user connects their own Google account, one agent serves all of them, so the token cannot be fixed when the agent is created. Pass a function that reads the current user's token from the run's deps:
 
@@ -50,7 +58,7 @@ agent = Agent(
 )
 ```
 
-The function is called at the start of each run, so each run connects as its own user. If it returns `None`, that run has no Google Workspace tools; it never falls back to `GOOGLE_ACCESS_TOKEN`.
+Each run connects as its own user, so concurrent runs never share an account.
 
 Your app gets each user's token, stores it, and refreshes it. For example, a "Connect Google" button that signs them in with Google OAuth, saves the refresh token to their account, and exchanges it for a fresh access token when the old one expires. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
