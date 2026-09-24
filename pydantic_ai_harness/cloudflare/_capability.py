@@ -80,8 +80,8 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
     """A Cloudflare API token or a function of the run context that returns one.
 
-    Unset, it uses `CLOUDFLARE_API_TOKEN`; public servers need neither. If the function returns `None`, that run
-    has no Cloudflare tools.
+    Unset, it uses `CLOUDFLARE_API_TOKEN`. A function never does: if it returns `None` or `''`, that run has no
+    Cloudflare tools. Public servers connect without a credential when neither is set.
     """
     read_only: bool = False
     """Keep only the tools the server marks as read-only."""
@@ -110,11 +110,11 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
 
     def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
         auth = self.auth(ctx) if callable(self.auth) else self.auth
-        return None if auth is None else self._connect(auth)
+        return self._connect(auth) if auth else None
 
     def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         # Public servers need no credential, but still receive one when it is set.
-        if auth is None and self.server in _PUBLIC_SERVERS and not environ.get('CLOUDFLARE_API_TOKEN'):
+        if not auth and self.server in _PUBLIC_SERVERS and not environ.get('CLOUDFLARE_API_TOKEN'):
             connect_auth = None
         else:
             connect_auth = credential(auth, env='CLOUDFLARE_API_TOKEN', service='Cloudflare')

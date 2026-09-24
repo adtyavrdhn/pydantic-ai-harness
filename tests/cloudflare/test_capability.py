@@ -116,13 +116,16 @@ class TestCloudflare:
         request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
         assert request.headers['Authorization'] == 'Bearer environment-token'
 
+    @pytest.mark.parametrize('auth', [None, ''])
     @pytest.mark.parametrize('token', [None, ''])
-    def test_default_public_endpoint(self, token: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_public_endpoint(
+        self, token: str | None, auth: str | None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         if token is None:
             monkeypatch.delenv('CLOUDFLARE_API_TOKEN', raising=False)
         else:
             monkeypatch.setenv('CLOUDFLARE_API_TOKEN', token)
-        connection = transport(Cloudflare())
+        connection = transport(Cloudflare(auth=auth))
         assert connection.url == 'https://docs.mcp.cloudflare.com/mcp'
         assert connection.auth is None
 
@@ -142,10 +145,13 @@ class TestPerRunAuth:
         assert isinstance(transport, StreamableHttpTransport)
         assert transport.url == 'https://mcp.cloudflare.com/mcp'
 
-    async def test_provider_returning_none_does_not_fall_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize('missing', [None, ''])
+    async def test_provider_returning_none_does_not_fall_back(
+        self, missing: str | None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv('CLOUDFLARE_API_TOKEN', 'deployment-token')
         capability = Cloudflare[str | None](auth=lambda ctx: ctx.deps, server=CloudflareServer.API)
-        assert await connections_for(capability, None) == []
+        assert await connections_for(capability, missing) == []
         agent = Agent(TestModel(), capabilities=[Cloudflare[object](auth=no_credential)])
         result = await agent.run('Use the tools')
         assert result.output == 'success (no tool calls)'
