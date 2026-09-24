@@ -6,7 +6,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from os import environ
 
-from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
@@ -78,8 +77,8 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
     """Use a Cloudflare hosted MCP server with the permissions of the connected credential."""
 
     description: str | None = 'Use Cloudflare API, product, and documentation tools.'
-    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
-    """A Cloudflare API token, an `httpx.Auth`, or a function of the run context that returns one.
+    auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
+    """A Cloudflare API token or a function of the run context that returns one.
 
     Unset, it uses `CLOUDFLARE_API_TOKEN`; public servers need neither. If the function returns `None`, that run
     has no Cloudflare tools.
@@ -113,7 +112,7 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
         auth = self.auth(ctx) if callable(self.auth) else self.auth
         return None if auth is None else self._connect(auth)
 
-    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
+    def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         # Public servers need no credential, but still receive one when it is set.
         if auth is None and self.server in _PUBLIC_SERVERS and not environ.get('CLOUDFLARE_API_TOKEN'):
             connect_auth = None

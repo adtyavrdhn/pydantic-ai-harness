@@ -106,10 +106,6 @@ class TestCloudflare:
         client = StreamableHttpTransport('https://example.com/mcp', auth=httpx.BasicAuth('user', 'secret'))
         assert transport(Cloudflare(client=client, auth='ignored')).auth is client.auth
 
-    def test_auth_reaches_default_connection(self) -> None:
-        auth = httpx.BasicAuth('user', 'secret')
-        assert transport(Cloudflare(auth=auth)).auth is auth
-
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(Cloudflare(auth='secret-token'))
 
