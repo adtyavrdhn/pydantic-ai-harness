@@ -146,13 +146,6 @@ class TestPerRunAuth:
         assert isinstance(transport, StreamableHttpTransport)
         assert transport.url == 'https://mcp.cloudflare.com/mcp'
 
-    async def test_async_provider(self) -> None:
-        async def token(ctx: RunContext[str | None]) -> str | None:
-            return ctx.deps
-
-        [connection] = await connections_for(Cloudflare[str | None](auth=token), 'alice-token')
-        assert bearer(connection) == 'Bearer alice-token'
-
     async def test_provider_returning_none_does_not_fall_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('CLOUDFLARE_API_TOKEN', 'deployment-token')
         capability = Cloudflare[str | None](auth=lambda ctx: ctx.deps, server=CloudflareServer.API)

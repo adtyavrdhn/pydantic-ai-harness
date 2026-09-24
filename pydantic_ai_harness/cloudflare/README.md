@@ -56,9 +56,9 @@ agent = Agent(
 )
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no Cloudflare tools, even on a public documentation server; it never falls back to `CLOUDFLARE_API_TOKEN`.
+The function is called at the start of each run, so each run connects as its own user. It can return a token or an `httpx.Auth`. If it returns `None`, that run has no Cloudflare tools, even on a public documentation server; it never falls back to `CLOUDFLARE_API_TOKEN`.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Cloudflare" button in your web app. The function only reads the current token.
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Cloudflare" button in your web app. Look the token up before the run, for example with `await`, and put it in the deps; the function only reads it.
 
 With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `Cloudflare` to an agent, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same.
 
