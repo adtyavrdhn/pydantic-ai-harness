@@ -147,19 +147,15 @@ class TestPerRunAuth:
         assert isinstance(transport, StreamableHttpTransport)
         assert transport.headers == {'Stripe-Account': 'acct_example'}
 
-    async def test_client_provider_selects_connected_account(self) -> None:
-        def client(ctx: RunContext[str | None]) -> StreamableHttpTransport | None:
+    async def test_dynamic_capability_selects_connected_account_per_run(self) -> None:
+        def stripe(ctx: RunContext[str | None]) -> Stripe[str | None] | None:
             if ctx.deps is None:
                 return None
-            return StreamableHttpTransport(
-                'https://mcp.stripe.com', auth='platform-key', headers={'Stripe-Account': ctx.deps}
-            )
+            return Stripe(auth='platform-key', connected_account=ctx.deps)
 
-        capability = Stripe[str | None](client=client)
-        [alice] = await connections_for(capability, 'acct_alice')
-        [bob] = await connections_for(capability, 'acct_bob')
-        headers = [
-            c.client.transport.headers for c in (alice, bob) if isinstance(c.client.transport, StreamableHttpTransport)
-        ]
-        assert headers == [{'Stripe-Account': 'acct_alice'}, {'Stripe-Account': 'acct_bob'}]
-        assert await connections_for(capability, None) == []
+        alice = stripe(RunContext(deps='acct_alice', model=TestModel(), usage=RunUsage()))
+        bob = stripe(RunContext(deps='acct_bob', model=TestModel(), usage=RunUsage()))
+        assert alice is not None and bob is not None
+        assert transport(alice).headers == {'Stripe-Account': 'acct_alice'}
+        assert transport(bob).headers == {'Stripe-Account': 'acct_bob'}
+        assert stripe(RunContext(deps=None, model=TestModel(), usage=RunUsage())) is None
