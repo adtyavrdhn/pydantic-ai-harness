@@ -19,27 +19,26 @@ except ImportError as exc:  # pragma: no cover
 
 @dataclass(kw_only=True)
 class Stripe(AbstractCapability[AgentDepsT]):
-    """Use Stripe's hosted tools with the permissions of the connected credential."""
+    """Give the agent the tools of Stripe's hosted MCP server, with the permissions of the connected credential."""
 
     description: str | None = 'Read and change Stripe resources.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Restricted API key, `'oauth'`, HTTP authentication, or a callable that returns one for each run.
+    """A restricted API key, `'oauth'`, an `httpx.Auth`, or a function of the run context that returns the current user's credential.
 
-    Unset, it defaults to `STRIPE_API_KEY`, then OAuth. A callable receives the run context, so each
-    run can connect with its own user's credential from `ctx.deps`; returning `None` omits the tools.
+    Unset, it uses `STRIPE_API_KEY`, then browser login. If the function returns `None`, that run has no Stripe tools.
     """
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
     client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Override the connection with a caller-configured MCP client or transport, or a callable that returns one for each run.
+    """Your own FastMCP client or transport, or a function of the run context that returns one.
 
-    The supplied client owns its URL, authentication, and server configuration.
+    The client owns the URL, authentication, and server settings.
     """
     connected_account: str | None = None
-    """Stripe Connect account sent through the native `Stripe-Account` header."""
+    """The Stripe Connect account to act on, such as `'acct_...'`. Not used with a custom `client`."""
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
-        """Build the Stripe connection."""
+        """Return the Stripe MCP toolset."""
         id = self.id or 'stripe'
         if self.client is not None:
             return per_run_client(self.client, self._from_client, id=id)

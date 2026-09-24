@@ -1,6 +1,6 @@
 # Stripe
 
-Read and change Stripe resources through its hosted MCP tools. `Stripe` connects an agent to the provider's hosted MCP server. By default it exposes the tools the server offers, including write tools. Provider credentials and server settings determine what those tools may access.
+Let an agent read and change your Stripe resources. `Stripe` gives the agent every tool Stripe's hosted MCP server offers, including tools that make changes. The credential you connect with decides what those tools can reach.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
@@ -10,7 +10,7 @@ Read and change Stripe resources through its hosted MCP tools. `Stripe` connects
 pip/uv-add "pydantic-ai-harness[stripe]" "pydantic-ai-slim[openai]"
 ```
 
-Set `STRIPE_API_KEY` to a Stripe restricted API key, or pass `auth=...`. When neither is supplied, the connection starts browser OAuth. `auth` accepts an `httpx.Auth` for caller-managed authentication, or a callable that returns a credential for each run (see [Per-user credentials](#per-user-credentials)). See the [provider setup](https://docs.stripe.com/mcp).
+Set `STRIPE_API_KEY` to a Stripe restricted API key, or pass `auth=` a key or an `httpx.Auth`. With neither, the agent opens a browser so you can log in to Stripe, which only works when you run it on your own machine. See the [provider setup](https://docs.stripe.com/mcp).
 
 ```python
 from pydantic_ai import Agent
@@ -23,9 +23,7 @@ print(result.output)
 
 ## Per-user credentials
 
-A fixed `auth`, `STRIPE_API_KEY`, and `'oauth'` all give every run the same connection and the same identity. Use them for scripts, local tools, and single-user agents. `'oauth'` opens a browser on the machine running the agent and keeps tokens in memory, so it does not suit a server.
-
-When one agent serves several users, pass a callable instead. It receives the run context at the start of each run and returns that user's credential, so each run opens its own connection:
+An API key, `STRIPE_API_KEY`, and browser login all connect every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -47,9 +45,11 @@ def stripe_key(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Stripe(auth=stripe_key)])
 ```
 
-The callable can be async and can return a token or an `httpx.Auth`. When it returns `None`, the run has no Stripe tools; it does not fall back to `STRIPE_API_KEY` or browser OAuth. Returning `'oauth'` raises an error, because it would open a browser on the server. Your application owns obtaining, storing, and refreshing each user's key or token, for example through an OAuth flow in your web app, and the callable reads the current one from that store.
+The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a key, a token, or an `httpx.Auth`. If it returns `None`, that run has no Stripe tools; it never falls back to `STRIPE_API_KEY` or browser login. `connected_account` applies to every user.
 
-`client` accepts a callable in the same way, for settings beyond the credential that differ per user, such as a platform that acts on each user's Connect account:
+Your application is responsible for getting each user's key or token, storing it, and refreshing it, for example with a "Connect Stripe" OAuth flow in your web app. The function only reads the current credential. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
+
+`client` also accepts a function, for when users differ in more than their credential, such as a platform acting on each user's Connect account:
 
 ```python
 from fastmcp.client.transports import StreamableHttpTransport
@@ -70,15 +70,15 @@ def stripe_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
 capability = Stripe(client=stripe_client)
 ```
 
-Each run connects and lists tools when it starts, and disconnects when it ends. Under durable execution such as Temporal, the callable runs in the worker, so it should derive the credential from serializable deps. Give each `Stripe` on one agent a distinct `id`.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `Stripe` to an agent, give each a distinct `id`.
 
 ## Provider settings
 
-The credential determines sandbox or live mode and which resources can be changed. For a Connect account, set `connected_account='acct_...'` with a platform restricted API key; Stripe receives the native `Stripe-Account` header. Connected-account access does not support OAuth. Grant the restricted key only the resource permissions the agent needs.
+The credential decides whether the agent works in a sandbox or in live mode, and which resources it can change. Give a restricted key only the permissions the agent needs. To act on a Connect account, set `connected_account='acct_...'` and use your platform's restricted API key. Stripe does not support browser login for Connect accounts.
 
 ## Tool selection and approval
 
-For application-level filtering or approval, compose the existing [toolset wrappers](/ai/tools-toolsets/toolsets/). For example, this requires approval before every tool call:
+To filter tools or require approval in your application, wrap the toolset with the existing [toolset wrappers](/ai/tools-toolsets/toolsets/). For example, this asks for approval before every tool call:
 
 ```python
 from pydantic_ai import Agent
@@ -93,12 +93,12 @@ agent = Agent(
 )
 ```
 
-Handle the resulting requests using the [deferred tools workflow](/ai/tools-toolsets/deferred-tools/). Output limits can be composed with [Tool Output Limits](tool-output-limits.md).
+Handle the approval requests with the [deferred tools workflow](/ai/tools-toolsets/deferred-tools/). To cap the size of tool output, add [Tool Output Limits](tool-output-limits.md).
 
 ## Connection customization
 
-Pass `client` to use a configured FastMCP client or transport, including custom OAuth token storage and MCP handlers. That client owns its URL, authentication, and server configuration; configure those on it instead of the capability.
+Pass `client` to use your own FastMCP client or transport, for example one with custom OAuth token storage. The client then owns the URL, authentication, and server settings, including the Connect account, so set those on it rather than on the capability. `include_instructions=False` stops the server's instructions from reaching the model.
 
-`include_instructions` controls whether server instructions reach the model. A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) for per-run connections. To combine connections with overlapping tool names, give them distinct IDs and compose [PrefixTools](/ai/capabilities/prefix-tools/).
+A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](/ai/capabilities/prefix-tools/).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/stripe/)
