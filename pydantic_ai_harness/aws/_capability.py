@@ -9,7 +9,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, is_read_only, per_run_auth, per_run_client
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, credential, is_read_only, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -45,9 +45,9 @@ class AWS(AbstractCapability[AgentDepsT]):
         """Return the AWS tools."""
         id = self.id or 'aws'
         if self.client is not None:
-            toolset: AbstractToolset[AgentDepsT] = per_run_client(self.client, self._from_client, id=id)
+            toolset: AbstractToolset[AgentDepsT] = per_run(self.client, self._from_client, id=id)
         else:
-            toolset = per_run_auth(self.auth, self._connect, id=id)
+            toolset = per_run(self.auth, self._connect, id=id)
         if self.read_only:
             return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
         return toolset
@@ -61,7 +61,7 @@ class AWS(AbstractCapability[AgentDepsT]):
         return MCPToolset(
             f'https://aws-mcp.{self.region}.api.aws/mcp',
             id=self.id or 'aws',
-            auth=auth,
+            auth=credential(auth, env=None, service='AWS'),
             headers=None,
             include_instructions=self.include_instructions,
         )
