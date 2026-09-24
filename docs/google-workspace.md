@@ -10,7 +10,7 @@ Let an agent use Gmail, Calendar, Drive, and other Google Workspace products. `G
 pip/uv-add "pydantic-ai-harness[google-workspace]" "pydantic-ai-slim[openai]"
 ```
 
-Set `GOOGLE_ACCESS_TOKEN` to a Google OAuth access token, or pass `auth=` a token or an `httpx.Auth`. With neither, you get an error; there is no browser login. See the [provider setup](https://developers.google.com/workspace/guides/configure-mcp-servers).
+Set `GOOGLE_ACCESS_TOKEN` to a Google OAuth access token, or pass `auth=` a token or an `httpx.Auth`. See the [provider setup](https://developers.google.com/workspace/guides/configure-mcp-servers).
 
 ```python
 from pydantic_ai import Agent
@@ -23,7 +23,7 @@ print(result.output)
 
 ## Per-user credentials
 
-A fixed token, a fixed `httpx.Auth`, and `GOOGLE_ACCESS_TOKEN` all connect every run as the same Google account. When one agent serves several users, pass a function that returns the current user's credential instead:
+A token or `GOOGLE_ACCESS_TOKEN` connects every run as the same Google account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -50,7 +50,7 @@ agent = Agent(
 
 The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no Google Workspace tools; it never falls back to `GOOGLE_ACCESS_TOKEN`.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Google" OAuth flow in your web app. The function only reads the current token. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Google" button in your web app. The function only reads the current token.
 
 With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `GoogleWorkspace` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same.
 

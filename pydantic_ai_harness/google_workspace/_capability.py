@@ -55,7 +55,7 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
     """Describes the capability when the agent loads it on demand."""
 
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """A Google OAuth access token, an `httpx.Auth`, or a function of the run context that returns the current user's.
+    """A Google access token, an `httpx.Auth`, or a function of the run context that returns one.
 
     Unset, it uses `GOOGLE_ACCESS_TOKEN`. If the function returns `None`, that run has no Google Workspace tools.
     """
@@ -84,7 +84,7 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
         if auth is None:
             auth = environ.get('GOOGLE_ACCESS_TOKEN')
         if auth is None or auth == '':
-            raise UserError('Google Workspace needs a token: pass auth= or set GOOGLE_ACCESS_TOKEN.')
+            raise UserError('Set `GOOGLE_ACCESS_TOKEN` or pass `auth` to connect to Google Workspace.')
         prefix = self.id or 'google-workspace'
         return CombinedToolset(
             [

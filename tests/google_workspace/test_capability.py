@@ -62,9 +62,9 @@ class TestGoogleWorkspace:
         with pytest.raises(UserError, match=message):
             GoogleWorkspace(services=services)  # pyright: ignore[reportArgumentType]
 
-    def test_missing_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('GOOGLE_ACCESS_TOKEN', raising=False)
-        with pytest.raises(UserError, match='needs a token'):
+        with pytest.raises(UserError, match='Set `GOOGLE_ACCESS_TOKEN`'):
             GoogleWorkspace('gmail').get_toolset()
 
     def test_credential_is_not_in_repr(self) -> None:
