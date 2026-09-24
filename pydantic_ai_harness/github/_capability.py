@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -27,8 +26,8 @@ class GitHub(AbstractCapability[AgentDepsT]):
     """Use GitHub's hosted tools with the permissions of the connected credential."""
 
     description: str | None = 'Read and change GitHub resources.'
-    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
-    """A GitHub token, an `httpx.Auth`, or a function of the run context that returns one.
+    auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
+    """A GitHub token or a function of the run context that returns one.
 
     Unset, `GITHUB_TOKEN` is used. If the function returns `None`, that run has no GitHub tools.
     """
@@ -67,7 +66,7 @@ class GitHub(AbstractCapability[AgentDepsT]):
         auth = self.auth(ctx) if callable(self.auth) else self.auth
         return None if auth is None else self._connect(auth)
 
-    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
+    def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         headers = {'X-MCP-Readonly': 'true'} if self.read_only else {}
         if self.toolsets is not None:
             headers['X-MCP-Toolsets'] = ','.join(self.toolsets)

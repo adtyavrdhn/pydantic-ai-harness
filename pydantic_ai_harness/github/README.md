@@ -18,7 +18,7 @@ pip:
 pip install "pydantic-ai-harness[github]" "pydantic-ai-slim[openai]"
 ```
 
-Set `GITHUB_TOKEN` to a GitHub personal access token, or pass `auth=` a token or an `httpx.Auth`. See the [provider setup](https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md).
+Set `GITHUB_TOKEN` to a GitHub personal access token, or pass `auth=` a token. See the [provider setup](https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md).
 
 ```python
 from pydantic_ai import Agent
@@ -31,7 +31,9 @@ print(result.output)
 
 ## Per-user credentials
 
-A token or `GITHUB_TOKEN` connects every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
+A token or `GITHUB_TOKEN` connects every run as the same account. That suits a script or an agent on your own machine.
+
+In an app where each user connects their own GitHub account, one agent serves all of them, so the token cannot be fixed when the agent is created. Pass a function that reads the current user's token from the run's deps:
 
 ```python
 from dataclasses import dataclass
@@ -52,9 +54,9 @@ def github_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[GitHub(auth=github_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can return a token or an `httpx.Auth`. If it returns `None`, that run has no GitHub tools; it never falls back to `GITHUB_TOKEN`. `read_only`, `toolsets`, and `url` still apply to every run.
+The function is called at the start of each run, so each run connects as its own user. If it returns `None`, that run has no GitHub tools; it never falls back to `GITHUB_TOKEN`. `read_only`, `toolsets`, and `url` still apply to every run.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect GitHub" button in your web app. Look the token up before the run, for example with `await`, and put it in the deps; the function only reads it.
+Your app gets each user's token, stores it, and refreshes it. For example, a "Connect GitHub" button that signs them in through your GitHub App with OAuth and saves the user access token to their account, or a settings page where each user pastes their own personal access token. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
 When users differ in more than their credential, such as a user whose organization is on a GitHub Enterprise Cloud data-residency endpoint, build the whole capability for each run with a [dynamic capability](https://pydantic.dev/docs/ai/capabilities/custom/#dynamically-building-a-capability):
 
