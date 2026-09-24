@@ -76,7 +76,7 @@ class Deps:
 
 
 def aws(ctx: RunContext[Deps]) -> AWS[Deps] | None:
-    if ctx.deps.aws_token is None:
+    if not ctx.deps.aws_token:
         return None
     return AWS(auth=ctx.deps.aws_token, region=ctx.deps.aws_region)
 
