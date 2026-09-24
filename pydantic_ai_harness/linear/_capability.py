@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
@@ -23,8 +22,8 @@ class Linear(AbstractCapability[AgentDepsT]):
     """Give an agent the tools of Linear's hosted MCP server, with the permissions of the connected user."""
 
     description: str | None = 'Use Linear issues, projects, and teams.'
-    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
-    """A Linear API key or token, an `httpx.Auth`, or a function of the run context that returns one.
+    auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
+    """A Linear API key or token or a function of the run context that returns one.
 
     Unset, it uses `LINEAR_ACCESS_TOKEN`. If the function returns `None`, that run has no Linear tools.
     """
@@ -53,7 +52,7 @@ class Linear(AbstractCapability[AgentDepsT]):
         auth = self.auth(ctx) if callable(self.auth) else self.auth
         return None if auth is None else self._connect(auth)
 
-    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
+    def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             'https://mcp.linear.app/mcp/readonly' if self.read_only else 'https://mcp.linear.app/mcp',
             id=self.id or 'linear',
