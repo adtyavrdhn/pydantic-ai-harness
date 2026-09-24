@@ -26,27 +26,26 @@ class GitHub(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Read and change GitHub resources.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """PAT, HTTP authentication, or a callable that returns one for each run.
+    """A GitHub token, an `httpx.Auth`, or a function that returns one for each run's user.
 
-    Unset, it defaults to `GITHUB_TOKEN`. A callable receives the run context, so each run can
-    connect with its own user's credential from `ctx.deps`; returning `None` omits the tools.
+    Unset, `GITHUB_TOKEN` is used. If the function returns `None`, that run has no GitHub tools.
     """
     read_only: bool = False
-    """Use the server's native read-only mode. A custom client is filtered by `readOnlyHint` instead."""
+    """Offer only read tools. With a custom `client`, keep only the tools the server marks as read-only."""
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
     client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Override the connection with a caller-configured MCP client or transport, or a callable that returns one for each run.
+    """Your own MCP client or transport, or a function that returns one for each run.
 
-    The supplied client owns its URL, authentication, and server configuration.
+    It replaces `url`, `auth`, and `toolsets`.
     """
     url: str = GITHUB_MCP_URL
-    """Hosted endpoint, including GitHub Enterprise Cloud data-residency endpoints."""
+    """The MCP server URL, for example a GitHub Enterprise Cloud endpoint."""
     toolsets: list[str] | None = None
-    """Native GitHub toolsets. `None` keeps the server defaults."""
+    """GitHub tool groups to offer, such as `'repos'`. `None` keeps the server's defaults."""
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
-        """Build the GitHub connection and optional read-only selection."""
+        """Return the GitHub tools."""
         id = self.id or 'github'
         if self.client is not None:
             toolset = per_run_client(self.client, self._from_client, id=id)

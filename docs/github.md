@@ -1,6 +1,6 @@
 # GitHub
 
-Read and change GitHub repositories, issues, pull requests, and other accessible resources. `GitHub` connects an agent to the provider's hosted MCP server. By default it exposes the tools the server offers, including write tools. Provider credentials and server settings determine what those tools may access.
+Let an agent read and change GitHub repositories, issues, pull requests, and other resources. `GitHub` gives the agent every tool GitHub's hosted MCP server offers, including tools that make changes. The credential you connect with decides what those tools can reach.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
@@ -10,7 +10,7 @@ Read and change GitHub repositories, issues, pull requests, and other accessible
 pip/uv-add "pydantic-ai-harness[github]" "pydantic-ai-slim[openai]"
 ```
 
-Set `GITHUB_TOKEN` to a GitHub personal access token, or pass `auth=...`. `auth` accepts an `httpx.Auth` for caller-managed authentication, or a callable that returns a credential for each run (see [Per-user credentials](#per-user-credentials)). See the [provider setup](https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md).
+Set `GITHUB_TOKEN` to a GitHub personal access token, or pass `auth=` a token or an `httpx.Auth`. See the [provider setup](https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md).
 
 ```python
 from pydantic_ai import Agent
@@ -23,9 +23,7 @@ print(result.output)
 
 ## Per-user credentials
 
-A fixed `auth` and `GITHUB_TOKEN` give every run the same connection and the same identity. Use them for scripts, local tools, and single-user agents.
-
-When one agent serves several users, pass a callable instead. It receives the run context at the start of each run and returns that user's credential, so each run opens its own connection:
+A token and `GITHUB_TOKEN` both connect every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -47,9 +45,11 @@ def github_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[GitHub(auth=github_token)])
 ```
 
-The callable can be async and can return a token or an `httpx.Auth`. When it returns `None`, the run has no GitHub tools; it does not fall back to `GITHUB_TOKEN`. Returning `'oauth'` raises an error, because it would open a browser on the server. Your application owns obtaining, storing, and refreshing each user's token, for example through a GitHub App user authorization flow in your web app, and the callable reads the current token from that store. `read_only` and `toolsets` apply to every run's connection.
+The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no GitHub tools; it never falls back to `GITHUB_TOKEN`. `read_only`, `toolsets`, and `url` still apply to every run.
 
-`client` accepts a callable in the same way, for settings beyond the credential that differ per user, such as a user whose organization is on a GitHub Enterprise Cloud data-residency endpoint:
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect GitHub" flow in your web app that uses a GitHub App's user authorization. The function only reads the current token. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
+
+`client` also accepts a function, for when users differ in more than their credential, such as a user whose organization is on a GitHub Enterprise Cloud data-residency endpoint:
 
 ```python
 from fastmcp.client.transports import StreamableHttpTransport
@@ -66,15 +66,17 @@ def github_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
 capability = GitHub(client=github_client)
 ```
 
-Each run connects and lists tools when it starts, and disconnects when it ends. Under durable execution such as Temporal, the callable runs in the worker, so it should derive the credential from serializable deps. Give each `GitHub` on one agent a distinct `id`.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `GitHub` to an agent, give each a distinct `id`.
 
 ## Provider settings
 
-`toolsets=['repos', 'issues', 'actions']` sends GitHub's native `X-MCP-Toolsets` header. Omit it to keep server defaults. `read_only=True` sends `X-MCP-Readonly: true`. `url` can select a GitHub Enterprise Cloud endpoint. Configure repository access through the token or GitHub App permissions; this capability does not interpret search syntax or enforce a repository boundary. For additional headers or host-configured OAuth, pass a configured MCP client.
+`toolsets=['repos', 'issues', 'actions']` picks which of GitHub's tool groups the server offers. Leave it unset to get the server's default groups. `read_only=True` asks the server for its read-only mode. Set `url` to use a GitHub Enterprise Cloud endpoint.
+
+The capability does not limit which repositories the agent can reach. Set that with the token's or GitHub App's permissions. To send other headers, or to use OAuth set up in your own app, pass a configured `client`.
 
 ## Tool selection and approval
 
-For application-level filtering or approval, compose the existing [toolset wrappers](/ai/tools-toolsets/toolsets/). For example, this requires approval before every tool call:
+To filter tools or require approval in your application, wrap the toolset with the existing [toolset wrappers](/ai/tools-toolsets/toolsets/). For example, this asks for approval before every tool call:
 
 ```python
 from pydantic_ai import Agent
@@ -89,12 +91,12 @@ agent = Agent(
 )
 ```
 
-Handle the resulting requests using the [deferred tools workflow](/ai/tools-toolsets/deferred-tools/). Output limits can be composed with [Tool Output Limits](tool-output-limits.md).
+Handle the approval requests with the [deferred tools workflow](/ai/tools-toolsets/deferred-tools/). To cap the size of tool output, add [Tool Output Limits](tool-output-limits.md).
 
 ## Connection customization
 
-Pass `client` to use a configured FastMCP client or transport, including custom OAuth token storage and MCP handlers. That client owns its URL, authentication, and server configuration; configure those on it instead of the capability. With a custom client, `read_only=True` filters annotations rather than configuring the remote server.
+Pass `client` to use your own FastMCP client or transport, for example one with custom OAuth token storage or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `toolsets` does not apply. `read_only=True` keeps only the tools the server marks as read-only, instead of asking the server for read-only mode. `include_instructions=False` stops the server's instructions from reaching the model.
 
-`include_instructions` controls whether server instructions reach the model. A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) for per-run connections. To combine connections with overlapping tool names, give them distinct IDs and compose [PrefixTools](/ai/capabilities/prefix-tools/).
+A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](/ai/capabilities/prefix-tools/).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/github/)
