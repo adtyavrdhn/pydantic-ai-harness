@@ -9,6 +9,7 @@ import pytest
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
@@ -113,10 +114,10 @@ class TestAtlassian:
     def test_flat_v2_endpoint(self) -> None:
         assert transport(Atlassian(auth='token')).url == 'https://mcp.atlassian.com/v2/mcp?tools=all'
 
-    def test_oauth_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_key_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('ATLASSIAN_API_KEY', raising=False)
-        with pytest.warns(UserWarning, match='in-memory token storage'):
-            assert transport(Atlassian()).auth is not None
+        with pytest.raises(UserError, match='Set `ATLASSIAN_API_KEY`'):
+            Atlassian().get_toolset()
 
 
 class TestPerRunAuth:

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
@@ -23,10 +24,9 @@ class Atlassian(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Use Jira, Confluence, and other Atlassian tools.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """A bearer token, `'oauth'` for browser login, an `httpx.Auth`, or a function of the run context.
+    """An Atlassian API key or token, an `httpx.Auth`, or a function of the run context that returns one.
 
-    Unset, it uses `ATLASSIAN_API_KEY`, then browser login.
-    If the function returns `None`, that run has no Atlassian tools.
+    Unset, it uses `ATLASSIAN_API_KEY`. If the function returns `None`, that run has no Atlassian tools.
     """
     include_instructions: bool = True
     """Pass the server's own instructions to the agent."""
@@ -47,10 +47,14 @@ class Atlassian(AbstractCapability[AgentDepsT]):
         return MCPToolset(client, id=self.id or 'atlassian', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+        if auth is None:
+            auth = environ.get('ATLASSIAN_API_KEY')
+        if auth is None:
+            raise UserError('Set `ATLASSIAN_API_KEY` or pass `auth` to connect to Atlassian.')
         return MCPToolset(
             'https://mcp.atlassian.com/v2/mcp?tools=all',
             id=self.id or 'atlassian',
-            auth=auth if auth is not None else environ.get('ATLASSIAN_API_KEY', 'oauth'),
+            auth=auth,
             headers=None,
             include_instructions=self.include_instructions,
         )

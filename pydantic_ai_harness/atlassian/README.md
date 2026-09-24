@@ -18,7 +18,7 @@ pip:
 pip install "pydantic-ai-harness[atlassian]" "pydantic-ai-slim[openai]"
 ```
 
-Set `ATLASSIAN_API_KEY` to an Atlassian service-account API key, or pass `auth=` a token or an `httpx.Auth`. With neither, the agent opens a browser so you can log in to Atlassian, which only works when you run it on your own machine. See the [provider setup](https://support.atlassian.com/atlassian-ai-gateway/docs/get-started-with-the-atlassian-remote-mcp-server/).
+Set `ATLASSIAN_API_KEY` to an Atlassian service-account API key, or pass `auth=` a token or an `httpx.Auth`. See the [provider setup](https://support.atlassian.com/atlassian-ai-gateway/docs/get-started-with-the-atlassian-remote-mcp-server/).
 
 ```python
 from pydantic_ai import Agent
@@ -31,7 +31,7 @@ print(result.output)
 
 ## Per-user credentials
 
-A fixed token or `httpx.Auth`, `ATLASSIAN_API_KEY`, and browser login all connect every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
+An API key or `ATLASSIAN_API_KEY` connects every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -52,9 +52,9 @@ def atlassian_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Atlassian(auth=atlassian_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`, such as `httpx.BasicAuth(email, token)` for a user's personal API token. If it returns `None`, that run has no Atlassian tools; it never falls back to `ATLASSIAN_API_KEY` or browser login.
+The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`, such as `httpx.BasicAuth(email, token)` for a user's personal API token. If it returns `None`, that run has no Atlassian tools; it never falls back to `ATLASSIAN_API_KEY`.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Atlassian" OAuth flow in your web app. The function only reads the current token. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Atlassian" button in your web app. The function only reads the current token.
 
 `client` also accepts a function. It returns the MCP client or transport for the current run, or `None` for no Atlassian tools.
 
@@ -64,7 +64,7 @@ With durable execution such as Temporal, read the credential from the run's deps
 
 The capability connects to Atlassian's v2 MCP endpoint with every tool enabled. The user's existing permissions and the organization's settings decide which sites and products the agent can reach.
 
-`ATLASSIAN_API_KEY` is for a service-account key. For a personal API token, pass `auth=httpx.BasicAuth(email, token)`. If you used browser login with Atlassian's older v1 endpoint, you need to log in again. See [token authentication](https://support.atlassian.com/atlassian-ai-gateway/docs/configure-authentication-via-api-token/).
+`ATLASSIAN_API_KEY` is for a service-account key. For a personal API token, pass `auth=httpx.BasicAuth(email, token)`. See [token authentication](https://support.atlassian.com/atlassian-ai-gateway/docs/configure-authentication-via-api-token/).
 
 ## Tool selection and approval
 
@@ -87,7 +87,7 @@ Handle the approval requests with the [deferred tools workflow](https://pydantic
 
 ## Connection customization
 
-Pass `client` to use your own FastMCP client or transport, for example one with custom OAuth token storage. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `include_instructions=False` stops the server's own instructions from reaching the agent.
+Pass `client` to use your own FastMCP client or transport, for example one with custom authentication or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `include_instructions=False` stops the server's own instructions from reaching the agent.
 
 A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
 
