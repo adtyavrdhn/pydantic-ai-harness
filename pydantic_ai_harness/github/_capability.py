@@ -53,6 +53,9 @@ class GitHub(AbstractCapability[AgentDepsT]):
         # GitHub reads an empty toolsets header as its defaults, which include write tools.
         if self.toolsets == []:
             raise UserError('`toolsets` must name at least one tool group; use `None` for the defaults.')
+        # The header joins groups with commas, so one entry holding a comma would enable several groups.
+        if self.toolsets is not None and any(not group.strip() or ',' in group for group in self.toolsets):
+            raise UserError('Each `toolsets` entry must name one tool group, such as `repos`.')
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the GitHub tools."""

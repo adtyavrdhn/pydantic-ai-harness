@@ -136,6 +136,11 @@ class TestGitHub:
         with pytest.raises(UserError, match='at least one tool group'):
             GitHub(auth='token', toolsets=[])
 
+    @pytest.mark.parametrize('group', ['repos,actions', '', ' '])
+    def test_each_toolset_names_one_group(self, group: str) -> None:
+        with pytest.raises(UserError, match='must name one tool group'):
+            GitHub(auth='token', toolsets=['issues', group])
+
     def test_native_server_settings(self) -> None:
         connection = transport(GitHub(auth='token', toolsets=['actions', 'notifications'], read_only=True))
         assert connection.headers == {'X-MCP-Readonly': 'true', 'X-MCP-Toolsets': 'actions,notifications'}
