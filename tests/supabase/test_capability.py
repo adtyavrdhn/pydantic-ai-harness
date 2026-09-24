@@ -133,7 +133,10 @@ class TestSupabase:
         Agent(TestModel(), capabilities=[Supabase(client=server, defer_loading=True)])
 
     def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
-        with pytest.raises(UserError, match="Two `Supabase` capabilities share the id 'supabase'"):
+        with pytest.raises(
+            UserError,
+            match="Capability id 'supabase' is used by multiple Supabase capabilities that disagree on 'auth', 'project_ref'",
+        ):
             Agent(TestModel(), capabilities=[Supabase(auth='a'), Supabase(auth='b', project_ref='other')])
 
     def test_credential_is_not_in_repr(self) -> None:
