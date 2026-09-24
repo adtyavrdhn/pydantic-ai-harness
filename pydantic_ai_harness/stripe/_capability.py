@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
@@ -23,8 +22,8 @@ class Stripe(AbstractCapability[AgentDepsT]):
     """Give the agent the tools of Stripe's hosted MCP server, with the permissions of the connected credential."""
 
     description: str | None = 'Read and change Stripe resources.'
-    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
-    """A Stripe restricted API key, an `httpx.Auth`, or a function of the run context that returns one.
+    auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
+    """A Stripe restricted API key or a function of the run context that returns one.
 
     Unset, it uses `STRIPE_API_KEY`. If the function returns `None`, that run has no Stripe tools.
     """
@@ -49,7 +48,7 @@ class Stripe(AbstractCapability[AgentDepsT]):
         auth = self.auth(ctx) if callable(self.auth) else self.auth
         return None if auth is None else self._connect(auth)
 
-    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
+    def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             'https://mcp.stripe.com',
             id=self.id or 'stripe',
