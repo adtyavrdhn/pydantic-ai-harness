@@ -23,7 +23,7 @@ class Linear(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Use Linear issues, projects, and teams.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
-    """A Linear API key or token or a function of the run context that returns one.
+    """A Linear API key or OAuth token, or a function of the run context that returns one.
 
     Unset, it uses `LINEAR_ACCESS_TOKEN`. If the function returns `None`, that run has no Linear tools.
     """
