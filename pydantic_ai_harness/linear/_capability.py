@@ -24,7 +24,9 @@ class Linear(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Use Linear issues, projects, and teams.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
-    """A Linear API key or OAuth token, `'oauth'` to sign in through the browser locally, or a function of the run context that returns a token.
+    """A Linear API key or token, or a function of the run context that returns one.
+
+    `'oauth'` signs in through the browser on your own machine.
 
     Unset, it uses `LINEAR_ACCESS_TOKEN`. A function never does: if it returns `None` or `''`, that run has no
     Linear tools.
