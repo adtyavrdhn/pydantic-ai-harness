@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
@@ -88,9 +89,13 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
     client: MCPToolsetClient | None = field(default=None, repr=False)
-    """Your own MCP client or transport, which then owns the URL and authentication. It replaces `server`."""
+    """Your own MCP client or transport, for full control of the connection. It cannot be combined with `auth` or `server`."""
     server: CloudflareServer = CloudflareServer.DOCS
     """The server to use. Public ones, such as the documentation server, need no credential."""
+
+    def __post_init__(self) -> None:
+        if self.client is not None and (self.auth is not None or self.server != CloudflareServer.DOCS):
+            raise UserError('`client` owns the connection, so it cannot be combined with `auth` or `server`.')
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the Cloudflare tools."""
