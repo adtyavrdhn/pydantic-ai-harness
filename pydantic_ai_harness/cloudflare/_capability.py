@@ -6,11 +6,10 @@ from dataclasses import dataclass, field
 from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, is_read_only, per_run_auth, per_run_client
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, credential, is_read_only, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -99,9 +98,9 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
         """Return the Cloudflare tools."""
         id = self.id or 'cloudflare'
         if self.client is not None:
-            toolset: AbstractToolset[AgentDepsT] = per_run_client(self.client, self._from_client, id=id)
+            toolset: AbstractToolset[AgentDepsT] = per_run(self.client, self._from_client, id=id)
         else:
-            toolset = per_run_auth(self.auth, self._connect, id=id)
+            toolset = per_run(self.auth, self._connect, id=id)
         if self.read_only:
             return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
         return toolset
@@ -110,14 +109,15 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
         return MCPToolset(client, id=self.id or 'cloudflare', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
-        if auth is None:
-            auth = environ.get('CLOUDFLARE_API_TOKEN')
-        if auth is None and self.server not in _PUBLIC_SERVERS:
-            raise UserError('Set `CLOUDFLARE_API_TOKEN` or pass `auth` to connect to Cloudflare.')
+        # Public servers need no credential, but still receive one when it is set.
+        if auth is None and self.server in _PUBLIC_SERVERS and 'CLOUDFLARE_API_TOKEN' not in environ:
+            connect_auth = None
+        else:
+            connect_auth = credential(auth, env='CLOUDFLARE_API_TOKEN', service='Cloudflare')
         return MCPToolset(
             _URLS[self.server],
             id=self.id or 'cloudflare',
-            auth=auth,
+            auth=connect_auth,
             headers=None,
             include_instructions=self.include_instructions,
         )
