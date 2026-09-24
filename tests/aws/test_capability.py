@@ -134,13 +134,6 @@ class TestPerRunAuth:
         assert isinstance(transport, StreamableHttpTransport)
         assert transport.url == 'https://aws-mcp.eu-central-1.api.aws/mcp'
 
-    async def test_async_provider(self) -> None:
-        async def token(ctx: RunContext[str | None]) -> str | None:
-            return ctx.deps
-
-        [connection] = await connections_for(AWS[str | None](auth=token), 'alice-token')
-        assert bearer(connection) == 'Bearer alice-token'
-
     async def test_provider_returning_none_does_not_fall_back(self) -> None:
         capability = AWS[str | None](auth=lambda ctx: ctx.deps)
         assert await connections_for(capability, None) == []

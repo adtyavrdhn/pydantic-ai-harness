@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.tools import AgentDepsT
-from pydantic_ai.toolsets import AbstractToolset
+from pydantic_ai.tools import AgentDepsT, RunContext
+from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, credential, is_read_only, per_run
+from pydantic_ai_harness._mcp import credential, is_read_only
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -24,7 +26,7 @@ class AWS(AbstractCapability[AgentDepsT]):
     """Use AWS's managed MCP server with the permissions of the connected identity."""
 
     description: str | None = 'Use AWS knowledge and account tools.'
-    auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
+    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
     """An access token, an `httpx.Auth`, or a function of the run context that returns one.
 
     Unset, pass `client` instead. If the function returns `None`, that run has no AWS tools.
@@ -48,13 +50,20 @@ class AWS(AbstractCapability[AgentDepsT]):
             toolset: AbstractToolset[AgentDepsT] = MCPToolset(
                 self.client, id=id, include_instructions=self.include_instructions
             )
+        elif callable(self.auth):
+            # Registered once under a fixed `id`, as durable execution requires; filled per run.
+            toolset = DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
         else:
-            toolset = per_run(self.auth, self._connect, id=id)
+            toolset = self._connect(self.auth)
         if self.read_only:
             return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
         return toolset
 
-    def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+    def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
+        auth = self.auth(ctx) if callable(self.auth) else self.auth
+        return None if auth is None else self._connect(auth)
+
+    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
         if auth is None:
             raise UserError('Pass `auth` or `client` to connect to AWS.')
         return MCPToolset(

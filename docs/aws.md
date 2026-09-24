@@ -46,9 +46,9 @@ def aws_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[AWS(auth=aws_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return an access token or an `httpx.Auth`, such as one that signs each request with SigV4 using that user's AWS credentials. If it returns `None`, that run has no AWS tools.
+The function is called at the start of each run, so each run connects as its own user. It can return an access token or an `httpx.Auth`, such as one that signs each request with SigV4 using that user's AWS credentials. If it returns `None`, that run has no AWS tools.
 
-Your application is responsible for getting each user's credentials, storing them, and refreshing them, for example with a "Connect AWS" button in your web app. The function only reads the current credential.
+Your application is responsible for getting each user's credentials, storing them, and refreshing them, for example with a "Connect AWS" button in your web app. Look the credential up before the run, for example with `await`, and put it in the deps; the function only reads it.
 
 When users differ in more than their credential, such as a user who should connect through the Frankfurt endpoint, build the whole capability for each run with a [dynamic capability](/ai/capabilities/custom/#dynamically-building-a-capability):
 
