@@ -24,7 +24,7 @@ class Stripe(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Read and change Stripe resources.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
-    """A Stripe restricted API key or a function of the run context that returns one.
+    """A Stripe restricted API key, `'oauth'` to sign in through the browser locally, or a function of the run context that returns a key.
 
     Unset, it uses `STRIPE_API_KEY`. A function never does: if it returns `None` or `''`, that run has no Stripe tools.
     """
@@ -56,6 +56,9 @@ class Stripe(AbstractCapability[AgentDepsT]):
 
     def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
         auth = self.auth(ctx) if callable(self.auth) else self.auth
+        if auth == 'oauth':
+            # FastMCP reads 'oauth' as "log in through a browser", which would hang a server run.
+            raise UserError("The `auth` function must return an API key or token, not 'oauth'.")
         return self._connect(auth) if auth else None
 
     def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:

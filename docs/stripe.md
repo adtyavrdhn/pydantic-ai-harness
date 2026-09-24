@@ -10,7 +10,7 @@ Let an agent read and change your Stripe resources. `Stripe` gives the agent eve
 pip/uv-add "pydantic-ai-harness[stripe]" "pydantic-ai-slim[openai]"
 ```
 
-Set `STRIPE_API_KEY` to a Stripe restricted API key, or pass `auth=` a key. See the [provider setup](https://docs.stripe.com/mcp).
+Set `STRIPE_API_KEY` to a Stripe restricted API key, or pass `auth=` a key. On your own machine, `auth='oauth'` signs you in through the browser instead. See the [provider setup](https://docs.stripe.com/mcp).
 
 ```python
 from pydantic_ai import Agent
@@ -29,7 +29,8 @@ print(result.output)
 | --- | --- |
 | Not set, `None`, or `''` | `STRIPE_API_KEY`. If that is not set either, creating the agent raises an error. |
 | An API key | That key, for every run. |
-| A function | Called at the start of each run. The key it returns is used for that run. If it returns `None` or `''`, that run has no Stripe tools. A function never uses `STRIPE_API_KEY`. |
+| `'oauth'` | The account you sign in to through the browser. This only works on your own machine. |
+| A function | Called at the start of each run. The key it returns is used for that run. If it returns `None` or `''`, that run has no Stripe tools. A function never uses `STRIPE_API_KEY`, and must not return `'oauth'`. |
 
 A fixed key or `STRIPE_API_KEY` suits a script or an agent on your own machine, where every run is the same account.
 
