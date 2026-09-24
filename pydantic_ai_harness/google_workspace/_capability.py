@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import KW_ONLY, dataclass, field
-from os import environ
 from typing import Literal
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -12,7 +11,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, is_read_only, per_run_auth
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, credential, is_read_only, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset
@@ -77,14 +76,11 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the tools for the selected products, with names prefixed by product."""
-        toolset = per_run_auth(self.auth, self._connect, id=self.id or 'google-workspace')
+        toolset = per_run(self.auth, self._connect, id=self.id or 'google-workspace')
         return toolset.filtered(lambda _ctx, tool_def: is_read_only(tool_def)) if self.read_only else toolset
 
     def _connect(self, auth: MCPAuth | None) -> AbstractToolset[AgentDepsT]:
-        if auth is None:
-            auth = environ.get('GOOGLE_ACCESS_TOKEN')
-        if auth is None or auth == '':
-            raise UserError('Set `GOOGLE_ACCESS_TOKEN` or pass `auth` to connect to Google Workspace.')
+        auth = credential(auth, env='GOOGLE_ACCESS_TOKEN', service='Google Workspace')
         prefix = self.id or 'google-workspace'
         return CombinedToolset(
             [
