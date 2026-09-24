@@ -83,7 +83,7 @@ class Deps:
 
 
 def github(ctx: RunContext[Deps]) -> GitHub[Deps] | None:
-    if ctx.deps.github_token is None:
+    if not ctx.deps.github_token:
         return None
     return GitHub(auth=ctx.deps.github_token, url=ctx.deps.github_mcp_url or GITHUB_MCP_URL)
 
