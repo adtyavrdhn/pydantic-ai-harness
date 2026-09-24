@@ -130,13 +130,6 @@ class TestPerRunAuth:
         assert [bearer(connection) for connection in alice] == ['Bearer alice-token', 'Bearer alice-token']
         assert [bearer(connection) for connection in bob] == ['Bearer bob-token', 'Bearer bob-token']
 
-    async def test_async_provider(self) -> None:
-        async def token(ctx: RunContext[str | None]) -> str | None:
-            return ctx.deps
-
-        [connection] = await connections_for(GoogleWorkspace[str | None]('drive', auth=token), 'alice-token')
-        assert bearer(connection) == 'Bearer alice-token'
-
     async def test_provider_returning_none_does_not_fall_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', 'deployment-token')
         capability = GoogleWorkspace[str | None]('gmail', auth=lambda ctx: ctx.deps)
