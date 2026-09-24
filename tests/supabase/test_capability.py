@@ -8,6 +8,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import DynamicCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
@@ -56,9 +57,14 @@ def transport(capability: Supabase[None]) -> StreamableHttpTransport:
     return result
 
 
-async def connections_for(capability: Supabase[str | None], deps: str | None) -> list[MCPToolset[str | None]]:
+async def connections_for(
+    capability: Supabase[str | None] | DynamicCapability[str | None],
+    deps: str | None,
+    *,
+    agent: Agent[str | None, str] | None = None,
+) -> list[MCPToolset[str | None]]:
     """The MCP connections a run with `deps` would open."""
-    ctx = RunContext[str | None](deps=deps, model=TestModel(), usage=RunUsage())
+    ctx = RunContext[str | None](deps=deps, model=TestModel(), usage=RunUsage(), agent=agent)
     toolset = await capability.get_toolset().for_run(ctx)
     connections: list[MCPToolset[str | None]] = []
 
@@ -81,10 +87,10 @@ def bearer(connection: MCPToolset[str | None]) -> str:
     return request.headers['Authorization']
 
 
-def project_client(ctx: RunContext[str | None]) -> StreamableHttpTransport | None:
+def supabase_for_project(ctx: RunContext[str | None]) -> Supabase[str | None] | None:
     if ctx.deps is None:
         return None
-    return StreamableHttpTransport(f'https://mcp.supabase.com/mcp?project_ref={ctx.deps}', auth='token')
+    return Supabase(auth='token', project_ref=ctx.deps)
 
 
 class TestSupabase:
@@ -168,18 +174,11 @@ class TestPerRunAuth:
         assert isinstance(transport, StreamableHttpTransport)
         assert transport.url == 'https://mcp.supabase.com/mcp?project_ref=my-project&read_only=true'
 
-    async def test_client_function_selects_each_users_project(self) -> None:
-        capability = Supabase[str | None](client=project_client)
-        [alice] = await connections_for(capability, 'alice-project')
+    async def test_dynamic_capability_selects_each_users_project(self) -> None:
+        capability = DynamicCapability(supabase_for_project, id='supabase')
+        agent: Agent[str | None, str] = Agent(TestModel(), deps_type=str | None, capabilities=[capability])
+        [alice] = await connections_for(capability, 'alice-project', agent=agent)
         transport = alice.client.transport
         assert isinstance(transport, StreamableHttpTransport)
         assert transport.url == 'https://mcp.supabase.com/mcp?project_ref=alice-project'
-        assert await connections_for(capability, None) == []
-
-    async def test_read_only_filters_client_function_per_run(self, server: FastMCP) -> None:
-        def client(ctx: RunContext[object]) -> FastMCP:
-            return server
-
-        agent = Agent(TestModel(), capabilities=[Supabase[object](client=client, read_only=True)])
-        result = await agent.run('Use the tools')
-        assert result.output == '{"read_resource":"read"}'
+        assert await connections_for(capability, None, agent=agent) == []

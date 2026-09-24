@@ -43,7 +43,6 @@ from pydantic_ai_harness.supabase import Supabase
 @dataclass
 class Deps:
     supabase_token: str | None
-    supabase_project_ref: str | None = None
 
 
 def supabase_token(ctx: RunContext[Deps]) -> str | None:
@@ -57,13 +56,13 @@ The function is called at the start of each run, so each run connects as its own
 
 Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Supabase" button in your web app. The function only reads the current token.
 
-`client` also accepts a function, for when users differ in more than their credential, such as each user working in their own project:
+When users differ in more than their credential, such as each user working in their own project, build the whole capability for each run with a [dynamic capability](https://pydantic.dev/docs/ai/capabilities/custom/#dynamically-building-a-capability):
 
 ```python
 from dataclasses import dataclass
 
-from fastmcp.client.transports import StreamableHttpTransport
-from pydantic_ai import RunContext
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import DynamicCapability
 from pydantic_ai_harness.supabase import Supabase
 
 
@@ -73,14 +72,13 @@ class Deps:
     supabase_project_ref: str | None = None
 
 
-def supabase_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
+def supabase(ctx: RunContext[Deps]) -> Supabase[Deps] | None:
     if ctx.deps.supabase_token is None or ctx.deps.supabase_project_ref is None:
         return None
-    url = f'https://mcp.supabase.com/mcp?project_ref={ctx.deps.supabase_project_ref}'
-    return StreamableHttpTransport(url, auth=ctx.deps.supabase_token)
+    return Supabase(auth=ctx.deps.supabase_token, project_ref=ctx.deps.supabase_project_ref)
 
 
-capability = Supabase(client=supabase_client)
+agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[DynamicCapability(supabase, id='supabase')])
 ```
 
 With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `Supabase` to an agent, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same.
@@ -112,6 +110,6 @@ Handle the approval requests with the [deferred tools workflow](https://pydantic
 
 Pass `client` to use your own FastMCP client or transport, for example one with custom authentication or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. With a custom client, `read_only=True` keeps only the tools the server marks as read-only, instead of turning on Supabase's read-only mode. `include_instructions=False` stops the server's instructions from reaching the model.
 
-A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
+A `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/supabase/)
