@@ -62,6 +62,7 @@ Your application is responsible for getting each user's credentials, storing the
 
 ```python
 from dataclasses import dataclass
+from typing import Literal
 
 from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai import RunContext
