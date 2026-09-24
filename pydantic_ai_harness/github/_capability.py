@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
@@ -26,7 +27,7 @@ class GitHub(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Read and change GitHub resources.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """A GitHub token, an `httpx.Auth`, or a function that returns one for each run's user.
+    """A GitHub token, an `httpx.Auth`, or a function of the run context that returns one.
 
     Unset, `GITHUB_TOKEN` is used. If the function returns `None`, that run has no GitHub tools.
     """
@@ -58,13 +59,17 @@ class GitHub(AbstractCapability[AgentDepsT]):
         return MCPToolset(client, id=self.id or 'github', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+        if auth is None:
+            auth = environ.get('GITHUB_TOKEN')
+        if auth is None:
+            raise UserError('Set `GITHUB_TOKEN` or pass `auth` to connect to GitHub.')
         headers = {'X-MCP-Readonly': 'true'} if self.read_only else {}
         if self.toolsets is not None:
             headers['X-MCP-Toolsets'] = ','.join(self.toolsets)
         return MCPToolset(
             self.url,
             id=self.id or 'github',
-            auth=auth if auth is not None else environ.get('GITHUB_TOKEN'),
+            auth=auth,
             headers=headers,
             include_instructions=self.include_instructions,
         )

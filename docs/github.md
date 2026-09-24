@@ -23,7 +23,7 @@ print(result.output)
 
 ## Per-user credentials
 
-A token and `GITHUB_TOKEN` both connect every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
+A token or `GITHUB_TOKEN` connects every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -47,7 +47,7 @@ agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[GitHub(auth=gi
 
 The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no GitHub tools; it never falls back to `GITHUB_TOKEN`. `read_only`, `toolsets`, and `url` still apply to every run.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect GitHub" flow in your web app that uses a GitHub App's user authorization. The function only reads the current token. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect GitHub" button in your web app. The function only reads the current token.
 
 `client` also accepts a function, for when users differ in more than their credential, such as a user whose organization is on a GitHub Enterprise Cloud data-residency endpoint:
 
@@ -80,7 +80,7 @@ With durable execution such as Temporal, read the credential from the run's deps
 
 `toolsets=['repos', 'issues', 'actions']` picks which of GitHub's tool groups the server offers. Leave it unset to get the server's default groups. `read_only=True` asks the server for its read-only mode. Set `url` to use a GitHub Enterprise Cloud endpoint.
 
-The capability does not limit which repositories the agent can reach. Set that with the token's or GitHub App's permissions. To send other headers, or to use OAuth set up in your own app, pass a configured `client`.
+The capability does not limit which repositories the agent can reach. Set that with the token's or GitHub App's permissions. To send other headers, or to use custom authentication, pass a configured `client`.
 
 ## Tool selection and approval
 
@@ -103,7 +103,7 @@ Handle the approval requests with the [deferred tools workflow](/ai/tools-toolse
 
 ## Connection customization
 
-Pass `client` to use your own FastMCP client or transport, for example one with custom OAuth token storage or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `toolsets` does not apply. `read_only=True` keeps only the tools the server marks as read-only, instead of asking the server for read-only mode. `include_instructions=False` stops the server's instructions from reaching the model.
+Pass `client` to use your own FastMCP client or transport, for example one with custom authentication or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `toolsets` does not apply. `read_only=True` keeps only the tools the server marks as read-only, instead of asking the server for read-only mode. `include_instructions=False` stops the server's instructions from reaching the model.
 
 A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](/ai/capabilities/prefix-tools/).
 
