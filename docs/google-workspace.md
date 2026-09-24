@@ -29,7 +29,7 @@ print(result.output)
 | --- | --- |
 | Not set, `None`, or `''` | `GOOGLE_ACCESS_TOKEN`. If that is not set either, creating the agent raises an error. |
 | An access token | That token, for every run. |
-| A function | Called at the start of each run. The token it returns is used for that run. If it returns `None` or `''`, that run has no Google Workspace tools. A function never uses `GOOGLE_ACCESS_TOKEN`. |
+| A function | Called at the start of each run. The token it returns is used for that run. If it returns `None` or `''`, that run has no Google Workspace tools. A function never uses `GOOGLE_ACCESS_TOKEN`, and must not return `'oauth'`. |
 
 A fixed token or `GOOGLE_ACCESS_TOKEN` suits a script or an agent on your own machine, where every run is the same account.
 

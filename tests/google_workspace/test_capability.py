@@ -123,6 +123,11 @@ class TestPerRunAuth:
         result = await agent.run('Use the tools')
         assert result.output == 'success (no tool calls)'
 
+    async def test_provider_returning_oauth_raises(self) -> None:
+        capability = GoogleWorkspace[str | None]('gmail', auth=lambda ctx: ctx.deps)
+        with pytest.raises(UserError, match="must return an API key or token, not 'oauth'"):
+            await connections_for(capability, 'oauth')
+
     def test_provider_does_not_need_environment_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('GOOGLE_ACCESS_TOKEN', raising=False)
         GoogleWorkspace[object]('gmail', auth=no_credential).get_toolset()

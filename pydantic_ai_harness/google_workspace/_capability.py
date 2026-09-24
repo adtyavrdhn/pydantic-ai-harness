@@ -87,6 +87,9 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
 
     def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
         auth = self.auth(ctx) if callable(self.auth) else self.auth
+        if auth == 'oauth':
+            # FastMCP reads 'oauth' as "log in through a browser", which would hang a server run.
+            raise UserError("The `auth` function must return an API key or token, not 'oauth'.")
         return self._connect(auth) if auth else None
 
     def _connect(self, auth: str | None) -> AbstractToolset[AgentDepsT]:
