@@ -1,6 +1,6 @@
 # Google Workspace
 
-Use Gmail, Calendar, Drive, and other Google Workspace tools. `GoogleWorkspace` connects an agent to the provider's hosted MCP server. By default it exposes the tools the server offers, including write tools. Provider credentials and server settings determine what those tools may access.
+Let an agent use Gmail, Calendar, Drive, and other Google Workspace products. `GoogleWorkspace` gives the agent every tool Google's hosted MCP servers offer for the products you select, including tools that send, change, and delete. The token you connect with decides what those tools can reach.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
@@ -18,7 +18,7 @@ pip:
 pip install "pydantic-ai-harness[google-workspace]" "pydantic-ai-slim[openai]"
 ```
 
-Set `GOOGLE_ACCESS_TOKEN` to a Google OAuth access token, or pass `auth=...`. `auth` accepts an `httpx.Auth` for caller-managed authentication, or a callable that returns a token for each run (see [Per-user credentials](#per-user-credentials)). See the [provider setup](https://developers.google.com/workspace/guides/configure-mcp-servers).
+Set `GOOGLE_ACCESS_TOKEN` to a Google OAuth access token, or pass `auth=` a token or an `httpx.Auth`. With neither, you get an error; there is no browser login. See the [provider setup](https://developers.google.com/workspace/guides/configure-mcp-servers).
 
 ```python
 from pydantic_ai import Agent
@@ -31,9 +31,7 @@ print(result.output)
 
 ## Per-user credentials
 
-A fixed `auth` and `GOOGLE_ACCESS_TOKEN` give every run the same connections and the same Google identity. Use them for scripts, local tools, and single-user agents.
-
-When one agent serves several users, pass a callable instead. It receives the run context at the start of each run and returns that user's access token, so each run opens its own connections:
+A fixed token, a fixed `httpx.Auth`, and `GOOGLE_ACCESS_TOKEN` all connect every run as the same Google account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -58,19 +56,23 @@ agent = Agent(
 )
 ```
 
-The callable can be async and can return a token or an `httpx.Auth`. When it returns `None`, the run has no Google Workspace tools; it does not fall back to `GOOGLE_ACCESS_TOKEN`. Returning `'oauth'` raises an error, because it would open a browser on the server. Your application owns obtaining, storing, and refreshing each user's token, for example through a Google OAuth flow in your web app, and the callable reads the current token from that store.
+The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no Google Workspace tools; it never falls back to `GOOGLE_ACCESS_TOKEN`.
 
-Each run connects to every selected product and lists its tools when it starts, and disconnects when it ends. Under durable execution such as Temporal, the callable runs in the worker, so it should derive the credential from serializable deps. Give each `GoogleWorkspace` on one agent a distinct `id`.
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Google" OAuth flow in your web app. The function only reads the current token. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
+
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `GoogleWorkspace` to an agent, give each a distinct `id`.
 
 ## Provider settings
 
-`services` selects one product or a list: `gmail`, `drive`, `docs`, `sheets`, `slides`, `calendar`, `chat`, or `people`. Each product gets its own MCP connection and tool prefix, such as `gmail_search_threads`. Register a Google OAuth client and request the scopes needed for the selected products; Google does not support automatic client registration. `auth` can supply a refresh-capable `httpx.Auth`.
+`services` selects one product or a list: `gmail`, `drive`, `docs`, `sheets`, `slides`, `calendar`, `chat`, or `people`. Tool names start with the product, such as `gmail_search_threads`.
+
+Register a Google OAuth client yourself and request the scopes the selected products need; Google does not support automatic client registration. To have tokens refreshed for you, pass an `httpx.Auth` that refreshes them.
 
 ## Tool selection and approval
 
-`read_only=True` keeps only tools explicitly marked `readOnlyHint: true`; unmarked tools are omitted. This can leave no tools when a server does not annotate its read operations. Credentials remain the access-control boundary.
+`read_only=True` keeps only the tools the server marks as read-only. If the server does not mark its read tools, this can leave none. The token is still what controls access.
 
-For application-level filtering or approval, compose the existing [toolset wrappers](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/). For example, this requires approval before every tool call:
+To filter tools or require approval in your application, wrap the toolset with the existing [toolset wrappers](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/). For example, this asks for approval before every tool call:
 
 ```python
 from pydantic_ai import Agent
@@ -85,10 +87,12 @@ agent = Agent(
 )
 ```
 
-Handle the resulting requests using the [deferred tools workflow](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/). Output limits can be composed with [Tool Output Limits](https://pydantic.dev/docs/ai/harness/tool-output-limits/).
+Handle the approval requests with the [deferred tools workflow](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/). To cap the size of tool output, add [Tool Output Limits](https://pydantic.dev/docs/ai/harness/tool-output-limits/).
 
 ## Connection customization
 
-`include_instructions` controls whether server instructions reach the model. A fixed `auth` is one set of connections shared by every run; see [Per-user credentials](#per-user-credentials) for per-run connections. To combine connections with overlapping tool names, give them distinct IDs and compose [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
+`include_instructions=False` stops the servers' own instructions from reaching the agent.
+
+A fixed `auth` is one set of connections shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/google_workspace/)

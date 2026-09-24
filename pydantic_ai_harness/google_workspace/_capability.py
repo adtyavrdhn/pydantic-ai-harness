@@ -41,10 +41,9 @@ _DEFAULT_DESCRIPTION = 'Use Gmail, Calendar, Drive, and the other Google Workspa
 
 @dataclass
 class GoogleWorkspace(AbstractCapability[AgentDepsT]):
-    """Connect an agent to Google's hosted Workspace MCP servers.
+    """Give an agent the tools of Google's hosted Workspace MCP servers for the selected products.
 
-    The default serves every tool Google publishes for the selected products, including the ones that
-    send, change, and delete; the token's scopes decide what the agent can read or change.
+    This includes tools that send, change, and delete; the token's scopes decide what they can reach.
     """
 
     services: GoogleWorkspaceService | Sequence[GoogleWorkspaceService]
@@ -53,20 +52,19 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
     _: KW_ONLY
 
     description: str | None = _DEFAULT_DESCRIPTION
-    """Routing description used when the capability is loaded on demand."""
+    """Describes the capability when the agent loads it on demand."""
 
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """A Google OAuth bearer token, a custom `httpx.Auth`, or a callable that returns one for each run.
+    """A Google OAuth access token, an `httpx.Auth`, or a function of the run context that returns the current user's.
 
-    Unset, it defaults to `$GOOGLE_ACCESS_TOKEN`. A callable receives the run context, so each run can
-    connect with its own user's token from `ctx.deps`; returning `None` omits the tools.
+    Unset, it uses `GOOGLE_ACCESS_TOKEN`. If the function returns `None`, that run has no Google Workspace tools.
     """
 
     read_only: bool = False
-    """Expose only the tools Google marks read-only."""
+    """Keep only the tools Google marks as read-only."""
 
     include_instructions: bool = True
-    """Forward the server instructions to the agent."""
+    """Pass the servers' own instructions to the agent."""
 
     def __post_init__(self) -> None:
         """Normalize `services` to a tuple of products that have an endpoint."""
@@ -78,7 +76,7 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
                 raise UserError(f'Unknown Google Workspace service {service!r}; expected one of {sorted(_MCP_URLS)}.')
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
-        """Build one product-prefixed MCP connection per selected service."""
+        """Return the tools for the selected products, with names prefixed by product."""
         toolset = per_run_auth(self.auth, self._connect, id=self.id or 'google-workspace')
         return toolset.filtered(lambda _ctx, tool_def: is_read_only(tool_def)) if self.read_only else toolset
 
