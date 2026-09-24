@@ -84,7 +84,7 @@ class Deps:
 
 
 def stripe(ctx: RunContext[Deps]) -> Stripe[Deps] | None:
-    if ctx.deps.stripe_key is None or ctx.deps.stripe_account is None:
+    if not ctx.deps.stripe_key or not ctx.deps.stripe_account:
         return None
     return Stripe(auth=ctx.deps.stripe_key, connected_account=ctx.deps.stripe_account)
 
