@@ -1,6 +1,6 @@
 # Supabase
 
-Let an agent work with your Supabase projects and account. `Supabase` gives the agent every tool Supabase's hosted MCP server offers, including tools that make changes. The credential you connect with and the settings below decide what those tools can reach.
+Let an agent work with your Supabase projects and account. `Supabase` gives the agent the tools in Supabase's default feature groups, including tools that make changes; `features` picks other groups. The credential you connect with and the settings below decide what those tools can reach.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
@@ -60,9 +60,17 @@ Your application is responsible for getting each user's token, storing it, and r
 `client` also accepts a function, for when users differ in more than their credential, such as each user working in their own project:
 
 ```python
+from dataclasses import dataclass
+
 from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai import RunContext
 from pydantic_ai_harness.supabase import Supabase
+
+
+@dataclass
+class Deps:
+    supabase_token: str | None
+    supabase_project_ref: str | None = None
 
 
 def supabase_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
@@ -75,7 +83,7 @@ def supabase_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
 capability = Supabase(client=supabase_client)
 ```
 
-With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `Supabase` to an agent, give each a distinct `id`.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `Supabase` to an agent, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same.
 
 ## Provider settings
 
