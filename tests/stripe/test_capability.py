@@ -100,6 +100,13 @@ class TestStripe:
         with pytest.raises(UserError, match='`client` owns the connection'):
             Stripe(client='https://example.com/mcp', **settings)
 
+    def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
+        Agent(TestModel(), capabilities=[Stripe(client=server, defer_loading=True)])
+
+    def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
+        with pytest.raises(UserError, match="Two `Stripe` capabilities share the id 'stripe'"):
+            Agent(TestModel(), capabilities=[Stripe(auth='a'), Stripe(auth='b', connected_account='acct_other')])
+
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(Stripe(auth='secret-token'))
 
