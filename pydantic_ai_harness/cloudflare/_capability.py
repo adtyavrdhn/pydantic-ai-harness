@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from os import environ
 
@@ -11,7 +11,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import credential, is_read_only
+from pydantic_ai_harness._mcp import credential, is_read_only, one_connection
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -71,12 +71,15 @@ _PUBLIC_SERVERS = frozenset(
         CloudflareServer.DEMO_DAY,
     }
 )
+_ID = 'cloudflare'
 
 
 @dataclass(kw_only=True)
 class Cloudflare(AbstractCapability[AgentDepsT]):
     """Use a Cloudflare hosted MCP server with the permissions of the connected credential."""
 
+    id: str | None = _ID
+    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `Cloudflare` on one agent its own."""
     description: str | None = 'Use Cloudflare API, product, and documentation tools.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
     """A Cloudflare API token, `'oauth'` to sign in through the browser locally, or a function of the run context that returns a token.
@@ -97,9 +100,14 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
         if self.client is not None and (self.auth is not None or self.server != CloudflareServer.DOCS):
             raise UserError('`client` owns the connection, so it cannot be combined with `auth` or `server`.')
 
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """Two `Cloudflare`s under one `id` are the same connection stated twice, or an error if they differ."""
+        return one_connection(capabilities)
+
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the Cloudflare tools."""
-        id = self.id or 'cloudflare'
+        id = self.id or _ID
         if self.client is not None:
             toolset: AbstractToolset[AgentDepsT] = MCPToolset(
                 self.client, id=id, include_instructions=self.include_instructions
@@ -128,7 +136,7 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
             connect_auth = credential(auth, env='CLOUDFLARE_API_TOKEN', service='Cloudflare')
         return MCPToolset(
             _URLS[self.server],
-            id=self.id or 'cloudflare',
+            id=self.id or _ID,
             auth=connect_auth,
             headers=None,
             include_instructions=self.include_instructions,

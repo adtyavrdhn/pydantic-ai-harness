@@ -114,6 +114,13 @@ class TestCloudflare:
         with pytest.raises(UserError, match='`client` owns the connection'):
             Cloudflare(client='https://example.com/mcp', **settings)
 
+    def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
+        Agent(TestModel(), capabilities=[Cloudflare(client=server, defer_loading=True)])
+
+    def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
+        with pytest.raises(UserError, match="Two `Cloudflare` capabilities share the id 'cloudflare'"):
+            Agent(TestModel(), capabilities=[Cloudflare(), Cloudflare(server=CloudflareServer.BLOG)])
+
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(Cloudflare(auth='secret-token'))
 
