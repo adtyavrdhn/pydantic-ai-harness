@@ -83,6 +83,22 @@ class TestGoogleWorkspace:
         agent = Agent(TestModel(), capabilities=[GoogleWorkspace('gmail', auth='token', read_only=read_only)])
         assert (await agent.run('Use the tools')).output == expected
 
+    async def test_product_connections_preserve_falsey_auth(
+        self, connections: list[tuple[str, httpx.Auth | str | None]]
+    ) -> None:
+        class FalseyAuth(httpx.BasicAuth):
+            def __bool__(self) -> bool:
+                return False
+
+        auth = FalseyAuth('user', 'secret')
+        assert not auth
+        agent = Agent(TestModel(call_tools=[]), capabilities=[GoogleWorkspace(['gmail', 'calendar'], auth=auth)])
+        await agent.run('Hello')
+        assert connections == [
+            ('https://gmailmcp.googleapis.com/mcp/v1', auth),
+            ('https://calendarmcp.googleapis.com/mcp/v1', auth),
+        ]
+
     def test_environment_token(
         self, connections: list[tuple[str, httpx.Auth | str | None]], monkeypatch: pytest.MonkeyPatch
     ) -> None:
