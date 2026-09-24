@@ -18,7 +18,7 @@ pip:
 pip install "pydantic-ai-harness[notion]" "pydantic-ai-slim[openai]"
 ```
 
-Set `NOTION_ACCESS_TOKEN` to a Notion OAuth access token, or pass `auth=` a token or an `httpx.Auth`. See the [provider setup](https://developers.notion.com/guides/mcp/build-mcp-client).
+Set `NOTION_ACCESS_TOKEN` to a Notion OAuth access token, or pass `auth=` a token. See the [provider setup](https://developers.notion.com/guides/mcp/build-mcp-client).
 
 ```python
 from pydantic_ai import Agent
@@ -31,7 +31,9 @@ print(result.output)
 
 ## Per-user credentials
 
-A token or `NOTION_ACCESS_TOKEN` connects every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
+A fixed token or `NOTION_ACCESS_TOKEN` connects every run as the same account. That suits a script or an agent on your own machine.
+
+In an app where each user connects their own Notion account, one agent serves all of them, so the token cannot be fixed when the agent is created. Pass a function that reads the current user's token from the run's deps:
 
 ```python
 from dataclasses import dataclass
@@ -52,9 +54,9 @@ def notion_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Notion(auth=notion_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can return a Notion OAuth access token or an `httpx.Auth`. If it returns `None`, that run has no Notion tools; it never falls back to `NOTION_ACCESS_TOKEN`. `read_only` applies to every user.
+The function is called at the start of each run, so each run connects as its own user. If it returns `None`, that run has no Notion tools; it never falls back to `NOTION_ACCESS_TOKEN`. `read_only` applies to every user.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Notion" button in your web app. Look the token up before the run, for example with `await`, and put it in the deps; the function only reads it.
+Your app gets each user's token, stores it, and refreshes it. For example, a "Connect Notion" button that signs them in with Notion OAuth and saves the access token to their account. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
 With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `Notion` to an agent, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same.
 
