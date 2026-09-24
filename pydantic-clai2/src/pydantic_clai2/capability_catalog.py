@@ -5,6 +5,7 @@ from .config import PluginSettings
 # Coder, AskUser and RepoContext already have shell-integrated built-in entries.
 _FACTORIES = (
     ('advisor', 'advisor:Advisor'),
+    ('aws', 'aws:AWS'),
     ('aws_lambda', 'aws_lambda:AWSLambdaDurability'),
     ('background_tools', 'background_tools:BackgroundTools'),
     ('browser_use', 'browser_use:BrowserUse'),
