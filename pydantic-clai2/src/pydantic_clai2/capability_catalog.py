@@ -9,6 +9,7 @@ _FACTORIES = (
     ('background_tools', 'background_tools:BackgroundTools'),
     ('browser_use', 'browser_use:BrowserUse'),
     ('capability_creation', 'capability_creation:CapabilityCreation'),
+    ('cloudflare', 'cloudflare:Cloudflare'),
     ('code_mode', 'code_mode:CodeMode'),
     ('clamp_oversized_messages', 'compaction:ClampOversizedMessages'),
     ('clear_tool_results', 'compaction:ClearToolResults'),
