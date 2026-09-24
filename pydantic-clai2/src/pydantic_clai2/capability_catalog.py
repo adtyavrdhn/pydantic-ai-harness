@@ -44,6 +44,7 @@ _FACTORIES = (
     ('stackone', 'stackone:StackOne'),
     ('step_persistence', 'step_persistence:StepPersistence'),
     ('subagents', 'subagents:SubAgents'),
+    ('supabase', 'supabase:Supabase'),
     ('system_reminders', 'system_reminders:SystemReminders'),
     ('tool_output_limits', 'tool_output_limits:ToolOutputLimits'),
     ('trajectory_judge', 'trajectory_judge:TrajectoryJudge'),
