@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, per_run_auth, per_run_client
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, credential, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -42,21 +40,17 @@ class Stripe(AbstractCapability[AgentDepsT]):
         """Return the Stripe MCP toolset."""
         id = self.id or 'stripe'
         if self.client is not None:
-            return per_run_client(self.client, self._from_client, id=id)
-        return per_run_auth(self.auth, self._connect, id=id)
+            return per_run(self.client, self._from_client, id=id)
+        return per_run(self.auth, self._connect, id=id)
 
     def _from_client(self, client: MCPToolsetClient) -> MCPToolset[AgentDepsT]:
         return MCPToolset(client, id=self.id or 'stripe', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
-        if auth is None:
-            auth = environ.get('STRIPE_API_KEY')
-        if auth is None:
-            raise UserError('Set `STRIPE_API_KEY` or pass `auth` to connect to Stripe.')
         return MCPToolset(
             'https://mcp.stripe.com',
             id=self.id or 'stripe',
-            auth=auth,
+            auth=credential(auth, env='STRIPE_API_KEY', service='Stripe'),
             headers={'Stripe-Account': self.connected_account} if self.connected_account is not None else None,
             include_instructions=self.include_instructions,
         )
