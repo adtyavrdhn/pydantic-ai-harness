@@ -67,6 +67,13 @@ class TestGoogleWorkspace:
         with pytest.raises(UserError, match='Set `GOOGLE_ACCESS_TOKEN`'):
             GoogleWorkspace('gmail').get_toolset()
 
+    def test_defer_loading_needs_no_id(self, connections: list[tuple[str, str | None]]) -> None:
+        Agent(TestModel(), capabilities=[GoogleWorkspace('gmail', auth='token', defer_loading=True)])
+
+    def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
+        with pytest.raises(UserError, match="Two `GoogleWorkspace` capabilities share the id 'google-workspace'"):
+            Agent(TestModel(), capabilities=[GoogleWorkspace('gmail', auth='a'), GoogleWorkspace('drive', auth='b')])
+
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(GoogleWorkspace('gmail', auth='secret-token'))
 

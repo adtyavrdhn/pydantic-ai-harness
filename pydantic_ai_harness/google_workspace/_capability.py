@@ -11,7 +11,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import credential, is_read_only
+from pydantic_ai_harness._mcp import credential, is_read_only, one_connection
 
 try:
     from pydantic_ai.mcp import MCPToolset
@@ -35,6 +35,8 @@ _MCP_URLS: dict[str, str] = {
     'people': 'https://people.googleapis.com/mcp/v1',
 }
 
+_ID = 'google-workspace'
+
 _DEFAULT_DESCRIPTION = 'Use Gmail, Calendar, Drive, and the other Google Workspace products.'
 
 
@@ -49,6 +51,9 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
     """Workspace products to expose, such as `'gmail'` or `['gmail', 'calendar']`."""
 
     _: KW_ONLY
+
+    id: str | None = _ID
+    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `GoogleWorkspace` on one agent its own."""
 
     description: str | None = _DEFAULT_DESCRIPTION
     """Describes the capability when the agent loads it on demand."""
@@ -75,9 +80,14 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
             if service not in _MCP_URLS:
                 raise UserError(f'Unknown Google Workspace service {service!r}; expected one of {sorted(_MCP_URLS)}.')
 
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """Two `GoogleWorkspace`s under one `id` are the same connection stated twice, or an error if they differ."""
+        return one_connection(capabilities)
+
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the tools for the selected products, with names prefixed by product."""
-        id = self.id or 'google-workspace'
+        id = self.id or _ID
         toolset = (
             DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
             if callable(self.auth)
@@ -94,7 +104,7 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
 
     def _connect(self, auth: str | None) -> AbstractToolset[AgentDepsT]:
         auth = credential(auth, env='GOOGLE_ACCESS_TOKEN', service='Google Workspace')
-        prefix = self.id or 'google-workspace'
+        prefix = self.id or _ID
         return CombinedToolset(
             [
                 MCPToolset[AgentDepsT](
