@@ -141,22 +141,7 @@ class Combines:
     check: Callable[[Any], None]
 
 
-@dataclass
-class Narrows:
-    """A default `id` and a `combine` that narrows rather than unions: two that disagree raise.
-
-    The access-boundary case in "Deciding What Two Of It Mean" (`agent_docs/capability-authoring.md`),
-    for connections to a provider: merging two field by field could send one account's credential to
-    another's server or drop `read_only`. `make` takes the class, like `Collides`, because these live in
-    optional groups that a module-level import would break.
-    """
-
-    reason: str
-    make: Callable[[type[Any]], tuple[AbstractCapability[Any], AbstractCapability[Any]]]
-    """Builds two that differ, from the discovered class, without credentials or a network."""
-
-
-Policy = Anonymous | Collides | Combines | Narrows | Rejected
+Policy = Anonymous | Collides | Combines | Rejected
 
 
 def _check_memory(merged: Any) -> None:
@@ -284,8 +269,8 @@ COMBINE_POLICY: dict[str, Policy] = {
     'ReportContextUsage': Anonymous('a passive observer; several callbacks compose'),
     'Skills': Anonymous('a factory: one deferred capability per skill, each named after the skill'),
     'SlidingWindowCompaction': Anonymous('composes as a tier under `TieredCompaction`'),
-    'StackOne': Anonymous('one per linked account, and `account_id` is what names it'),
     'Cloudflare': Anonymous('one per server, and `server` is what names it'),
+    'StackOne': Anonymous('one per linked account, and `account_id` is what names it'),
     'TieredCompaction': Anonymous('drives other strategies; one per tier list'),
     'WarnNearLimits': Anonymous('a passive observer; several thresholds compose'),
     'WarnOnCacheBusts': Anonymous('a passive observer; several thresholds compose'),
@@ -495,15 +480,8 @@ def test_capability_combine_policy_holds(name: str) -> None:
         return
 
     assert declares_default_id(capability_type), (
-        f'{name} is declared `{type(policy).__name__}` but its class declares no default id, so two never meet'
+        f'{name} is declared `Combines` but its class declares no default id, so two never meet'
     )
-    if isinstance(policy, Narrows):
-        first, second = policy.make(capability_type)
-        assert first.id is not None and first.id == second.id
-        assert capability_type.combine([first, first]) is first
-        with pytest.raises(UserError, match='disagree on'):
-            capability_type.combine([first, second])
-        return
     first, second = policy.make()
     assert first.id is not None and first.id == second.id, (
         f'{name} is declared `Combines` but two instances do not share an id'
