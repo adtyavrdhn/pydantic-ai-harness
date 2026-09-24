@@ -50,7 +50,7 @@ Your application is responsible for getting each user's token, storing it, and r
 
 `client` also accepts a function. It returns the FastMCP client or transport for the current run, or `None` for no Notion tools.
 
-With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `Notion` to an agent, give each a distinct `id`.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `Notion` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same.
 
 ## Provider settings
 
