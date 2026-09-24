@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.tools import AgentDepsT
-from pydantic_ai.toolsets import AbstractToolset
+from pydantic_ai.tools import AgentDepsT, RunContext
+from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, credential, is_read_only, per_run
+from pydantic_ai_harness._mcp import credential, is_read_only
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -21,7 +23,7 @@ class Linear(AbstractCapability[AgentDepsT]):
     """Give an agent the tools of Linear's hosted MCP server, with the permissions of the connected user."""
 
     description: str | None = 'Use Linear issues, projects, and teams.'
-    auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
+    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
     """A Linear API key or token, an `httpx.Auth`, or a function of the run context that returns one.
 
     Unset, it uses `LINEAR_ACCESS_TOKEN`. If the function returns `None`, that run has no Linear tools.
@@ -43,9 +45,15 @@ class Linear(AbstractCapability[AgentDepsT]):
             if self.read_only:
                 return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
             return toolset
-        return per_run(self.auth, self._connect, id=id)
+        if callable(self.auth):
+            return DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
+        return self._connect(self.auth)
 
-    def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+    def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
+        auth = self.auth(ctx) if callable(self.auth) else self.auth
+        return None if auth is None else self._connect(auth)
+
+    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             'https://mcp.linear.app/mcp/readonly' if self.read_only else 'https://mcp.linear.app/mcp',
             id=self.id or 'linear',
