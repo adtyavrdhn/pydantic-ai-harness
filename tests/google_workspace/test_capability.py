@@ -78,45 +78,27 @@ class TestGoogleWorkspace:
         ],
     )
     async def test_agent_executes_selected_tools(
-        self, connections: list[tuple[str, httpx.Auth | str | None]], read_only: bool, expected: str
+        self, connections: list[tuple[str, str | None]], read_only: bool, expected: str
     ) -> None:
         agent = Agent(TestModel(), capabilities=[GoogleWorkspace('gmail', auth='token', read_only=read_only)])
         assert (await agent.run('Use the tools')).output == expected
 
-    async def test_product_connections_preserve_falsey_auth(
-        self, connections: list[tuple[str, httpx.Auth | str | None]]
-    ) -> None:
-        class FalseyAuth(httpx.BasicAuth):
-            def __bool__(self) -> bool:
-                return False
-
-        auth = FalseyAuth('user', 'secret')
-        assert not auth
-        agent = Agent(TestModel(call_tools=[]), capabilities=[GoogleWorkspace(['gmail', 'calendar'], auth=auth)])
-        await agent.run('Hello')
-        assert connections == [
-            ('https://gmailmcp.googleapis.com/mcp/v1', auth),
-            ('https://calendarmcp.googleapis.com/mcp/v1', auth),
-        ]
-
     def test_environment_token(
-        self, connections: list[tuple[str, httpx.Auth | str | None]], monkeypatch: pytest.MonkeyPatch
+        self, connections: list[tuple[str, str | None]], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', 'environment-token')
         GoogleWorkspace('people').get_toolset()
         assert connections == [('https://people.googleapis.com/mcp/v1', 'environment-token')]
 
     @pytest.mark.parametrize('include', [True, False])
-    async def test_server_instructions(
-        self, connections: list[tuple[str, httpx.Auth | str | None]], include: bool
-    ) -> None:
+    async def test_server_instructions(self, connections: list[tuple[str, str | None]], include: bool) -> None:
         capability = GoogleWorkspace('gmail', auth='token', include_instructions=include)
         result = await Agent(TestModel(call_tools=[]), capabilities=[capability]).run('Hello')
         request = result.all_messages()[0]
         assert isinstance(request, ModelRequest)
         assert ('Google instructions.' in (request.instructions or '')) is include
 
-    async def test_duplicate_services(self, connections: list[tuple[str, httpx.Auth | str | None]]) -> None:
+    async def test_duplicate_services(self, connections: list[tuple[str, str | None]]) -> None:
         capability = GoogleWorkspace(['gmail', 'gmail'], auth='token', read_only=True)
         result = await Agent(TestModel(), capabilities=[capability]).run('Read')
         assert result.output == '{"gmail_read_item":"read"}'
@@ -142,7 +124,7 @@ class TestPerRunAuth:
         monkeypatch.delenv('GOOGLE_ACCESS_TOKEN', raising=False)
         GoogleWorkspace[object]('gmail', auth=no_credential).get_toolset()
 
-    async def test_read_only_applies_per_run(self, connections: list[tuple[str, httpx.Auth | str | None]]) -> None:
+    async def test_read_only_applies_per_run(self, connections: list[tuple[str, str | None]]) -> None:
         capability = GoogleWorkspace[str]('gmail', auth=user_token, read_only=True)
         result = await Agent(TestModel(), deps_type=str, capabilities=[capability]).run('Read', deps='alice-token')
         assert result.output == '{"gmail_read_item":"read"}'

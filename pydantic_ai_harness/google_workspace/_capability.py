@@ -6,7 +6,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import KW_ONLY, dataclass, field
 from typing import Literal
 
-from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -54,8 +53,8 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
     description: str | None = _DEFAULT_DESCRIPTION
     """Describes the capability when the agent loads it on demand."""
 
-    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
-    """A Google access token, an `httpx.Auth`, or a function of the run context that returns one.
+    auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
+    """A Google access token or a function of the run context that returns one.
 
     Unset, it uses `GOOGLE_ACCESS_TOKEN`. If the function returns `None`, that run has no Google Workspace tools.
     """
@@ -89,7 +88,7 @@ class GoogleWorkspace(AbstractCapability[AgentDepsT]):
         auth = self.auth(ctx) if callable(self.auth) else self.auth
         return None if auth is None else self._connect(auth)
 
-    def _connect(self, auth: str | Auth | None) -> AbstractToolset[AgentDepsT]:
+    def _connect(self, auth: str | None) -> AbstractToolset[AgentDepsT]:
         auth = credential(auth, env='GOOGLE_ACCESS_TOKEN', service='Google Workspace')
         prefix = self.id or 'google-workspace'
         return CombinedToolset(

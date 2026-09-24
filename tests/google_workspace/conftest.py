@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from httpx import Auth
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic_ai.mcp import MCPToolset
@@ -11,7 +10,7 @@ from pydantic_ai.tools import AgentDepsT
 
 
 @pytest.fixture
-def connections(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Auth | str | None]]:
+def connections(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str | None]]:
     server = FastMCP('google', instructions='Google instructions.')
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -26,10 +25,10 @@ def connections(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Auth | str |
     def unmarked_item() -> str:
         return 'unmarked'
 
-    connections: list[tuple[str, Auth | str | None]] = []
+    connections: list[tuple[str, str | None]] = []
 
     class TestConnection(MCPToolset[AgentDepsT]):
-        def __init__(self, url: str, *, id: str, auth: Auth | str, include_instructions: bool) -> None:
+        def __init__(self, url: str, *, id: str, auth: str, include_instructions: bool) -> None:
             connections.append((url, auth))
             super().__init__(server, id=id, include_instructions=include_instructions)
 

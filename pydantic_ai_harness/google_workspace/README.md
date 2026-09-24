@@ -18,7 +18,7 @@ pip:
 pip install "pydantic-ai-harness[google-workspace]" "pydantic-ai-slim[openai]"
 ```
 
-Set `GOOGLE_ACCESS_TOKEN` to a Google OAuth access token, or pass `auth=` a token or an `httpx.Auth`. See the [provider setup](https://developers.google.com/workspace/guides/configure-mcp-servers).
+Set `GOOGLE_ACCESS_TOKEN` to a Google OAuth access token, or pass `auth=` a token. See the [provider setup](https://developers.google.com/workspace/guides/configure-mcp-servers).
 
 ```python
 from pydantic_ai import Agent
@@ -31,7 +31,9 @@ print(result.output)
 
 ## Per-user credentials
 
-A token or `GOOGLE_ACCESS_TOKEN` connects every run as the same Google account. When one agent serves several users, pass a function that returns the current user's credential instead:
+A fixed token or `GOOGLE_ACCESS_TOKEN` connects every run as the same Google account. That suits a script or an agent on your own machine.
+
+In an app where each user connects their own Google account, one agent serves all of them, so the token cannot be fixed when the agent is created. Pass a function that reads the current user's token from the run's deps:
 
 ```python
 from dataclasses import dataclass
@@ -56,9 +58,9 @@ agent = Agent(
 )
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can return a token or an `httpx.Auth`. If it returns `None`, that run has no Google Workspace tools; it never falls back to `GOOGLE_ACCESS_TOKEN`.
+The function is called at the start of each run, so each run connects as its own user. If it returns `None`, that run has no Google Workspace tools; it never falls back to `GOOGLE_ACCESS_TOKEN`.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Google" button in your web app. Look the token up before the run, for example with `await`, and put it in the deps; the function only reads it.
+Your app gets each user's token, stores it, and refreshes it. For example, a "Connect Google" button that signs them in with Google OAuth, saves the refresh token to their account, and exchanges it for a fresh access token when the old one expires. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
 With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `GoogleWorkspace` to an agent, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same.
 
@@ -66,7 +68,7 @@ With durable execution such as Temporal, read the credential from the run's deps
 
 `services` selects one product or a list: `gmail`, `drive`, `docs`, `sheets`, `slides`, `calendar`, `chat`, or `people`. Tool names start with the product, such as `gmail_search_threads`.
 
-Register a Google OAuth client yourself and request the scopes the selected products need; Google does not support automatic client registration. To have tokens refreshed for you, pass an `httpx.Auth` that refreshes them.
+Register a Google OAuth client yourself and request the scopes the selected products need; Google does not support automatic client registration. Access tokens expire after about an hour, so refresh them in your app.
 
 ## Tool selection and approval
 
