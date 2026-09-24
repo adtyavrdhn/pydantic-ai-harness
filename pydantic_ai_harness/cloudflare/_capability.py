@@ -79,7 +79,7 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Use Cloudflare API, product, and documentation tools.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
-    """A Cloudflare API token or a function of the run context that returns one.
+    """A Cloudflare API token, `'oauth'` to sign in through the browser locally, or a function of the run context that returns a token.
 
     Unset, it uses `CLOUDFLARE_API_TOKEN`. A function never does: if it returns `None` or `''`, that run has no
     Cloudflare tools. Public servers connect without a credential when neither is set.
@@ -115,6 +115,9 @@ class Cloudflare(AbstractCapability[AgentDepsT]):
 
     def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
         auth = self.auth(ctx) if callable(self.auth) else self.auth
+        if auth == 'oauth':
+            # FastMCP reads 'oauth' as "log in through a browser", which would hang a server run.
+            raise UserError("The `auth` function must return an API key or token, not 'oauth'.")
         return self._connect(auth) if auth else None
 
     def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:

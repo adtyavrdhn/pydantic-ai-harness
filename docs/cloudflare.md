@@ -10,7 +10,7 @@ Let an agent use Cloudflare's API, product, and documentation tools. `Cloudflare
 pip/uv-add "pydantic-ai-harness[cloudflare]" "pydantic-ai-slim[openai]"
 ```
 
-Set `CLOUDFLARE_API_TOKEN` to a Cloudflare API token, or pass `auth=` a token. See the [provider setup](https://github.com/cloudflare/mcp).
+Set `CLOUDFLARE_API_TOKEN` to a Cloudflare API token, or pass `auth=` a token. On your own machine, `auth='oauth'` signs you in through the browser instead. See the [provider setup](https://github.com/cloudflare/mcp).
 
 ```python
 from pydantic_ai import Agent
@@ -29,7 +29,8 @@ print(result.output)
 | --- | --- |
 | Not set, `None`, or `''` | `CLOUDFLARE_API_TOKEN`. If that is not set either, public servers such as the documentation server connect without a credential, and any other server raises an error when the agent is created. |
 | A token | That token, for every run. |
-| A function | Called at the start of each run. The token it returns is used for that run. If it returns `None` or `''`, that run has no Cloudflare tools, even on a public server. A function never uses `CLOUDFLARE_API_TOKEN`. |
+| `'oauth'` | The account you sign in to through the browser. This only works on your own machine. |
+| A function | Called at the start of each run. The token it returns is used for that run. If it returns `None` or `''`, that run has no Cloudflare tools, even on a public server. A function never uses `CLOUDFLARE_API_TOKEN`, and must not return `'oauth'`. |
 
 A fixed token or `CLOUDFLARE_API_TOKEN` suits a script or an agent on your own machine, where every run is the same account.
 
