@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -10,7 +10,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import credential, is_read_only
+from pydantic_ai_harness._mcp import credential, is_read_only, one_connection
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -19,11 +19,15 @@ except ImportError as exc:  # pragma: no cover
 
 from urllib.parse import urlencode
 
+_ID = 'supabase'
+
 
 @dataclass(kw_only=True)
 class Supabase(AbstractCapability[AgentDepsT]):
     """Give the agent the tools of Supabase's hosted MCP server."""
 
+    id: str | None = _ID
+    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `Supabase` on one agent its own."""
     description: str | None = 'Use Supabase project and account tools.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
     """A Supabase personal access token, `'oauth'` to sign in through the browser locally, or a function of the run context that returns a token.
@@ -53,9 +57,14 @@ class Supabase(AbstractCapability[AgentDepsT]):
                 '`client` owns the connection, so it cannot be combined with `auth`, `project_ref`, or `features`.'
             )
 
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """Two `Supabase`s under one `id` are the same connection stated twice, or an error if they differ."""
+        return one_connection(capabilities)
+
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the Supabase MCP toolset."""
-        id = self.id or 'supabase'
+        id = self.id or _ID
         if self.client is not None:
             toolset: AbstractToolset[AgentDepsT] = MCPToolset(
                 self.client, id=id, include_instructions=self.include_instructions
@@ -84,7 +93,7 @@ class Supabase(AbstractCapability[AgentDepsT]):
             query['read_only'] = 'true'
         return MCPToolset(
             'https://mcp.supabase.com/mcp' + ('?' + urlencode(query) if query else ''),
-            id=self.id or 'supabase',
+            id=self.id or _ID,
             auth=credential(auth, env='SUPABASE_ACCESS_TOKEN', service='Supabase'),
             headers=None,
             include_instructions=self.include_instructions,
