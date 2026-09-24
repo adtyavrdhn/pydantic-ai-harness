@@ -27,21 +27,21 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
+# The `mcp` SDK's server, not FastMCP's: the slim install has only the FastMCP client.
 _SERVER = """
 import asyncio, socket, uvicorn
-from fastmcp import FastMCP
-from fastmcp.server.dependencies import get_http_headers
+from mcp.server.fastmcp import Context, FastMCP
 
-mcp = FastMCP('whoami')
+mcp = FastMCP('whoami', stateless_http=True)
 
 @mcp.tool()
-async def whoami() -> str:
+async def whoami(ctx: Context) -> str:
     await asyncio.sleep(0.05)  # keep concurrent runs overlapping
-    return get_http_headers(include={'authorization'})['authorization']
+    return ctx.request_context.request.headers['authorization']
 
 server_socket = socket.create_server(('127.0.0.1', 0))
 print(server_socket.getsockname()[1], flush=True)
-uvicorn.run(mcp.http_app(stateless_http=True), fd=server_socket.fileno(), log_level='warning')
+uvicorn.run(mcp.streamable_http_app(), fd=server_socket.fileno(), log_level='warning')
 """
 
 
