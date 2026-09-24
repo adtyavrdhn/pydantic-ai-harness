@@ -20,27 +20,26 @@ except ImportError as exc:  # pragma: no cover
 
 @dataclass(kw_only=True)
 class Notion(AbstractCapability[AgentDepsT]):
-    """Use Notion's hosted tools with the permissions of the connected user."""
+    """Give the agent the tools of Notion's hosted MCP server, with the permissions of the connected user."""
 
     description: str | None = 'Search and change Notion workspace content.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """OAuth access token, `'oauth'`, HTTP authentication, or a callable that returns one for each run.
+    """A Notion OAuth access token, `'oauth'`, an `httpx.Auth`, or a function of the run context that returns the current user's credential.
 
-    Unset, it defaults to `NOTION_ACCESS_TOKEN`, then OAuth. A callable receives the run context, so each
-    run can connect with its own user's credential from `ctx.deps`; returning `None` omits the tools.
+    Unset, it uses `NOTION_ACCESS_TOKEN`, then browser login. If the function returns `None`, that run has no Notion tools.
     """
     read_only: bool = False
-    """Expose only tools the server marks read-only; unmarked tools are omitted."""
+    """Keep only the tools the server marks as read-only."""
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
     client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Override the connection with a caller-configured MCP client or transport, or a callable that returns one for each run.
+    """Your own FastMCP client or transport, or a function of the run context that returns one.
 
-    The supplied client owns its URL, authentication, and server configuration.
+    The client owns the URL, authentication, and server settings.
     """
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
-        """Build the Notion connection and optional read-only selection."""
+        """Return the Notion MCP toolset."""
         id = self.id or 'notion'
         if self.client is not None:
             toolset: AbstractToolset[AgentDepsT] = per_run_client(self.client, self._from_client, id=id)
