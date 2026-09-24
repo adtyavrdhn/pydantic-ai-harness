@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
 import httpx
@@ -11,6 +10,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
@@ -130,35 +130,10 @@ class TestNotion:
     def test_hosted_endpoint(self) -> None:
         assert transport(Notion(auth='token')).url == 'https://mcp.notion.com/mcp'
 
-    @pytest.mark.parametrize('configured_auth', [None, 'oauth'])
-    async def test_oauth_registers_public_client(
-        self, monkeypatch: pytest.MonkeyPatch, configured_auth: str | None
-    ) -> None:
+    def test_missing_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('NOTION_ACCESS_TOKEN', raising=False)
-        with pytest.warns(UserWarning, match='in-memory token storage'):
-            auth = transport(Notion(auth=configured_auth)).auth
-        assert isinstance(auth, httpx.Auth)
-        flow = auth.async_auth_flow(httpx.Request('POST', 'https://mcp.notion.com/mcp'))
-        try:
-            request = await anext(flow)
-            for status, metadata in [
-                (401, {}),
-                (200, {'resource': 'https://mcp.notion.com/mcp', 'authorization_servers': ['https://mcp.notion.com']}),
-                (
-                    200,
-                    {
-                        'issuer': 'https://mcp.notion.com',
-                        'authorization_endpoint': 'https://mcp.notion.com/authorize',
-                        'token_endpoint': 'https://mcp.notion.com/token',
-                        'registration_endpoint': 'https://mcp.notion.com/register',
-                        'response_types_supported': ['code'],
-                    },
-                ),
-            ]:
-                request = await flow.asend(httpx.Response(status, json=metadata, request=request))  # codespell:ignore
-            assert json.loads(request.content)['token_endpoint_auth_method'] == 'none'
-        finally:
-            await flow.aclose()
+        with pytest.raises(UserError, match='Set `NOTION_ACCESS_TOKEN`'):
+            Notion().get_toolset()
 
 
 class TestPerRunAuth:

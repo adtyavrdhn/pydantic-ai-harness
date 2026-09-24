@@ -6,13 +6,13 @@ from dataclasses import dataclass, field
 from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
 from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, is_read_only, per_run_auth, per_run_client
 
 try:
-    from fastmcp.client.auth import OAuth
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
 except ImportError as exc:  # pragma: no cover
     raise ImportError('Install Notion support with: uv add "pydantic-ai-harness[notion]"') from exc
@@ -24,9 +24,9 @@ class Notion(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Search and change Notion workspace content.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """A Notion OAuth access token, `'oauth'`, an `httpx.Auth`, or a function of the run context that returns the current user's credential.
+    """A Notion OAuth access token, an `httpx.Auth`, or a function of the run context that returns one.
 
-    Unset, it uses `NOTION_ACCESS_TOKEN`, then browser login. If the function returns `None`, that run has no Notion tools.
+    Unset, it uses `NOTION_ACCESS_TOKEN`. If the function returns `None`, that run has no Notion tools.
     """
     read_only: bool = False
     """Keep only the tools the server marks as read-only."""
@@ -53,13 +53,14 @@ class Notion(AbstractCapability[AgentDepsT]):
         return MCPToolset(client, id=self.id or 'notion', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
-        resolved = auth if auth is not None else environ.get('NOTION_ACCESS_TOKEN', 'oauth')
+        if auth is None:
+            auth = environ.get('NOTION_ACCESS_TOKEN')
+        if auth is None:
+            raise UserError('Set `NOTION_ACCESS_TOKEN` or pass `auth` to connect to Notion.')
         return MCPToolset(
             'https://mcp.notion.com/mcp',
             id=self.id or 'notion',
-            auth=OAuth(additional_client_metadata={'token_endpoint_auth_method': 'none'})
-            if resolved == 'oauth'
-            else resolved,
+            auth=auth,
             headers=None,
             include_instructions=self.include_instructions,
         )

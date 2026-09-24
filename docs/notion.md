@@ -10,7 +10,7 @@ Let an agent search and change content in a Notion workspace. `Notion` gives the
 pip/uv-add "pydantic-ai-harness[notion]" "pydantic-ai-slim[openai]"
 ```
 
-Set `NOTION_ACCESS_TOKEN` to a Notion OAuth access token, or pass `auth=` a token or an `httpx.Auth`. With neither, the agent opens a browser so you can log in to Notion, which only works when you run it on your own machine. See the [provider setup](https://developers.notion.com/guides/mcp/build-mcp-client).
+Set `NOTION_ACCESS_TOKEN` to a Notion OAuth access token, or pass `auth=` a token or an `httpx.Auth`. See the [provider setup](https://developers.notion.com/guides/mcp/build-mcp-client).
 
 ```python
 from pydantic_ai import Agent
@@ -23,7 +23,7 @@ print(result.output)
 
 ## Per-user credentials
 
-A token, `NOTION_ACCESS_TOKEN`, and browser login all connect every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
+A token or `NOTION_ACCESS_TOKEN` connects every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -44,9 +44,9 @@ def notion_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Notion(auth=notion_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a Notion OAuth access token or an `httpx.Auth`. If it returns `None`, that run has no Notion tools; it never falls back to `NOTION_ACCESS_TOKEN` or browser login. `read_only` applies to every user.
+The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a Notion OAuth access token or an `httpx.Auth`. If it returns `None`, that run has no Notion tools; it never falls back to `NOTION_ACCESS_TOKEN`. `read_only` applies to every user.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Notion" OAuth flow in your web app. The function only reads the current token. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Notion" button in your web app. The function only reads the current token.
 
 `client` also accepts a function. It returns the FastMCP client or transport for the current run, or `None` for no Notion tools.
 
@@ -54,7 +54,7 @@ With durable execution such as Temporal, read the credential from the run's deps
 
 ## Provider settings
 
-Connect with browser login or a Notion OAuth access token. Notion integration tokens are a different kind of credential and do not work with the hosted MCP server. Notion decides which pages and tools the user can reach. Some search and connected-source tools need a matching Notion plan and permissions.
+Connect with a Notion OAuth access token. Notion integration tokens are a different kind of credential and do not work with the hosted MCP server. Notion decides which pages and tools the user can reach. Some search and connected-source tools need a matching Notion plan and permissions.
 
 ## Tool selection and approval
 
@@ -79,7 +79,7 @@ Handle the approval requests with the [deferred tools workflow](/ai/tools-toolse
 
 ## Connection customization
 
-Pass `client` to use your own FastMCP client or transport, for example one with custom OAuth token storage. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` still applies. `include_instructions=False` stops the server's instructions from reaching the model.
+Pass `client` to use your own FastMCP client or transport, for example one with custom authentication or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` still applies. `include_instructions=False` stops the server's instructions from reaching the model.
 
 A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](/ai/capabilities/prefix-tools/).
 
