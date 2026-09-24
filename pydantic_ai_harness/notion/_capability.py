@@ -25,7 +25,8 @@ class Notion(AbstractCapability[AgentDepsT]):
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
     """A Notion OAuth access token or a function of the run context that returns one.
 
-    Unset, it uses `NOTION_ACCESS_TOKEN`. If the function returns `None`, that run has no Notion tools.
+    Unset, it uses `NOTION_ACCESS_TOKEN`. A function never does: if it returns `None` or `''`, that run has no
+    Notion tools.
     """
     read_only: bool = False
     """Keep only the tools the server marks as read-only."""
@@ -52,7 +53,7 @@ class Notion(AbstractCapability[AgentDepsT]):
 
     def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
         auth = self.auth(ctx) if callable(self.auth) else self.auth
-        return None if auth is None else self._connect(auth)
+        return self._connect(auth) if auth else None
 
     def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
