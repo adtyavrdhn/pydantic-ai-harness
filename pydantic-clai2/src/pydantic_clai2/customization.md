@@ -385,6 +385,11 @@ bare command opens at once instead of queueing behind the running turn. While
 run_worker runs, CLAI holds the turn's output and prints it in order afterwards.
 Only opt in when the running turn cannot observe what the menu changes.
 
+Pass live=True to Command for a slow handler that only prints, such as /compact,
+so the editor stays live while it runs: the working spinner shows, Esc or Ctrl-C
+cancels it, and Enter queues a follow-up. Leave it off for anything that reads
+keys or opens a menu; those need the suspended editor.
+
 For named validated fields, reuse FieldSource, FieldMenu and run_flow in
 field_menu.py rather than write another editor. SettingsSource in set_menu.py
 shows the adapter; model_menu.py uses the same editor for model settings. Tests

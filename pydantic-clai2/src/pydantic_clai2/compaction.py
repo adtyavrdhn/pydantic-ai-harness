@@ -111,5 +111,6 @@ def activate(host: PluginHost[None]) -> None:
             name='compact',
             description='Compact the conversation so far; add words to say what the summary must keep',
             handler=compact,
+            live=True,
         )
     )

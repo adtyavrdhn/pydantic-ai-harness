@@ -56,6 +56,13 @@ class Command:
     take effect on the next turn. The run's output is held while the menu owns the screen.
     With arguments the command still queues, keeping its order among queued follow-ups.
     """
+    live: bool = False
+    """Keep the editor live while the handler runs, as it is during a turn.
+
+    The working spinner shows, Esc or Ctrl-C cancels, and Enter queues a follow-up. Only for
+    handlers that may take a while and only print through the console: one that reads keys or
+    opens a menu needs the suspended editor every other command gets.
+    """
 
 
 class Commands(Completer):
@@ -107,6 +114,12 @@ class Commands(Completer):
             return False
         command = self._commands.get(words[0][1:])
         return command is not None and command.during_turn
+
+    def runs_live(self, text: str) -> bool:
+        """Whether `text` names a command that keeps the editor live while it runs."""
+        parts = text.removeprefix('/').split(maxsplit=1)
+        command = self._commands.get(parts[0]) if parts else None
+        return command is not None and command.live
 
     async def execute_async(self, text: str) -> str:
         """Await asynchronous plugin commands without blocking the event loop."""

@@ -660,11 +660,7 @@ class _Shell(Generic[DepsT, OutputT]):
                     return 'exit'
                 continue
             if is_command_input(text):
-                async with self.forks.busy(), self._released():
-                    await self.interrupts.run(
-                        _execute_command(self.commands, text, console=self.console, status=self.status)
-                    )
-                if text == '/exit' or self.interrupts.exit_requested or self.reload_requested:
+                if await self._command(text):
                     return 'exit'
                 continue
             if self.session.model is None and self.agent.model is None:
@@ -678,6 +674,32 @@ class _Shell(Generic[DepsT, OutputT]):
             finally:
                 if self.editor is not None:
                     await self.editor.output.drain()
+
+    async def _command(self, text: str) -> bool:
+        """Run a slash command; true when the shell should exit.
+
+        A `live` command keeps the editor up, with its spinner and cancel keys, rather than
+        freezing the last frame while a slow handler such as `/compact` works.
+        """
+        if self.editor is None or not self.commands.runs_live(text):
+            async with self.forks.busy(), self._released():
+                await self.interrupts.run(
+                    _execute_command(self.commands, text, console=self.console, status=self.status)
+                )
+            return text == '/exit' or self.interrupts.exit_requested or self.reload_requested
+        async with self.forks.busy():
+            self.status.activity = 'working'
+            try:
+                completed = await self.interrupts.run(
+                    _execute_command(self.commands, text, console=self.console, status=self.status)
+                )
+            finally:
+                self.status.activity = 'ready'
+                await self.editor.output.drain()
+        if not completed:
+            self.console.print('Command cancelled.', style=theme.color(theme.MUTED))
+            self.console.print()
+        return self.interrupts.exit_requested
 
     async def _turn(self, text: str) -> bool:
         try:

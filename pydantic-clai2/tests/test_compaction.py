@@ -74,7 +74,9 @@ async def test_compact_sends_the_history_and_focus_to_the_summariser() -> None:
 
 
 async def test_compact_says_when_there_is_nothing_to_do() -> None:
-    assert await make_host().commands.execute_async('/compact') == 'Nothing to compact: the conversation is empty.'
+    host = make_host()
+    assert host.commands.runs_live('/compact'), 'a long summary must keep the spinner up and stay cancellable'
+    assert await host.commands.execute_async('/compact') == 'Nothing to compact: the conversation is empty.'
     short = Transcript(messages=[ModelRequest.user_text_prompt('hi')], model='test')
     host = make_host(short)
     with capture_run_messages() as summary_run:
