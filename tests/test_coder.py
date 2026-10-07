@@ -50,7 +50,6 @@ def test_coder_members_and_parameters(tmp_path: Path) -> None:
         'RepoContext',
         'SubAgents',
         'ClearToolResults',
-        'WarnNearLimits',
         '_BoundToolOutputs',
         'RepairToolArguments',
     ]
