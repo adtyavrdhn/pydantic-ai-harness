@@ -58,6 +58,40 @@ def markdown_style() -> RenderStyle:
     )
 
 
+_HYPERLINK = re.compile(r'(\x1b\]8;[^;\x1b]*;[^\x1b]*\x1b\\)')
+_URL = re.compile(r'https?://[^\s<>"\'`\x1b]*[^\s<>"\'`\x1b.,;:!?\]]')
+
+
+def link_urls(text: str) -> str:
+    """Make every URL outside an existing hyperlink an OSC 8 hyperlink.
+
+    Terminals only Cmd/Ctrl-click plain URLs they detect themselves, which fails once a
+    long URL wraps. That covers bare URLs and the `(url)` termflow prints after a link label.
+    """
+    parts = _HYPERLINK.split(text)
+    linked = False
+    for index, part in enumerate(parts):
+        if index % 2:
+            linked = bool(part[:-2].split(';', 2)[2])
+        elif not linked:
+            parts[index] = _URL.sub(_hyperlink, part)
+    return ''.join(parts)
+
+
+def _hyperlink(match: re.Match[str]) -> str:
+    url = match[0]
+    # A closing parenthesis ends the URL only when it closes one opened inside it, as in `(https://x/Foo_(bar))`.
+    while url.endswith(')') and url.count(')') > url.count('('):
+        url = url[:-1]
+    return f'\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\{match[0][len(url) :]}'
+
+
+class _Renderer(Renderer):
+    def _format_inline(self, text: str) -> str:
+        formatted: str = super()._format_inline(text)  # pyright: ignore[reportUnknownMemberType]
+        return link_urls(formatted) if self.features.hyperlinks else formatted  # pyright: ignore[reportUnknownMemberType]
+
+
 class LinkOutput(io.StringIO):
     """Scope streamed hyperlinks to each write so editor paints and aborts stay unlinked."""
 
@@ -199,7 +233,7 @@ class StreamRenderer:
         if self.console.is_terminal:
             self._writer = self._make_writer()
             self._writer.start()
-        self._renderer = Renderer(
+        self._renderer = _Renderer(
             output=self._writer or self.console.file,  # pyright: ignore[reportArgumentType]
             width=self.console.width,
             style=markdown_style(),

@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.text import Text
 
 from pydantic_clai2 import StreamRenderer
-from pydantic_clai2._rendering import LinkOutput
+from pydantic_clai2._rendering import LinkOutput, link_urls
 from pydantic_clai2.prompt_surface import PromptSurface
 
 URL = 'https://github.com/pydantic/pydantic-ai-harness/pull/1006'
@@ -39,8 +39,44 @@ async def test_markdown_link_labels(*, terminal: bool, thinking: bool) -> None:
     text = Text.from_ansi(value)
     assert 'PR #1006' in text.plain and URL in text.plain
     assert text.get_style_at_offset(console, text.plain.index('PR #1006')).link == (URL if terminal else None)
-    assert text.get_style_at_offset(console, text.plain.index(URL)).link is None
+    assert text.get_style_at_offset(console, text.plain.index(URL)).link == (URL if terminal else None)
     assert ('\x1b]8;' in value) is terminal
+
+
+@pytest.mark.parametrize('terminal', [False, True])
+async def test_bare_urls_are_clickable(*, terminal: bool) -> None:
+    """Cmd-click needs OSC 8: terminals miss plain URLs once they wrap."""
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=terminal, width=40)
+    renderer = StreamRenderer(console, stop_loading=lambda: None, smooth_seconds=0)
+    await renderer.on_stream_event(PartStartEvent(index=0, part=TextPart(f'- see {URL}, then `{URL}/files`.\n')))
+    await renderer.finish()
+    value = output.getvalue()
+    text = Text.from_ansi(value)
+    assert text.get_style_at_offset(console, text.plain.index(URL)).link == (URL if terminal else None)
+    files = text.plain.index(f'{URL}/files')
+    assert text.get_style_at_offset(console, files).link == (f'{URL}/files' if terminal else None)
+    assert text.get_style_at_offset(console, text.plain.index(', then')).link is None
+    assert ('\x1b]8;' in value) is terminal
+
+
+@pytest.mark.parametrize(
+    ('text', 'expected'),
+    [
+        ('(see https://en.wikipedia.org/wiki/Foo_(bar)).', 'https://en.wikipedia.org/wiki/Foo_(bar)'),
+        ('(https://example.com/a?b=1).', 'https://example.com/a?b=1'),
+        ('<https://example.com/auto>', 'https://example.com/auto'),
+    ],
+)
+def test_url_boundaries_leave_surrounding_punctuation_unlinked(text: str, expected: str) -> None:
+    linked = link_urls(text)
+    assert Text.from_ansi(linked).plain == text
+    assert linked.count('\x1b]8;;https://') == 1 and f'\x1b]8;;{expected}\x1b\\{expected}\x1b]8;;\x1b\\' in linked
+
+
+def test_existing_hyperlinks_are_not_nested() -> None:
+    text = f'{OPEN}{URL}{CLOSE} and http://'
+    assert link_urls(text) == text
 
 
 def test_each_smooth_chunk_closes_its_link() -> None:
