@@ -59,7 +59,11 @@ def markdown_style() -> RenderStyle:
 
 
 _HYPERLINK = re.compile(r'(\x1b\]8;[^;\x1b]*;[^\x1b]*\x1b\\)')
-_URL = re.compile(r'https?://[^\s<>"\'`\x1b]*[^\s<>"\'`\x1b.,;:!?\]]')
+_SGR = r'\x1b\[[0-9;]*m'
+# Inline formatting can style part of a URL, so a URL runs across SGR codes; they stay in the label only.
+_URL = re.compile(rf'https?://(?:[^\s<>"\'`\x1b]|{_SGR})+')
+_SGR_OR_CHAR = re.compile(rf'{_SGR}|.', re.DOTALL)
+_TRAILING_PUNCTUATION = frozenset('.,;:!?]')
 
 
 def link_urls(text: str) -> str:
@@ -79,11 +83,24 @@ def link_urls(text: str) -> str:
 
 
 def _hyperlink(match: re.Match[str]) -> str:
-    url = match[0]
-    # A closing parenthesis ends the URL only when it closes one opened inside it, as in `(https://x/Foo_(bar))`.
-    while url.endswith(')') and url.count(')') > url.count('('):
-        url = url[:-1]
-    return f'\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\{match[0][len(url) :]}'
+    text = match[0]
+    url = re.sub(_SGR, '', text)
+    end, unmatched = len(url), url.count(')') - url.count('(')
+    # Trailing punctuation ends a sentence, not the URL; a closing parenthesis belongs to the URL only
+    # when it closes one opened inside it, as in `(https://x/Foo_(bar)).`. One backward pass keeps it linear.
+    while end > 0 and (url[end - 1] in _TRAILING_PUNCTUATION or (url[end - 1] == ')' and unmatched > 0)):
+        unmatched -= url[end - 1] == ')'
+        end -= 1
+    url = url[:end]
+    if url.endswith('://'):
+        return text
+    visible = cut = 0
+    for token in _SGR_OR_CHAR.finditer(text):
+        if visible == end:
+            break
+        visible += not token[0].startswith('\x1b')
+        cut = token.end()
+    return f'\x1b]8;;{url}\x1b\\{text[:cut]}\x1b]8;;\x1b\\{text[cut:]}'
 
 
 class _Renderer(Renderer):

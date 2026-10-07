@@ -66,6 +66,7 @@ async def test_bare_urls_are_clickable(*, terminal: bool) -> None:
         ('(see https://en.wikipedia.org/wiki/Foo_(bar)).', 'https://en.wikipedia.org/wiki/Foo_(bar)'),
         ('(https://example.com/a?b=1).', 'https://example.com/a?b=1'),
         ('<https://example.com/auto>', 'https://example.com/auto'),
+        ('(see https://example.com/a.)', 'https://example.com/a'),
     ],
 )
 def test_url_boundaries_leave_surrounding_punctuation_unlinked(text: str, expected: str) -> None:
@@ -74,8 +75,29 @@ def test_url_boundaries_leave_surrounding_punctuation_unlinked(text: str, expect
     assert linked.count('\x1b]8;;https://') == 1 and f'\x1b]8;;{expected}\x1b\\{expected}\x1b]8;;\x1b\\' in linked
 
 
+async def test_a_url_styled_by_inline_markdown_links_whole() -> None:
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=True, width=120)
+    renderer = StreamRenderer(console, stop_loading=lambda: None, smooth_seconds=0)
+    await renderer.on_stream_event(PartStartEvent(index=0, part=TextPart('Open https://example.com/**foo**/bar.\n')))
+    await renderer.finish()
+    text = Text.from_ansi(output.getvalue())
+    url = 'https://example.com/foo/bar'
+    assert text.plain.startswith(f'Open {url}.')
+    links = {text.get_style_at_offset(console, offset).link for offset in range(5, 5 + len(url))}
+    assert links == {url}
+    assert text.get_style_at_offset(console, text.plain.index('foo')).bold
+    assert text.get_style_at_offset(console, 5 + len(url)).link is None
+
+
+def test_unbalanced_closing_parentheses_are_trimmed_in_one_pass() -> None:
+    url = 'https://example.com/a'
+    linked = link_urls(url + ')' * 100_000)
+    assert linked.startswith(f'\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\)')
+
+
 def test_existing_hyperlinks_are_not_nested() -> None:
-    text = f'{OPEN}{URL}{CLOSE} and http://'
+    text = f'{OPEN}{URL}{CLOSE} and http:// and https://).'
     assert link_urls(text) == text
 
 
